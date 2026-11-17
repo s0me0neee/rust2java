@@ -10,10 +10,12 @@ pub struct Printer {
     indent: usize,
     at_line_start: bool,
     comments: BTreeMap<u32, Vec<String>>,
+    // Collapse everything onto one line (for code moved out of its place).
+    flat: bool,
 }
 
 pub fn print_file(file: &JavaFile, comments: BTreeMap<u32, Vec<String>>, trailer: &str, last_line: u32) -> String {
-    let mut p = Printer { out: String::new(), line: 1, indent: 0, at_line_start: true, comments };
+    let mut p = Printer { out: String::new(), line: 1, indent: 0, at_line_start: true, comments, flat: false };
     p.word(&format!("package {};", file.package));
     for imp in &file.imports {
         p.word(&format!("import {imp};"));
@@ -40,8 +42,15 @@ pub fn print_file(file: &JavaFile, comments: BTreeMap<u32, Vec<String>>, trailer
 
 // Renders a standalone expression (for building raw statement text).
 pub fn render_expr(e: &Expr) -> String {
-    let mut p = Printer { out: String::new(), line: 0, indent: 0, at_line_start: false, comments: BTreeMap::new() };
+    let mut p = Printer { out: String::new(), line: 0, indent: 0, at_line_start: false, comments: BTreeMap::new(), flat: false };
     p.expr(e, 0);
+    p.out
+}
+
+// Renders a whole member on one line, for code that must move out of its Rust line.
+pub fn render_member_flat(m: &Member) -> String {
+    let mut p = Printer { out: String::new(), line: 0, indent: 0, at_line_start: true, comments: BTreeMap::new(), flat: true };
+    p.member(m);
     p.out
 }
 
@@ -114,6 +123,9 @@ impl Printer {
     }
 
     pub fn goto(&mut self, line: u32) {
+        if self.flat {
+            return;
+        }
         while self.line < line {
             self.newline();
         }
@@ -276,6 +288,7 @@ impl Printer {
             indent: self.indent,
             at_line_start: false,
             comments: BTreeMap::new(),
+            flat: self.flat,
         };
         sub.expr(e, min_prec);
         self.line = sub.line;
@@ -374,7 +387,8 @@ impl Printer {
             if i > 0 {
                 self.out.push_str(", ");
             }
-            self.expr(a, 1);
+            // Lambdas are already delimited by their parameter list.
+            self.expr(a, if matches!(a, Expr::Lambda { .. }) { 0 } else { 1 });
         }
         self.out.push(')');
     }

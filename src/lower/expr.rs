@@ -225,7 +225,7 @@ pub fn lower_path_expr(cx: &mut Cx, p: &ast::PathExpr) -> Expr {
     let Some(path) = p.path() else { return Expr::raw("null") };
     let text = path.syntax().text().to_string();
     if text == "self" {
-        return Expr::raw("this");
+        return Expr::raw(cx.self_name.clone());
     }
     match cx.sema.resolve_path(&path) {
         Some(PathResolution::Local(local)) => {
@@ -233,7 +233,7 @@ pub fn lower_path_expr(cx: &mut Cx, p: &ast::PathExpr) -> Expr {
             Expr::name(cx.lookup(&name))
         }
         Some(PathResolution::Def(def)) => items::lower_def_path(cx, &path, def),
-        Some(PathResolution::SelfType(_)) => Expr::raw(cx.class_name.clone()),
+        Some(PathResolution::SelfType(_)) => Expr::raw(cx.self_ty_java.clone()),
         _ => cx.unsupported(p.syntax(), &format!("path `{text}`")),
     }
 }
@@ -423,7 +423,14 @@ fn lower_prefix(cx: &mut Cx, p: &ast::PrefixExpr, out: &mut Vec<Stmt>) -> Expr {
                 Expr::Unary("~", Box::new(v))
             }
         }
-        Some(ast::UnaryOp::Deref) => super::calls::deref_place(cx, &inner, v),
+        Some(ast::UnaryOp::Deref) => {
+            if let Ty::Ref { mutable: true, inner: t } = &ty
+                && (t.is_primitive() || t.is_str())
+            {
+                return cx.unsupported(p.syntax(), "deref of a `&mut` primitive/String (cell)");
+            }
+            super::calls::deref_place(cx, &inner, v)
+        }
         None => cx.unsupported(p.syntax(), "prefix operator"),
     }
 }
@@ -440,7 +447,8 @@ fn lower_field(cx: &mut Cx, f: &ast::FieldExpr, out: &mut Vec<Stmt>) -> Expr {
         return Expr::Field(Box::new(b), format!("_{i}"));
     }
     let name = f.name_ref().map(|n| n.text().to_string()).unwrap_or_default();
-    Expr::Field(Box::new(b), super::escape_keyword(&name))
+    let name = if !name.is_empty() && name.chars().all(|c| c.is_ascii_digit()) { format!("_{name}") } else { super::escape_keyword(&name) };
+    Expr::Field(Box::new(b), name)
 }
 
 pub fn tuple_field(b: Expr, i: usize, arity: usize) -> Expr {
@@ -491,7 +499,8 @@ fn lower_cast(cx: &mut Cx, c: &ast::CastExpr, out: &mut Vec<Stmt>) -> Expr {
     }
     match (&from, &to) {
         (Ty::Bool, Ty::Int(_)) => Expr::Ternary(Box::new(v), Box::new(Expr::raw("1")), Box::new(Expr::raw("0"))),
-        (Ty::Adt { .. }, Ty::Int(_)) => Expr::call(v, "ordinal", vec![]),
+        // Plain enums carry their Rust discriminant in a `value` field.
+        (Ty::Adt { .. }, Ty::Int(_)) => Expr::Field(Box::new(v), "value".into()),
         // Widening int->long/double is implicit in Java but explicit casts read closer to Rust.
         _ => Expr::Cast(to.java(), Box::new(v)),
     }

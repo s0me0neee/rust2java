@@ -32,6 +32,12 @@ pub struct Cx<'a, 'db> {
     pub db: &'db RootDatabase,
     pub module: Module,
     pub class_name: String,
+    // Java name of `Self` while lowering an impl/trait body (defaults to the module class).
+    pub self_ty_java: String,
+    // What `self` means in the body being lowered (`this`, or a parameter of a static method).
+    pub self_name: String,
+    // Inside an `impl Display` body: `?` on `write!` is dropped.
+    pub in_display: bool,
     line_starts: Vec<u32>,
     pub imports: BTreeSet<String>,
     pub diags: Vec<Diag>,
@@ -63,6 +69,15 @@ pub struct LoopFrame {
     pub is_block: bool,
 }
 
+// Method-scoped state, saved while lowering a nested item (a local `fn`).
+pub struct MethodState {
+    scopes: Vec<HashMap<String, String>>,
+    method_names: HashSet<String>,
+    ret_ty: Option<Ty>,
+    loops: Vec<LoopFrame>,
+    switch_depth: u32,
+}
+
 pub struct Lowered {
     pub file: JavaFile,
     pub comments: BTreeMap<u32, Vec<String>>,
@@ -86,6 +101,9 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         db: sema.db,
         module: unit.module,
         class_name: unit.class_name.clone(),
+        self_ty_java: unit.class_name.clone(),
+        self_name: "this".into(),
+        in_display: false,
         line_starts,
         imports: BTreeSet::new(),
         diags: Vec::new(),
@@ -218,6 +236,24 @@ impl<'a, 'db> Cx<'a, 'db> {
         self.scopes = vec![HashMap::new()];
         self.method_names.clear();
         self.tmp_counter = 0;
+    }
+
+    pub fn save_method_state(&mut self) -> MethodState {
+        MethodState {
+            scopes: std::mem::take(&mut self.scopes),
+            method_names: std::mem::take(&mut self.method_names),
+            ret_ty: self.ret_ty.take(),
+            loops: std::mem::take(&mut self.loops),
+            switch_depth: std::mem::replace(&mut self.switch_depth, 0),
+        }
+    }
+
+    pub fn restore_method_state(&mut self, saved: MethodState) {
+        self.scopes = saved.scopes;
+        self.method_names = saved.method_names;
+        self.ret_ty = saved.ret_ty;
+        self.loops = saved.loops;
+        self.switch_depth = saved.switch_depth;
     }
 
     pub fn push_scope(&mut self) {
