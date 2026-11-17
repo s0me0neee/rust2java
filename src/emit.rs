@@ -29,7 +29,12 @@ pub fn print_file(
     trailer: &str,
     last_line: u32,
 ) -> (String, LineReport) {
-    let mut p = Printer { line: 1, at_line_start: true, comments, ..Default::default() };
+    let mut p = Printer {
+        line: 1,
+        at_line_start: true,
+        comments,
+        ..Default::default()
+    };
     p.word(&format!("package {};", file.package));
     for imp in &file.imports {
         p.word(&format!("import {imp};"));
@@ -63,7 +68,11 @@ pub fn render_expr(e: &Expr) -> String {
 
 // Renders a whole member on one line, for code that must move out of its Rust line.
 pub fn render_member_flat(m: &Member) -> String {
-    let mut p = Printer { at_line_start: true, flat: true, ..Default::default() };
+    let mut p = Printer {
+        at_line_start: true,
+        flat: true,
+        ..Default::default()
+    };
     p.member(m);
     p.out
 }
@@ -231,12 +240,22 @@ impl Printer {
                 self.word(&format!("while ({c})"));
                 self.block(body);
             }
-            StmtKind::For { label, header, body } => {
+            StmtKind::For {
+                label,
+                header,
+                body,
+            } => {
                 self.label(label);
                 self.word(&format!("for ({header})"));
                 self.block(body);
             }
-            StmtKind::ForEach { label, ty, name, iter, body } => {
+            StmtKind::ForEach {
+                label,
+                ty,
+                name,
+                iter,
+                body,
+            } => {
                 self.label(label);
                 let it = self.expr_str(iter, 0);
                 self.word(&format!("for ({ty} {name} : {it})"));
@@ -280,7 +299,11 @@ impl Printer {
 
     fn arm(&mut self, a: &Arm, is_expr: bool) {
         self.goto(a.line);
-        let label = if a.label == "default" { "default".to_string() } else { format!("case {}", a.label) };
+        let label = if a.label == "default" {
+            "default".to_string()
+        } else {
+            format!("case {}", a.label)
+        };
         match &a.body {
             ArmBody::Expr(e) => {
                 let e = self.expr_str(e, 0);
@@ -300,7 +323,12 @@ impl Printer {
 
     // Renders an expression; nested blocks (lambdas, switch expressions) advance lines as needed.
     fn expr_str(&mut self, e: &Expr, min_prec: u8) -> String {
-        let mut sub = Printer { line: self.line, indent: self.indent, flat: self.flat, ..Default::default() };
+        let mut sub = Printer {
+            line: self.line,
+            indent: self.indent,
+            flat: self.flat,
+            ..Default::default()
+        };
         sub.expr(e, min_prec);
         // Newlines inside the rendered text are counted again when the caller pushes it.
         sub.out

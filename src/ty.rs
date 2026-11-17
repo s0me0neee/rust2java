@@ -38,7 +38,10 @@ impl Int {
     }
 
     pub fn is_unsigned(self) -> bool {
-        matches!(self, Int::U8 | Int::U16 | Int::U32 | Int::U64 | Int::U128 | Int::Usize)
+        matches!(
+            self,
+            Int::U8 | Int::U16 | Int::U32 | Int::U64 | Int::U128 | Int::Usize
+        )
     }
 
     pub fn java(self) -> &'static str {
@@ -74,19 +77,36 @@ pub enum Ty {
     Str,
     // `Vec<T>`, `[T; N]`, `[T]`
     Vec(Box<Ty>),
-    Map { ordered: bool, k: Box<Ty>, v: Box<Ty> },
-    Set { ordered: bool, t: Box<Ty> },
+    Map {
+        ordered: bool,
+        k: Box<Ty>,
+        v: Box<Ty>,
+    },
+    Set {
+        ordered: bool,
+        t: Box<Ty>,
+    },
     Deque(Box<Ty>),
     Heap(Box<Ty>),
     Option(Box<Ty>),
     Result(Box<Ty>, Box<Ty>),
     Tuple(Vec<Ty>),
-    Ref { mutable: bool, inner: Box<Ty> },
+    Ref {
+        mutable: bool,
+        inner: Box<Ty>,
+    },
     // A type defined in the transpiled crate. `java` is its Java name as seen from the current file.
-    Adt { name: String, java: String, args: Vec<Ty> },
+    Adt {
+        name: String,
+        java: String,
+        args: Vec<Ty>,
+    },
     // Anything implementing `Iterator`, with its item type.
     Iter(Box<Ty>),
-    Fn { params: Vec<Ty>, ret: Box<Ty> },
+    Fn {
+        params: Vec<Ty>,
+        ret: Box<Ty>,
+    },
     Ordering,
     Param(String),
     // Unsupported or unknown; carries Rust's rendering for diagnostics.
@@ -154,7 +174,11 @@ impl Ty {
                 v.boxed()
             ),
             Ty::Set { ordered, t } => {
-                format!("{}<{}>", if *ordered { "TreeSet" } else { "HashSet" }, t.boxed())
+                format!(
+                    "{}<{}>",
+                    if *ordered { "TreeSet" } else { "HashSet" },
+                    t.boxed()
+                )
             }
             Ty::Deque(t) => format!("ArrayDeque<{}>", t.boxed()),
             Ty::Heap(t) => format!("PriorityQueue<{}>", t.boxed()),
@@ -187,9 +211,12 @@ impl Ty {
     pub fn is_nameable(&self) -> bool {
         match self {
             Ty::Other(_) | Ty::Never => false,
-            Ty::Vec(t) | Ty::Set { t, .. } | Ty::Deque(t) | Ty::Heap(t) | Ty::Option(t) | Ty::Iter(t) => {
-                t.is_nameable()
-            }
+            Ty::Vec(t)
+            | Ty::Set { t, .. }
+            | Ty::Deque(t)
+            | Ty::Heap(t)
+            | Ty::Option(t)
+            | Ty::Iter(t) => t.is_nameable(),
             Ty::Map { k, v, .. } | Ty::Result(k, v) => k.is_nameable() && v.is_nameable(),
             Ty::Tuple(ts) => ts.iter().all(Ty::is_nameable),
             Ty::Ref { inner, .. } => inner.is_nameable(),
@@ -218,7 +245,12 @@ fn fn_interface(params: &[Ty], ret: &Ty) -> String {
         (1, true) => format!("Consumer<{}>", b(&params[0])),
         (1, false) => format!("Function<{}, {}>", b(&params[0]), b(ret)),
         (2, true) => format!("BiConsumer<{}, {}>", b(&params[0]), b(&params[1])),
-        (2, false) => format!("BiFunction<{}, {}, {}>", b(&params[0]), b(&params[1]), b(ret)),
+        (2, false) => format!(
+            "BiFunction<{}, {}, {}>",
+            b(&params[0]),
+            b(&params[1]),
+            b(ret)
+        ),
         (n, _) => format!(
             "Fn{}<{}, {}>",
             n,

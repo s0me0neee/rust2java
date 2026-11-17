@@ -7,8 +7,8 @@ pub mod items;
 pub mod iter;
 pub mod macros;
 pub mod pat;
-pub mod stmt;
 pub mod std_map;
+pub mod stmt;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -154,7 +154,10 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
 
 fn collect_comments(cx: &Cx, root: &SyntaxNode) -> BTreeMap<u32, Vec<String>> {
     let mut map: BTreeMap<u32, Vec<String>> = BTreeMap::new();
-    for tok in root.descendants_with_tokens().filter_map(|e| e.into_token()) {
+    for tok in root
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+    {
         if tok.kind() == SyntaxKind::COMMENT {
             let line = cx.line_of_offset(tok.text_range().start().into());
             map.entry(line).or_default().push(tok.text().to_string());
@@ -235,14 +238,22 @@ impl<'a, 'db> Cx<'a, 'db> {
     pub fn unsupported(&mut self, node: &SyntaxNode, what: &str) -> Expr {
         let line = self.line(node);
         let col = self.col(node);
-        self.diags.push(Diag { line, col, msg: format!("unsupported: {what}") });
+        self.diags.push(Diag {
+            line,
+            col,
+            msg: format!("unsupported: {what}"),
+        });
         Expr::raw(format!("/* unsupported: {what} */ null"))
     }
 
     pub fn error(&mut self, node: &SyntaxNode, msg: impl Into<String>) {
         let line = self.line(node);
         let col = self.col(node);
-        self.diags.push(Diag { line, col, msg: msg.into() });
+        self.diags.push(Diag {
+            line,
+            col,
+            msg: msg.into(),
+        });
     }
 
     // --- naming -------------------------------------------------------------------------
@@ -257,7 +268,9 @@ impl<'a, 'db> Cx<'a, 'db> {
     }
 
     pub fn local_of_path(&self, e: &ast::Expr) -> Option<ra_ap_hir::Local<'db>> {
-        let ast::Expr::PathExpr(pe) = strip_parens(e) else { return None };
+        let ast::Expr::PathExpr(pe) = strip_parens(e) else {
+            return None;
+        };
         match self.sema.resolve_path(&pe.path()?) {
             Some(ra_ap_hir::PathResolution::Local(l)) => Some(l),
             _ => None,
@@ -272,12 +285,25 @@ impl<'a, 'db> Cx<'a, 'db> {
         if !is_cell_value_ty(ty) {
             return false;
         }
-        let Some(local) = self.sema.to_def(ip) else { return false };
-        let Some(scope) = ip.syntax().ancestors().find(|n| ast::Fn::can_cast(n.kind())) else { return false };
+        let Some(local) = self.sema.to_def(ip) else {
+            return false;
+        };
+        let Some(scope) = ip
+            .syntax()
+            .ancestors()
+            .find(|n| ast::Fn::can_cast(n.kind()))
+        else {
+            return false;
+        };
         let is_mut = ip.mut_token().is_some();
-        for pe in self.expanded_descendants(&scope).into_iter().filter_map(ast::PathExpr::cast) {
+        for pe in self
+            .expanded_descendants(&scope)
+            .into_iter()
+            .filter_map(ast::PathExpr::cast)
+        {
             let Some(path) = pe.path() else { continue };
-            if !matches!(self.sema.resolve_path(&path), Some(ra_ap_hir::PathResolution::Local(l)) if l == local) {
+            if !matches!(self.sema.resolve_path(&path), Some(ra_ap_hir::PathResolution::Local(l)) if l == local)
+            {
                 continue;
             }
             let borrowed_mut = pe
@@ -290,7 +316,11 @@ impl<'a, 'db> Cx<'a, 'db> {
                 .ancestors()
                 .take_while(|n| *n != scope)
                 .filter_map(ast::ClosureExpr::cast)
-                .any(|c| !c.syntax().text_range().contains_range(ip.syntax().text_range()));
+                .any(|c| {
+                    !c.syntax()
+                        .text_range()
+                        .contains_range(ip.syntax().text_range())
+                });
             if borrowed_mut || (is_mut && in_closure) {
                 return true;
             }
@@ -300,8 +330,16 @@ impl<'a, 'db> Cx<'a, 'db> {
 
     // Whether any closure (not containing the binding itself) refers to this binding.
     pub fn binding_captured(&self, ip: &ast::IdentPat) -> bool {
-        let Some(local) = self.sema.to_def(ip) else { return false };
-        let Some(scope) = ip.syntax().ancestors().find(|n| ast::Fn::can_cast(n.kind())) else { return false };
+        let Some(local) = self.sema.to_def(ip) else {
+            return false;
+        };
+        let Some(scope) = ip
+            .syntax()
+            .ancestors()
+            .find(|n| ast::Fn::can_cast(n.kind()))
+        else {
+            return false;
+        };
         self.expanded_descendants(&scope).into_iter().filter_map(ast::ClosureExpr::cast).any(|c| {
             !c.syntax().text_range().contains_range(ip.syntax().text_range())
                 && self.expanded_descendants(c.syntax()).into_iter().filter_map(ast::PathExpr::cast).any(|pe| {
@@ -338,7 +376,9 @@ impl<'a, 'db> Cx<'a, 'db> {
 
     // Java name of the cell array if `e` is a path to a cell local.
     pub fn cell_path(&self, e: &ast::Expr) -> Option<String> {
-        let ast::Expr::PathExpr(pe) = e else { return None };
+        let ast::Expr::PathExpr(pe) = e else {
+            return None;
+        };
         match self.sema.resolve_path(&pe.path()?) {
             Some(ra_ap_hir::PathResolution::Local(l)) if self.cells.contains(&l) => {
                 Some(self.lookup(l.name(self.db).as_str()))
@@ -437,27 +477,96 @@ impl<'a, 'db> Cx<'a, 'db> {
 
 pub fn strip_parens(e: &ast::Expr) -> ast::Expr {
     match e {
-        ast::Expr::ParenExpr(p) => p.expr().map(|i| strip_parens(&i)).unwrap_or_else(|| e.clone()),
+        ast::Expr::ParenExpr(p) => p
+            .expr()
+            .map(|i| strip_parens(&i))
+            .unwrap_or_else(|| e.clone()),
         _ => e.clone(),
     }
 }
 
 // Types whose Java representation is immutable, so `&mut` needs a cell.
 pub fn is_cell_value_ty(ty: &Ty) -> bool {
-    matches!(ty.strip_refs(), Ty::Bool | Ty::Char | Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Str)
+    matches!(
+        ty.strip_refs(),
+        Ty::Bool | Ty::Char | Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Str
+    )
 }
 
 const JAVA_KEYWORDS: &[&str] = &[
-    "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class", "const",
-    "continue", "default", "do", "double", "else", "enum", "extends", "final", "finally", "float",
-    "for", "goto", "if", "implements", "import", "instanceof", "int", "interface", "long", "native",
-    "new", "package", "private", "protected", "public", "return", "short", "static", "strictfp",
-    "super", "switch", "synchronized", "this", "throw", "throws", "transient", "try", "void",
-    "volatile", "while", "true", "false", "null", "var", "record", "yield", "sealed", "permits",
-    "String", "Object", "Integer", "Long", "Double", "List", "Map", "Optional",
+    "abstract",
+    "assert",
+    "boolean",
+    "break",
+    "byte",
+    "case",
+    "catch",
+    "char",
+    "class",
+    "const",
+    "continue",
+    "default",
+    "do",
+    "double",
+    "else",
+    "enum",
+    "extends",
+    "final",
+    "finally",
+    "float",
+    "for",
+    "goto",
+    "if",
+    "implements",
+    "import",
+    "instanceof",
+    "int",
+    "interface",
+    "long",
+    "native",
+    "new",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "return",
+    "short",
+    "static",
+    "strictfp",
+    "super",
+    "switch",
+    "synchronized",
+    "this",
+    "throw",
+    "throws",
+    "transient",
+    "try",
+    "void",
+    "volatile",
+    "while",
+    "true",
+    "false",
+    "null",
+    "var",
+    "record",
+    "yield",
+    "sealed",
+    "permits",
+    "String",
+    "Object",
+    "Integer",
+    "Long",
+    "Double",
+    "List",
+    "Map",
+    "Optional",
 ];
 
 pub fn escape_keyword(s: &str) -> String {
     let s = s.strip_prefix("r#").unwrap_or(s);
-    if JAVA_KEYWORDS.contains(&s) { format!("{s}_") } else { s.to_string() }
+    if JAVA_KEYWORDS.contains(&s) {
+        format!("{s}_")
+    } else {
+        s.to_string()
+    }
 }

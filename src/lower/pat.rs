@@ -39,11 +39,19 @@ enum Mode {
 
 // Lowers an `if`/`while` condition. Bindings introduced by `let` patterns are pushed to `binds`
 // (placed at the start of the body); statements needed before the test go to `out`.
-pub fn lower_condition(cx: &mut Cx, cond: &ast::Expr, out: &mut Vec<Stmt>, binds: &mut Vec<Stmt>) -> Expr {
+pub fn lower_condition(
+    cx: &mut Cx,
+    cond: &ast::Expr,
+    out: &mut Vec<Stmt>,
+    binds: &mut Vec<Stmt>,
+) -> Expr {
     if !expr::contains_let(cond) {
         return expr::lower_expr(cx, cond, out);
     }
-    let in_while = cond.syntax().parent().is_some_and(|p| ast::WhileExpr::can_cast(p.kind()));
+    let in_while = cond
+        .syntax()
+        .parent()
+        .is_some_and(|p| ast::WhileExpr::can_cast(p.kind()));
     let mode = if in_while { Mode::Extract } else { Mode::If };
     let parts = flatten_and(cond);
     let mut tests: Vec<Expr> = Vec::new();
@@ -59,7 +67,9 @@ pub fn lower_condition(cx: &mut Cx, cond: &ast::Expr, out: &mut Vec<Stmt>, binds
             continue;
         };
         // `while let Some(x) = v.pop()`: test emptiness, pop in the body.
-        if i + 1 == parts.len() && let Some((cond, bind)) = pop_idiom(cx, &p, &init) {
+        if i + 1 == parts.len()
+            && let Some((cond, bind)) = pop_idiom(cx, &p, &init)
+        {
             tests.push(cond);
             all.extend(bind);
             continue;
@@ -88,7 +98,13 @@ pub fn lower_condition(cx: &mut Cx, cond: &ast::Expr, out: &mut Vec<Stmt>, binds
 }
 
 // Value for one `let` component of a chain, evaluated exactly once.
-fn chain_value(cx: &mut Cx, init: &ast::Expr, first: bool, out: &mut Vec<Stmt>, tests: &mut Vec<Expr>) -> Expr {
+fn chain_value(
+    cx: &mut Cx,
+    init: &ast::Expr,
+    first: bool,
+    out: &mut Vec<Stmt>,
+    tests: &mut Vec<Expr>,
+) -> Expr {
     let line = cx.line(init.syntax());
     let v = expr::lower_expr(cx, init, out);
     let ty = cx.ty(init);
@@ -97,12 +113,26 @@ fn chain_value(cx: &mut Cx, init: &ast::Expr, first: bool, out: &mut Vec<Stmt>, 
     }
     if first {
         let tmp = cx.fresh("val");
-        out.push(Stmt::new(line, StmtKind::Local { ty: stmt::decl_type(&ty), name: tmp.clone(), init: Some(v) }));
+        out.push(Stmt::new(
+            line,
+            StmtKind::Local {
+                ty: stmt::decl_type(&ty),
+                name: tmp.clone(),
+                init: Some(v),
+            },
+        ));
         return Expr::name(tmp);
     }
     // Later components must stay inside the test: earlier components may guard this one.
     let tmp = cx.fresh("val");
-    out.push(Stmt::new(line, StmtKind::Local { ty: stmt::decl_type_explicit(&ty), name: tmp.clone(), init: None }));
+    out.push(Stmt::new(
+        line,
+        StmtKind::Local {
+            ty: stmt::decl_type_explicit(&ty),
+            name: tmp.clone(),
+            init: None,
+        },
+    ));
     let assign = Expr::Assign(Box::new(Expr::name(tmp.clone())), "=", Box::new(v));
     tests.push(assign_test(assign, &ty));
     Expr::name(tmp)
@@ -129,27 +159,36 @@ fn is_place(e: &Expr) -> bool {
 fn flatten_and(e: &ast::Expr) -> Vec<ast::Expr> {
     use ast::{BinaryOp, LogicOp};
     match e {
-        ast::Expr::BinExpr(b) if matches!(b.op_kind(), Some(BinaryOp::LogicOp(LogicOp::And))) => match (b.lhs(), b.rhs()) {
-            (Some(l), Some(r)) => {
-                let mut parts = flatten_and(&l);
-                parts.extend(flatten_and(&r));
-                parts
+        ast::Expr::BinExpr(b) if matches!(b.op_kind(), Some(BinaryOp::LogicOp(LogicOp::And))) => {
+            match (b.lhs(), b.rhs()) {
+                (Some(l), Some(r)) => {
+                    let mut parts = flatten_and(&l);
+                    parts.extend(flatten_and(&r));
+                    parts
+                }
+                _ => vec![e.clone()],
             }
-            _ => vec![e.clone()],
-        },
-        ast::Expr::ParenExpr(p) => p.expr().map(|i| flatten_and(&i)).unwrap_or_else(|| vec![e.clone()]),
+        }
+        ast::Expr::ParenExpr(p) => p
+            .expr()
+            .map(|i| flatten_and(&i))
+            .unwrap_or_else(|| vec![e.clone()]),
         _ => vec![e.clone()],
     }
 }
 
 // `while let Some(x) = v.pop()` -> `while (!v.isEmpty()) { var x = v.removeLast(); ... }`.
 fn pop_idiom(cx: &mut Cx, p: &ast::Pat, init: &ast::Expr) -> Option<(Expr, Option<Bind>)> {
-    let ast::Pat::TupleStructPat(tp) = p else { return None };
+    let ast::Pat::TupleStructPat(tp) = p else {
+        return None;
+    };
     if !matches!(cx.pat_ty(p).strip_refs(), Ty::Option(_)) {
         return None;
     }
     let inner: ast::Pat = tp.fields().next()?;
-    let ast::Expr::MethodCallExpr(m) = init else { return None };
+    let ast::Expr::MethodCallExpr(m) = init else {
+        return None;
+    };
     let recv_ast = m.receiver()?;
     let rty = cx.ty(&recv_ast);
     let pop = match (rty.strip_refs(), m.name_ref()?.text().to_string().as_str()) {
@@ -204,7 +243,11 @@ pub fn lower_let_else(cx: &mut Cx, l: &ast::LetStmt, out: &mut Vec<Stmt>) {
     let diverge = stmt::lower_block(cx, &else_block, &Dest::Discard);
     out.push(Stmt::new(
         line,
-        StmtKind::If { cond: Expr::Unary("!", Box::new(cond)), then: diverge, els: None },
+        StmtKind::If {
+            cond: Expr::Unary("!", Box::new(cond)),
+            then: diverge,
+            els: None,
+        },
     ));
     emit_binds(&lowered.binds, out);
 }
@@ -230,7 +273,10 @@ pub fn bind_pattern(cx: &mut Cx, p: &ast::Pat, value: Expr, out: &mut Vec<Stmt>)
     let conds = lower_pat(cx, p, value, Mode::Extract, &mut lowered);
     if !conds.is_empty() {
         // Param/closure patterns are irrefutable; a test here means an unsupported construct.
-        cx.error(p.syntax(), "pattern needs a test but only bindings are allowed here");
+        cx.error(
+            p.syntax(),
+            "pattern needs a test but only bindings are allowed here",
+        );
     }
     emit_binds(&lowered.binds, out);
 }
@@ -241,7 +287,14 @@ pub fn pattern_test(cx: &mut Cx, p: &ast::Pat, scrut: Expr, out: &mut Vec<Stmt>)
         scrut
     } else {
         let tmp = cx.fresh("m");
-        out.push(Stmt::new(cx.line(p.syntax()), StmtKind::Local { ty: "var".into(), name: tmp.clone(), init: Some(scrut) }));
+        out.push(Stmt::new(
+            cx.line(p.syntax()),
+            StmtKind::Local {
+                ty: "var".into(),
+                name: tmp.clone(),
+                init: Some(scrut),
+            },
+        ));
         Expr::name(tmp)
     };
     let mut lowered = PatLowering::default();
@@ -250,12 +303,25 @@ pub fn pattern_test(cx: &mut Cx, p: &ast::Pat, scrut: Expr, out: &mut Vec<Stmt>)
 }
 
 // `matches!(v, pat if guard)`: the guard sees the pattern's bindings, all inside one expression.
-pub fn guarded_pattern_test(cx: &mut Cx, p: &ast::Pat, g: &ast::MatchGuard, scrut: Expr, out: &mut Vec<Stmt>) -> Expr {
+pub fn guarded_pattern_test(
+    cx: &mut Cx,
+    p: &ast::Pat,
+    g: &ast::MatchGuard,
+    scrut: Expr,
+    out: &mut Vec<Stmt>,
+) -> Expr {
     let value = if is_place(&scrut) {
         scrut
     } else {
         let tmp = cx.fresh("m");
-        out.push(Stmt::new(cx.line(p.syntax()), StmtKind::Local { ty: "var".into(), name: tmp.clone(), init: Some(scrut) }));
+        out.push(Stmt::new(
+            cx.line(p.syntax()),
+            StmtKind::Local {
+                ty: "var".into(),
+                name: tmp.clone(),
+                init: Some(scrut),
+            },
+        ));
         Expr::name(tmp)
     };
     let mut lowered = PatLowering::default();
@@ -263,7 +329,10 @@ pub fn guarded_pattern_test(cx: &mut Cx, p: &ast::Pat, g: &ast::MatchGuard, scru
     let mut pre = Vec::new();
     conds.push(lower_guard(cx, g, &mut pre, &lowered));
     if !pre.is_empty() {
-        cx.error(g.syntax(), "matches! guard needs hoisted statements (e.g. `?`)");
+        cx.error(
+            g.syntax(),
+            "matches! guard needs hoisted statements (e.g. `?`)",
+        );
     }
     and(conds).unwrap_or(Expr::raw("true"))
 }
@@ -274,12 +343,22 @@ pub fn lower_match_stmt(cx: &mut Cx, m: &ast::MatchExpr, dest: &Dest, out: &mut 
     let line = cx.line(m.syntax());
     if let Dest::Yield = dest {
         if let Some(e) = try_match_expr(cx, m, out) {
-            out.push(Stmt::new(line, StmtKind::Raw(format!("yield {};", crate::emit::render_expr(&e)))));
+            out.push(Stmt::new(
+                line,
+                StmtKind::Raw(format!("yield {};", crate::emit::render_expr(&e))),
+            ));
             return;
         }
         let ty = cx.ty(&ast::Expr::MatchExpr(m.clone()));
         let tmp = cx.fresh("arm_value");
-        out.push(Stmt::new(line, StmtKind::Local { ty: stmt::decl_type_explicit(&ty), name: tmp.clone(), init: None }));
+        out.push(Stmt::new(
+            line,
+            StmtKind::Local {
+                ty: stmt::decl_type_explicit(&ty),
+                name: tmp.clone(),
+                init: None,
+            },
+        ));
         lower_match_stmt(cx, m, &Dest::Assign(tmp.clone()), out);
         out.push(Stmt::new(line, StmtKind::Raw(format!("yield {tmp};"))));
         return;
@@ -301,7 +380,10 @@ pub fn lower_match_stmt(cx: &mut Cx, m: &ast::MatchExpr, dest: &Dest, out: &mut 
         d => d.clone(),
     };
     // A single irrefutable arm is just a binding followed by the body.
-    if arms.len() == 1 && arms[0].guard().is_none() && arms[0].pat().is_some_and(|p| is_total(cx, &p)) {
+    if arms.len() == 1
+        && arms[0].guard().is_none()
+        && arms[0].pat().is_some_and(|p| is_total(cx, &p))
+    {
         bound_match(cx, &scrut, &arms[0], &arm_dest, out);
         return;
     }
@@ -322,7 +404,10 @@ pub fn try_match_expr(cx: &mut Cx, m: &ast::MatchExpr, out: &mut Vec<Stmt>) -> O
     if arms.is_empty() || !can_switch(cx, &arms, &cx.ty(&scrut)) {
         return None;
     }
-    if arms.iter().any(|a| a.expr().is_some_and(|b| !arm_body_safe(&b))) {
+    if arms
+        .iter()
+        .any(|a| a.expr().is_some_and(|b| !arm_body_safe(&b)))
+    {
         return None;
     }
     let value = place(cx, &scrut, out);
@@ -349,12 +434,26 @@ pub fn try_match_expr(cx: &mut Cx, m: &ast::MatchExpr, out: &mut Vec<Stmt>) -> O
             None => ArmBody::Block(Block::default()),
         };
         cx.pop_scope();
-        jarms.push(Arm { line: aline, label, body });
+        jarms.push(Arm {
+            line: aline,
+            label,
+            body,
+        });
     }
-    Some(Expr::Switch { scrut: Box::new(value), arms: jarms })
+    Some(Expr::Switch {
+        scrut: Box::new(value),
+        arms: jarms,
+    })
 }
 
-fn lower_switch_stmt(cx: &mut Cx, scrut: &ast::Expr, arms: &[ast::MatchArm], dest: &Dest, out: &mut Vec<Stmt>, line: u32) {
+fn lower_switch_stmt(
+    cx: &mut Cx,
+    scrut: &ast::Expr,
+    arms: &[ast::MatchArm],
+    dest: &Dest,
+    out: &mut Vec<Stmt>,
+    line: u32,
+) {
     let value = place(cx, scrut, out);
     let mut jarms = Vec::new();
     // A `break` in an arm body would leave the switch, not the enclosing loop.
@@ -381,27 +480,48 @@ fn lower_switch_stmt(cx: &mut Cx, scrut: &ast::Expr, arms: &[ast::MatchArm], des
             None => ArmBody::Block(Block::default()),
         };
         cx.pop_scope();
-        jarms.push(Arm { line: aline, label, body });
+        jarms.push(Arm {
+            line: aline,
+            label,
+            body,
+        });
     }
     cx.switch_depth -= 1;
     // javac does not treat an all-constant enum switch as exhaustive: it needs a way out.
     let needs_escape = matches!(dest, Dest::Assign(_))
         || matches!(dest, Dest::Return) && cx.ret_ty.as_ref().is_some_and(|t| !t.is_unit());
-    let constants_only = jarms.iter().all(|a| a.label != "default" && !a.label.contains('('));
+    let constants_only = jarms
+        .iter()
+        .all(|a| a.label != "default" && !a.label.contains('('));
     let escape = (needs_escape && constants_only).then(|| {
-        Stmt::new(line, StmtKind::Throw(Expr::New {
-            ty: "IllegalStateException".into(),
-            args: vec![Expr::str_lit("unreachable")],
-        }))
+        Stmt::new(
+            line,
+            StmtKind::Throw(Expr::New {
+                ty: "IllegalStateException".into(),
+                args: vec![Expr::str_lit("unreachable")],
+            }),
+        )
     });
-    out.push(Stmt::new(line, StmtKind::Switch { scrut: value, arms: jarms }));
+    out.push(Stmt::new(
+        line,
+        StmtKind::Switch {
+            scrut: value,
+            arms: jarms,
+        },
+    ));
     if let Some(e) = escape {
         out.push(e);
     }
 }
 
 // Single irrefutable arm: bindings, then the body.
-fn bound_match(cx: &mut Cx, scrut: &ast::Expr, arm: &ast::MatchArm, dest: &Dest, out: &mut Vec<Stmt>) {
+fn bound_match(
+    cx: &mut Cx,
+    scrut: &ast::Expr,
+    arm: &ast::MatchArm,
+    dest: &Dest,
+    out: &mut Vec<Stmt>,
+) {
     let value = place(cx, scrut, out);
     cx.push_scope();
     let mut lowered = PatLowering::default();
@@ -419,7 +539,10 @@ fn guard_text(cx: &mut Cx, g: &ast::MatchGuard, binds: &PatLowering) -> String {
     let mut pre = Vec::new();
     let e = lower_guard(cx, g, &mut pre, binds);
     if !pre.is_empty() {
-        cx.error(g.syntax(), "match guard needs hoisted statements (e.g. `?`)");
+        cx.error(
+            g.syntax(),
+            "match guard needs hoisted statements (e.g. `?`)",
+        );
     }
     crate::emit::render_expr(&e)
 }
@@ -440,7 +563,13 @@ fn lower_guard(cx: &mut Cx, g: &ast::MatchGuard, pre: &mut Vec<Stmt>, binds: &Pa
 }
 
 // If/else-if chain on a temporary: anything Java's switch cannot express.
-fn lower_chain(cx: &mut Cx, scrut: &ast::Expr, arms: &[ast::MatchArm], dest: &Dest, out: &mut Vec<Stmt>) {
+fn lower_chain(
+    cx: &mut Cx,
+    scrut: &ast::Expr,
+    arms: &[ast::MatchArm],
+    dest: &Dest,
+    out: &mut Vec<Stmt>,
+) {
     let end = arms
         .iter()
         .position(|a| a.guard().is_none() && a.pat().is_some_and(|p| is_total(cx, &p)))
@@ -487,9 +616,16 @@ fn lower_chain(cx: &mut Cx, scrut: &ast::Expr, arms: &[ast::MatchArm], dest: &De
         els = Some(match and(conds) {
             Some(cond) => Box::new(Stmt::new(
                 aline,
-                StmtKind::If { cond, then: Block { stmts, close_line }, els: els.take() },
+                StmtKind::If {
+                    cond,
+                    then: Block { stmts, close_line },
+                    els: els.take(),
+                },
             )),
-            None => Box::new(Stmt::new(aline, StmtKind::Block(Block { stmts, close_line }))),
+            None => Box::new(Stmt::new(
+                aline,
+                StmtKind::Block(Block { stmts, close_line }),
+            )),
         });
     }
     if let Some(e) = els {
@@ -497,7 +633,13 @@ fn lower_chain(cx: &mut Cx, scrut: &ast::Expr, arms: &[ast::MatchArm], dest: &De
     }
 }
 
-fn arm_body_stmt(cx: &mut Cx, body: &ast::Expr, dest: &Dest, line: u32, binds: &PatLowering) -> ArmBody {
+fn arm_body_stmt(
+    cx: &mut Cx,
+    body: &ast::Expr,
+    dest: &Dest,
+    line: u32,
+    binds: &PatLowering,
+) -> ArmBody {
     let mut stmts = Vec::new();
     emit_binds(&binds.binds, &mut stmts);
     stmt::lower_to_dest(cx, body, dest, &mut stmts);
@@ -507,7 +649,10 @@ fn arm_body_stmt(cx: &mut Cx, body: &ast::Expr, dest: &Dest, line: u32, binds: &
             StmtKind::Throw(e) => ArmBody::Throw(e),
             StmtKind::Expr(e) if e.is_statement_expr() => ArmBody::Expr(e),
             StmtKind::Block(b) => ArmBody::Block(b),
-            kind => ArmBody::Block(Block { stmts: vec![Stmt::new(line, kind)], close_line }),
+            kind => ArmBody::Block(Block {
+                stmts: vec![Stmt::new(line, kind)],
+                close_line,
+            }),
         },
         _ => ArmBody::Block(Block { stmts, close_line }),
     }
@@ -530,7 +675,8 @@ fn arm_body_expr(cx: &mut Cx, body: &ast::Expr, line: u32, binds: &PatLowering) 
             }
         };
     }
-    let yields = matches!(body, ast::Expr::MatchExpr(_) | ast::Expr::BlockExpr(_)) || stmt::is_control_flow(body);
+    let yields = matches!(body, ast::Expr::MatchExpr(_) | ast::Expr::BlockExpr(_))
+        || stmt::is_control_flow(body);
     let mut v = None;
     if yields {
         stmt::lower_to_dest(cx, body, &Dest::Yield, &mut stmts);
@@ -540,11 +686,16 @@ fn arm_body_expr(cx: &mut Cx, body: &ast::Expr, line: u32, binds: &PatLowering) 
         stmts.extend(pre);
         v = Some(e);
     }
-    if stmts.is_empty() && let Some(e) = v {
+    if stmts.is_empty()
+        && let Some(e) = v
+    {
         return ArmBody::Expr(e);
     }
     if let Some(e) = v {
-        stmts.push(Stmt::new(line, StmtKind::Raw(format!("yield {};", crate::emit::render_expr(&e)))));
+        stmts.push(Stmt::new(
+            line,
+            StmtKind::Raw(format!("yield {};", crate::emit::render_expr(&e))),
+        ));
     }
     block(stmts)
 }
@@ -616,9 +767,7 @@ fn constant_label(cx: &mut Cx, p: &ast::Pat) -> Option<String> {
     match p {
         ast::Pat::LiteralPat(lp) => literal_label(cx, lp, p),
         ast::Pat::PathPat(pp) => variant_constant(cx, resolve_path(cx, pp.path().as_ref()?)?),
-        ast::Pat::IdentPat(ip) => {
-            variant_constant(cx, PathResolution::Def(bind_pat_def(cx, ip)?))
-        }
+        ast::Pat::IdentPat(ip) => variant_constant(cx, PathResolution::Def(bind_pat_def(cx, ip)?)),
         ast::Pat::ParenPat(x) => constant_label(cx, &x.pat()?),
         _ => None,
     }
@@ -668,16 +817,21 @@ fn is_record_variant(cx: &Cx, def: ModuleDef) -> bool {
 
 // Unqualified enum constant for a multi-pattern case label.
 fn variant_constant(cx: &Cx, res: PathResolution) -> Option<String> {
-    let PathResolution::Def(ModuleDef::EnumVariant(v)) = res else { return None };
+    let PathResolution::Def(ModuleDef::EnumVariant(v)) = res else {
+        return None;
+    };
     let e = v.parent_enum(cx.db);
-    (local(cx, e.module(cx.db)) && items::enum_is_plain(cx, e)).then(|| escape_keyword(v.name(cx.db).as_str()))
+    (local(cx, e.module(cx.db)) && items::enum_is_plain(cx, e))
+        .then(|| escape_keyword(v.name(cx.db).as_str()))
 }
 
 fn def_label(cx: &mut Cx, p: &ast::Pat, res: PathResolution) -> Option<String> {
     if matches!(cx.pat_ty(p).strip_refs(), Ty::Option(_)) {
         return None;
     }
-    let PathResolution::Def(ModuleDef::EnumVariant(v)) = res else { return None };
+    let PathResolution::Def(ModuleDef::EnumVariant(v)) = res else {
+        return None;
+    };
     let e = v.parent_enum(cx.db);
     if local(cx, e.module(cx.db)) {
         if items::enum_is_plain(cx, e) {
@@ -692,7 +846,12 @@ fn def_label(cx: &mut Cx, p: &ast::Pat, res: PathResolution) -> Option<String> {
     }
 }
 
-fn variant_label(cx: &mut Cx, v: ra_ap_hir::EnumVariant, pats: &[FieldPat], declare: bool) -> Option<String> {
+fn variant_label(
+    cx: &mut Cx,
+    v: ra_ap_hir::EnumVariant,
+    pats: &[FieldPat],
+    declare: bool,
+) -> Option<String> {
     let ctor = variant_ctor(cx, v)?;
     let e = v.parent_enum(cx.db);
     if local(cx, e.module(cx.db)) && items::enum_is_plain(cx, e) {
@@ -714,11 +873,19 @@ struct FieldPat {
 fn component_text(cx: &mut Cx, fp: &FieldPat, declare: bool) -> Option<String> {
     match &fp.pat {
         None | Some(ast::Pat::WildcardPat(_)) | Some(ast::Pat::RestPat(_)) => {
-            let name = if declare { cx.fresh("unused") } else { "unused".to_string() };
+            let name = if declare {
+                cx.fresh("unused")
+            } else {
+                "unused".to_string()
+            };
             Some(format!("var {name}"))
         }
         Some(ast::Pat::IdentPat(ip)) if ip.pat().is_none() && bind_pat_def(cx, ip).is_none() => {
-            let name = if declare { cx.declare(&ident_name(ip)) } else { "x".to_string() };
+            let name = if declare {
+                cx.declare(&ident_name(ip))
+            } else {
+                "x".to_string()
+            };
             Some(format!("var {name}"))
         }
         Some(ast::Pat::IdentPat(_)) => None,
@@ -761,7 +928,11 @@ fn positional_pats(tp: &ast::TupleStructPat, n: usize) -> Vec<FieldPat> {
             after_rest = true;
             continue;
         }
-        if after_rest { post.push(f) } else { pre.push(f) }
+        if after_rest {
+            post.push(f)
+        } else {
+            pre.push(f)
+        }
     }
     let mut out: Vec<FieldPat> = vec![FieldPat::default(); n];
     for (i, f) in pre.into_iter().enumerate() {
@@ -781,7 +952,9 @@ fn positional_pats(tp: &ast::TupleStructPat, n: usize) -> Vec<FieldPat> {
 // Aligns `{ x, y, .. }` with the declared fields by name.
 fn record_pats(cx: &Cx, rp: &ast::RecordPat, fields: &[ra_ap_hir::Field]) -> Vec<FieldPat> {
     let mut out: Vec<FieldPat> = vec![FieldPat::default(); fields.len()];
-    let Some(list) = rp.record_pat_field_list() else { return out };
+    let Some(list) = rp.record_pat_field_list() else {
+        return out;
+    };
     for f in list.fields() {
         // `S { x }` has no name reference: the binder pattern names the field.
         let name = match f.name_ref() {
@@ -791,7 +964,9 @@ fn record_pats(cx: &Cx, rp: &ast::RecordPat, fields: &[ra_ap_hir::Field]) -> Vec
                 _ => continue,
             },
         };
-        let Some(i) = fields.iter().position(|d| d.name(cx.db).as_str() == name) else { continue };
+        let Some(i) = fields.iter().position(|d| d.name(cx.db).as_str() == name) else {
+            continue;
+        };
         out[i] = FieldPat { pat: f.pat() };
     }
     out
@@ -829,11 +1004,23 @@ fn is_result(cx: &Cx, e: ra_ap_hir::Enum) -> bool {
 
 // --- pattern lowering ------------------------------------------------------------------------
 
-fn lower_pat(cx: &mut Cx, p: &ast::Pat, value: Expr, mode: Mode, out: &mut PatLowering) -> Vec<Expr> {
+fn lower_pat(
+    cx: &mut Cx,
+    p: &ast::Pat,
+    value: Expr,
+    mode: Mode,
+    out: &mut PatLowering,
+) -> Vec<Expr> {
     match p {
         ast::Pat::WildcardPat(_) | ast::Pat::RestPat(_) => Vec::new(),
-        ast::Pat::ParenPat(x) => x.pat().map(|i| lower_pat(cx, &i, value, mode, out)).unwrap_or_default(),
-        ast::Pat::RefPat(x) => x.pat().map(|i| lower_pat(cx, &i, value, mode, out)).unwrap_or_default(),
+        ast::Pat::ParenPat(x) => x
+            .pat()
+            .map(|i| lower_pat(cx, &i, value, mode, out))
+            .unwrap_or_default(),
+        ast::Pat::RefPat(x) => x
+            .pat()
+            .map(|i| lower_pat(cx, &i, value, mode, out))
+            .unwrap_or_default(),
         ast::Pat::IdentPat(ip) => {
             if let Some(def) = bind_pat_def(cx, ip) {
                 return def_pat(cx, p, def, value);
@@ -843,7 +1030,14 @@ fn lower_pat(cx: &mut Cx, p: &ast::Pat, value: Expr, mode: Mode, out: &mut PatLo
                 let rust = ident_name(ip);
                 let java = cx.declare(&rust);
                 let ty = cx.pat_ty(p);
-                out.binds.push(Bind { line, rust, java, value: value.clone(), ty, extracted: true });
+                out.binds.push(Bind {
+                    line,
+                    rust,
+                    java,
+                    value: value.clone(),
+                    ty,
+                    extracted: true,
+                });
             }
             match ip.pat() {
                 Some(sub) => lower_pat(cx, &sub, value, mode, out),
@@ -871,7 +1065,11 @@ fn lower_pat(cx: &mut Cx, p: &ast::Pat, value: Expr, mode: Mode, out: &mut PatLo
             if let Some(bound) = rp.end() {
                 match literal_bound(cx, &bound, &ty) {
                     Some(end) => {
-                        let op = if rp.op_kind() == Some(ast::RangeOp::Inclusive) { "<=" } else { "<" };
+                        let op = if rp.op_kind() == Some(ast::RangeOp::Inclusive) {
+                            "<="
+                        } else {
+                            "<"
+                        };
                         conds.push(Expr::bin(value.clone(), op, end));
                     }
                     None => {
@@ -902,7 +1100,13 @@ fn lower_pat(cx: &mut Cx, p: &ast::Pat, value: Expr, mode: Mode, out: &mut PatLo
             };
             let mut conds = Vec::new();
             for (i, f) in tp.fields().enumerate() {
-                conds.extend(lower_pat(cx, &f, expr::tuple_field(value.clone(), i, arity), mode, out));
+                conds.extend(lower_pat(
+                    cx,
+                    &f,
+                    expr::tuple_field(value.clone(), i, arity),
+                    mode,
+                    out,
+                ));
             }
             conds
         }
@@ -918,7 +1122,9 @@ fn lower_pat(cx: &mut Cx, p: &ast::Pat, value: Expr, mode: Mode, out: &mut PatLo
 }
 
 fn ident_name(ip: &ast::IdentPat) -> String {
-    ip.name().map(|n| n.text().to_string()).unwrap_or_else(|| "_".into())
+    ip.name()
+        .map(|n| n.text().to_string())
+        .unwrap_or_else(|| "_".into())
 }
 
 fn literal_bound(cx: &mut Cx, p: &ast::Pat, ty: &Ty) -> Option<Expr> {
@@ -931,7 +1137,11 @@ fn literal_bound(cx: &mut Cx, p: &ast::Pat, ty: &Ty) -> Option<Expr> {
 fn pattern_literal(cx: &mut Cx, lp: &ast::LiteralPat, ty: &Ty) -> Option<Expr> {
     let lit = lp.literal()?;
     let e = expr::literal_expr(cx, &lit, ty);
-    Some(if lp.minus_token().is_some() { Expr::Unary("-", Box::new(e)) } else { e })
+    Some(if lp.minus_token().is_some() {
+        Expr::Unary("-", Box::new(e))
+    } else {
+        e
+    })
 }
 
 fn equality(value: Expr, lit: Expr, ty: &Ty) -> Expr {
@@ -946,12 +1156,25 @@ fn equality(value: Expr, lit: Expr, ty: &Ty) -> Expr {
     }
 }
 
-fn tuple_struct_pat(cx: &mut Cx, p: &ast::Pat, tp: &ast::TupleStructPat, value: Expr, mode: Mode, out: &mut PatLowering) -> Vec<Expr> {
+fn tuple_struct_pat(
+    cx: &mut Cx,
+    p: &ast::Pat,
+    tp: &ast::TupleStructPat,
+    value: Expr,
+    mode: Mode,
+    out: &mut PatLowering,
+) -> Vec<Expr> {
     let ty = cx.pat_ty(p);
     if let Ty::Option(_) = ty.strip_refs() {
         let mut conds = vec![Expr::call(value.clone(), "isPresent", vec![])];
         if let Some(inner) = tp.fields().next() {
-            conds.extend(lower_pat(cx, &inner, Expr::call(value, "get", vec![]), mode, out));
+            conds.extend(lower_pat(
+                cx,
+                &inner,
+                Expr::call(value, "get", vec![]),
+                mode,
+                out,
+            ));
         }
         return conds;
     }
@@ -983,7 +1206,14 @@ fn tuple_struct_pat(cx: &mut Cx, p: &ast::Pat, tp: &ast::TupleStructPat, value: 
     }
 }
 
-fn record_pat(cx: &mut Cx, p: &ast::Pat, rp: &ast::RecordPat, value: Expr, mode: Mode, out: &mut PatLowering) -> Vec<Expr> {
+fn record_pat(
+    cx: &mut Cx,
+    p: &ast::Pat,
+    rp: &ast::RecordPat,
+    value: Expr,
+    mode: Mode,
+    out: &mut PatLowering,
+) -> Vec<Expr> {
     let Some(path) = rp.path() else {
         cx.unsupported(p.syntax(), "record pattern without a path");
         return Vec::new();
@@ -998,7 +1228,9 @@ fn record_pat(cx: &mut Cx, p: &ast::Pat, rp: &ast::RecordPat, value: Expr, mode:
             let names = items::java_field_names(cx, &decl);
             let owner = items::adt_java_name(cx, Adt::Struct(s));
             let mut conds = Vec::new();
-            let Some(list) = rp.record_pat_field_list() else { return conds };
+            let Some(list) = rp.record_pat_field_list() else {
+                return conds;
+            };
             for f in list.fields() {
                 // `S { x }` has no name reference: the binder pattern names the field.
                 let name = match f.name_ref() {
@@ -1008,7 +1240,9 @@ fn record_pat(cx: &mut Cx, p: &ast::Pat, rp: &ast::RecordPat, value: Expr, mode:
                         _ => continue,
                     },
                 };
-                let Some(i) = decl.iter().position(|d| d.name(cx.db).as_str() == name) else { continue };
+                let Some(i) = decl.iter().position(|d| d.name(cx.db).as_str() == name) else {
+                    continue;
+                };
                 let Some(jname) = names.get(i) else { continue };
                 let Some(sub) = f.pat() else { continue };
                 let _ = field_ty(cx, &f).unwrap_or_else(|| cx.convert(&decl[i].ty(cx.db)));
@@ -1030,7 +1264,15 @@ fn field_ty(cx: &Cx, f: &ast::RecordPatField) -> Option<Ty> {
 }
 
 // One enum-variant arm: a record pattern in `if` conditions, type tests plus extraction elsewhere.
-fn variant_pat(cx: &mut Cx, p: &ast::Pat, v: ra_ap_hir::EnumVariant, pats: &[FieldPat], value: Expr, mode: Mode, out: &mut PatLowering) -> Vec<Expr> {
+fn variant_pat(
+    cx: &mut Cx,
+    p: &ast::Pat,
+    v: ra_ap_hir::EnumVariant,
+    pats: &[FieldPat],
+    value: Expr,
+    mode: Mode,
+    out: &mut PatLowering,
+) -> Vec<Expr> {
     let Some(ctor) = variant_ctor(cx, v) else {
         cx.unsupported(p.syntax(), "pattern on a non-local enum");
         return Vec::new();
@@ -1050,7 +1292,10 @@ fn variant_pat(cx: &mut Cx, p: &ast::Pat, v: ra_ap_hir::EnumVariant, pats: &[Fie
                 }
             });
         }
-        let mut all = vec![Expr::InstanceOf(Box::new(value), format!("{ctor}({})", comps.join(", ")))];
+        let mut all = vec![Expr::InstanceOf(
+            Box::new(value),
+            format!("{ctor}({})", comps.join(", ")),
+        )];
         all.append(&mut conds);
         return all;
     }
@@ -1065,7 +1310,11 @@ fn variant_pat(cx: &mut Cx, p: &ast::Pat, v: ra_ap_hir::EnumVariant, pats: &[Fie
             None => Ty::Other("?".into()),
         };
         let Some(sub) = &fp.pat else { continue };
-        let raw = Expr::call(Expr::Cast(ctor.clone(), Box::new(value.clone())), name.clone(), vec![]);
+        let raw = Expr::call(
+            Expr::Cast(ctor.clone(), Box::new(value.clone())),
+            name.clone(),
+            vec![],
+        );
         // The accessor runs on a raw record, so restore the component type for nested tests.
         let v = Expr::Cast(ty.boxed(), Box::new(raw));
         conds.extend(lower_pat(cx, sub, v, mode, out));
@@ -1088,7 +1337,10 @@ fn variant_field_names(cx: &Cx, v: ra_ap_hir::EnumVariant) -> Vec<String> {
 
 fn struct_field(value: &Expr, owner: &str, name: &str, mode: Mode) -> Expr {
     if mode == Mode::Extract {
-        Expr::Field(Box::new(Expr::Cast(owner.to_string(), Box::new(value.clone()))), name.to_string())
+        Expr::Field(
+            Box::new(Expr::Cast(owner.to_string(), Box::new(value.clone()))),
+            name.to_string(),
+        )
     } else {
         Expr::Field(Box::new(value.clone()), name.to_string())
     }
@@ -1119,12 +1371,22 @@ fn def_pat(cx: &mut Cx, p: &ast::Pat, def: ModuleDef, value: Expr) -> Vec<Expr> 
             let e = v.parent_enum(cx.db);
             if local(cx, e.module(cx.db)) {
                 if items::enum_is_plain(cx, e) {
-                    vec![Expr::bin(value, "==", Expr::raw(items::variant_java_name(cx, v)))]
+                    vec![Expr::bin(
+                        value,
+                        "==",
+                        Expr::raw(items::variant_java_name(cx, v)),
+                    )]
                 } else {
-                    vec![Expr::InstanceOf(Box::new(value), items::variant_java_name(cx, v))]
+                    vec![Expr::InstanceOf(
+                        Box::new(value),
+                        items::variant_java_name(cx, v),
+                    )]
                 }
             } else if is_result(cx, e) {
-                vec![Expr::InstanceOf(Box::new(value), escape_keyword(v.name(cx.db).as_str()))]
+                vec![Expr::InstanceOf(
+                    Box::new(value),
+                    escape_keyword(v.name(cx.db).as_str()),
+                )]
             } else {
                 cx.unsupported(p.syntax(), "pattern on a non-local enum");
                 Vec::new()
@@ -1133,9 +1395,16 @@ fn def_pat(cx: &mut Cx, p: &ast::Pat, def: ModuleDef, value: Expr) -> Vec<Expr> 
         // Unit struct: exactly one value, nothing to test.
         ModuleDef::Adt(Adt::Struct(_)) => Vec::new(),
         ModuleDef::Const(c) => {
-            let name = escape_keyword(c.name(cx.db).map(|n| n.as_str().to_string()).unwrap_or_default().as_str());
+            let name = escape_keyword(
+                c.name(cx.db)
+                    .map(|n| n.as_str().to_string())
+                    .unwrap_or_default()
+                    .as_str(),
+            );
             let qualified = match def.module(cx.db) {
-                Some(m) if m != cx.module => format!("{}.{name}", crate::frontend::module_class_name(cx.db, m)),
+                Some(m) if m != cx.module => {
+                    format!("{}.{name}", crate::frontend::module_class_name(cx.db, m))
+                }
                 _ => name,
             };
             vec![equality(value, Expr::raw(qualified), &ty)]
@@ -1170,7 +1439,11 @@ fn slice_pat(cx: &mut Cx, sp: &ast::SlicePat, value: Expr, out: &mut PatLowering
         }
         let from_end = rest.is_some_and(|r| i > r);
         let idx = if from_end {
-            Expr::bin(size(), "-", Expr::raw((post - (pats.len() - 1 - i)).to_string()))
+            Expr::bin(
+                size(),
+                "-",
+                Expr::raw((post - (pats.len() - 1 - i)).to_string()),
+            )
         } else {
             let at = before;
             before += 1;
@@ -1189,7 +1462,11 @@ fn slice_pat(cx: &mut Cx, sp: &ast::SlicePat, value: Expr, out: &mut PatLowering
         let java = cx.declare(&rust);
         let ty = cx.pat_ty(&pats[r]);
         let start = Expr::raw(pats[..r].iter().filter(|p| !is_rest(p)).count().to_string());
-        let end = if post == 0 { size() } else { Expr::bin(size(), "-", Expr::raw(post.to_string())) };
+        let end = if post == 0 {
+            size()
+        } else {
+            Expr::bin(size(), "-", Expr::raw(post.to_string()))
+        };
         out.binds.push(Bind {
             line,
             rust,
@@ -1252,25 +1529,33 @@ fn is_total(cx: &mut Cx, p: &ast::Pat) -> bool {
         ast::Pat::RefPat(x) => x.pat().is_some_and(|i| is_total(cx, &i)),
         ast::Pat::TuplePat(tp) => tp.fields().all(|f| is_total(cx, &f)),
         ast::Pat::TupleStructPat(tp) => {
-            tp.path().is_some_and(|path| is_struct(cx, &path)) && tp.fields().all(|f| is_total(cx, &f))
+            tp.path().is_some_and(|path| is_struct(cx, &path))
+                && tp.fields().all(|f| is_total(cx, &f))
         }
         ast::Pat::RecordPat(rp) => {
             rp.path().is_some_and(|path| is_struct(cx, &path))
-                && rp.record_pat_field_list().is_some_and(|l| {
-                    l.fields().all(|f| f.pat().is_none_or(|p| is_total(cx, &p)))
-                })
+                && rp
+                    .record_pat_field_list()
+                    .is_some_and(|l| l.fields().all(|f| f.pat().is_none_or(|p| is_total(cx, &p))))
         }
-        ast::Pat::PathPat(pp) => pp.path().is_some_and(|path| match cx.sema.resolve_path(&path) {
-            Some(PathResolution::Def(ModuleDef::Adt(Adt::Struct(s)))) => s.kind(cx.db) == StructKind::Unit,
-            _ => false,
-        }),
+        ast::Pat::PathPat(pp) => pp
+            .path()
+            .is_some_and(|path| match cx.sema.resolve_path(&path) {
+                Some(PathResolution::Def(ModuleDef::Adt(Adt::Struct(s)))) => {
+                    s.kind(cx.db) == StructKind::Unit
+                }
+                _ => false,
+            }),
         ast::Pat::OrPat(op) => op.pats().any(|p| is_total(cx, &p)),
         _ => false,
     }
 }
 
 fn is_struct(cx: &Cx, path: &ast::Path) -> bool {
-    matches!(cx.sema.resolve_path(path), Some(PathResolution::Def(ModuleDef::Adt(Adt::Struct(_)))))
+    matches!(
+        cx.sema.resolve_path(path),
+        Some(PathResolution::Def(ModuleDef::Adt(Adt::Struct(_))))
+    )
 }
 
 // --- `?` ------------------------------------------------------------------------------------
@@ -1295,7 +1580,15 @@ pub fn lower_try(cx: &mut Cx, t: &ast::TryExpr, out: &mut Vec<Stmt>) -> Expr {
     }
 }
 
-fn try_result(cx: &mut Cx, node: &ast::TryExpr, v: Expr, ok: &Ty, err: &Ty, line: u32, out: &mut Vec<Stmt>) -> Expr {
+fn try_result(
+    cx: &mut Cx,
+    node: &ast::TryExpr,
+    v: Expr,
+    ok: &Ty,
+    err: &Ty,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) -> Expr {
     cx.needs_result = true;
     let want = match cx.ret_ty.as_ref().map(|t| t.strip_refs()) {
         Some(Ty::Result(_, e)) => Some((**e).clone()),
@@ -1309,14 +1602,28 @@ fn try_result(cx: &mut Cx, node: &ast::TryExpr, v: Expr, ok: &Ty, err: &Ty, line
     let tmp = cx.fresh("ok_value");
     let unit = ok.is_unit();
     if !unit {
-        out.push(Stmt::new(line, StmtKind::Local { ty: stmt::decl_type_explicit(ok), name: tmp.clone(), init: None }));
+        out.push(Stmt::new(
+            line,
+            StmtKind::Local {
+                ty: stmt::decl_type_explicit(ok),
+                name: tmp.clone(),
+                init: None,
+            },
+        ));
     }
     let err_expr = if want == *err {
-        Expr::New { ty: "Err<>".into(), args: vec![Expr::name(err_name.clone())] }
+        Expr::New {
+            ty: "Err<>".into(),
+            args: vec![Expr::name(err_name.clone())],
+        }
     } else if want.is_nameable() && !want.is_unit() && !matches!(want, Ty::Param(_)) {
         Expr::New {
             ty: "Err<>".into(),
-            args: vec![Expr::call(Expr::raw(want.java()), "from", vec![Expr::name(err_name.clone())])],
+            args: vec![Expr::call(
+                Expr::raw(want.java()),
+                "from",
+                vec![Expr::name(err_name.clone())],
+            )],
         }
     } else {
         return cx.unsupported(node.syntax(), "`?` error type conversion");
@@ -1328,7 +1635,11 @@ fn try_result(cx: &mut Cx, node: &ast::TryExpr, v: Expr, ok: &Ty, err: &Ty, line
             body: if unit {
                 ArmBody::Block(Block::default())
             } else {
-                ArmBody::Expr(Expr::Assign(Box::new(Expr::name(tmp.clone())), "=", Box::new(Expr::name(ok_name))))
+                ArmBody::Expr(Expr::Assign(
+                    Box::new(Expr::name(tmp.clone())),
+                    "=",
+                    Box::new(Expr::name(ok_name)),
+                ))
             },
         },
         Arm {
@@ -1341,13 +1652,30 @@ fn try_result(cx: &mut Cx, node: &ast::TryExpr, v: Expr, ok: &Ty, err: &Ty, line
         },
     ];
     out.push(Stmt::new(line, StmtKind::Switch { scrut: v, arms }));
-    if unit { Expr::raw("null") } else { Expr::name(tmp) }
+    if unit {
+        Expr::raw("null")
+    } else {
+        Expr::name(tmp)
+    }
 }
 
-fn try_option(cx: &mut Cx, node: &ast::TryExpr, v: Expr, inner_ty: &Ty, line: u32, out: &mut Vec<Stmt>) -> Expr {
-    let is_option = matches!(cx.ret_ty.as_ref().map(|t| t.strip_refs()), Some(Ty::Option(_)));
+fn try_option(
+    cx: &mut Cx,
+    node: &ast::TryExpr,
+    v: Expr,
+    inner_ty: &Ty,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) -> Expr {
+    let is_option = matches!(
+        cx.ret_ty.as_ref().map(|t| t.strip_refs()),
+        Some(Ty::Option(_))
+    );
     if !is_option {
-        return cx.unsupported(node.syntax(), "`?` on Option outside a function returning Option");
+        return cx.unsupported(
+            node.syntax(),
+            "`?` on Option outside a function returning Option",
+        );
     }
     // The operand is read twice (`.isEmpty()` and `.get()`).
     let v = if is_place(&v) {
@@ -1355,7 +1683,14 @@ fn try_option(cx: &mut Cx, node: &ast::TryExpr, v: Expr, inner_ty: &Ty, line: u3
     } else {
         let tmp = cx.fresh("try_value");
         let ty = Ty::Option(Box::new(inner_ty.clone()));
-        out.push(Stmt::new(line, StmtKind::Local { ty: stmt::decl_type(&ty), name: tmp.clone(), init: Some(v) }));
+        out.push(Stmt::new(
+            line,
+            StmtKind::Local {
+                ty: stmt::decl_type(&ty),
+                name: tmp.clone(),
+                init: Some(v),
+            },
+        ));
         Expr::name(tmp)
     };
     out.push(Stmt::new(
@@ -1402,7 +1737,14 @@ fn place(cx: &mut Cx, e: &ast::Expr, out: &mut Vec<Stmt>) -> Expr {
         return v;
     }
     let tmp = cx.fresh("m");
-    out.push(Stmt::new(line, StmtKind::Local { ty: stmt::decl_type(&ty), name: tmp.clone(), init: Some(v) }));
+    out.push(Stmt::new(
+        line,
+        StmtKind::Local {
+            ty: stmt::decl_type(&ty),
+            name: tmp.clone(),
+            init: Some(v),
+        },
+    ));
     Expr::name(tmp)
 }
 
@@ -1410,7 +1752,11 @@ fn emit_binds(binds: &[Bind], out: &mut Vec<Stmt>) {
     for b in binds.iter().filter(|b| b.extracted) {
         out.push(Stmt::new(
             b.line,
-            StmtKind::Local { ty: stmt::decl_type(&b.ty), name: b.java.clone(), init: Some(b.value.clone()) },
+            StmtKind::Local {
+                ty: stmt::decl_type(&b.ty),
+                name: b.java.clone(),
+                init: Some(b.value.clone()),
+            },
         ));
     }
 }
@@ -1443,7 +1789,10 @@ fn arm_body_safe(body: &ast::Expr) -> bool {
     !scan(body.syntax(), &|e| {
         matches!(
             e,
-            ast::Expr::ReturnExpr(_) | ast::Expr::BreakExpr(_) | ast::Expr::ContinueExpr(_) | ast::Expr::TryExpr(_)
+            ast::Expr::ReturnExpr(_)
+                | ast::Expr::BreakExpr(_)
+                | ast::Expr::ContinueExpr(_)
+                | ast::Expr::TryExpr(_)
         )
     })
 }

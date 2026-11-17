@@ -26,7 +26,9 @@ pub fn std_fn_key(cx: &Cx, f: Function) -> String {
                     b.name().as_str().to_string()
                 } else if self_ty.is_str() || self_ty.strip_references().is_str() {
                     "str".into()
-                } else if self_ty.as_slice().is_some() || self_ty.strip_references().as_slice().is_some() {
+                } else if self_ty.as_slice().is_some()
+                    || self_ty.strip_references().as_slice().is_some()
+                {
                     "slice".into()
                 } else {
                     "?".into()
@@ -44,13 +46,18 @@ pub fn std_fn_key(cx: &Cx, f: Function) -> String {
 }
 
 pub fn lower_call(cx: &mut Cx, c: &ast::CallExpr, out: &mut Vec<Stmt>) -> Expr {
-    let Some(callee) = c.expr() else { return cx.unsupported(c.syntax(), "call without callee") };
+    let Some(callee) = c.expr() else {
+        return cx.unsupported(c.syntax(), "call without callee");
+    };
     if let ast::Expr::PathExpr(pe) = &callee
         && let Some(path) = pe.path()
     {
         match cx.sema.resolve_path(&path) {
-            Some(PathResolution::Def(ModuleDef::Function(f))) => return lower_fn_call(cx, c, f, &path, out),
-            Some(PathResolution::Def(ModuleDef::Adt(_))) | Some(PathResolution::Def(ModuleDef::EnumVariant(_))) => {
+            Some(PathResolution::Def(ModuleDef::Function(f))) => {
+                return lower_fn_call(cx, c, f, &path, out);
+            }
+            Some(PathResolution::Def(ModuleDef::Adt(_)))
+            | Some(PathResolution::Def(ModuleDef::EnumVariant(_))) => {
                 let args = expr::call_args(cx, c, out);
                 return items::lower_ctor_call(cx, c, &path, args, out);
             }
@@ -74,7 +81,13 @@ pub fn lower_call(cx: &mut Cx, c: &ast::CallExpr, out: &mut Vec<Stmt>) -> Expr {
     }
 }
 
-fn lower_fn_call(cx: &mut Cx, c: &ast::CallExpr, f: Function, path: &ast::Path, out: &mut Vec<Stmt>) -> Expr {
+fn lower_fn_call(
+    cx: &mut Cx,
+    c: &ast::CallExpr,
+    f: Function,
+    path: &ast::Path,
+    out: &mut Vec<Stmt>,
+) -> Expr {
     if !is_local_fn(cx, f) {
         let key = std_fn_key(cx, f);
         return std_map::lower_std_fn_call(cx, c, &key, out);
@@ -105,8 +118,14 @@ fn lower_fn_call(cx: &mut Cx, c: &ast::CallExpr, f: Function, path: &ast::Path, 
                 if let Some(e) = items::lower_trait_static_call(cx, path, f, args.clone()) {
                     return e;
                 }
-                let qualifier = path.qualifier().map(|q| q.syntax().text().to_string()).unwrap_or_default();
-                cx.unsupported(c.syntax(), &format!("trait static call `{qualifier}::{name}`"))
+                let qualifier = path
+                    .qualifier()
+                    .map(|q| q.syntax().text().to_string())
+                    .unwrap_or_default();
+                cx.unsupported(
+                    c.syntax(),
+                    &format!("trait static call `{qualifier}::{name}`"),
+                )
             }
         };
     }
@@ -115,13 +134,22 @@ fn lower_fn_call(cx: &mut Cx, c: &ast::CallExpr, f: Function, path: &ast::Path, 
     if module == cx.module || module.name(db).is_none() {
         Expr::static_call(name, args)
     } else {
-        Expr::call(Expr::raw(module_class_from(db, cx.module, module)), name, args)
+        Expr::call(
+            Expr::raw(module_class_from(db, cx.module, module)),
+            name,
+            args,
+        )
     }
 }
 
 pub fn lower_method_call(cx: &mut Cx, m: &ast::MethodCallExpr, out: &mut Vec<Stmt>) -> Expr {
-    let Some(recv_ast) = m.receiver() else { return cx.unsupported(m.syntax(), "method call") };
-    let name = m.name_ref().map(|n| n.text().to_string()).unwrap_or_default();
+    let Some(recv_ast) = m.receiver() else {
+        return cx.unsupported(m.syntax(), "method call");
+    };
+    let name = m
+        .name_ref()
+        .map(|n| n.text().to_string())
+        .unwrap_or_default();
     let target = cx.sema.resolve_method_call(m);
     if let Some(f) = target
         && is_local_fn(cx, f)
@@ -135,7 +163,9 @@ pub fn lower_method_call(cx: &mut Cx, m: &ast::MethodCallExpr, out: &mut Vec<Stm
     }
     // A field holding a closure, called as `(self.f)(x)`, is a CallExpr; here it's a real method.
     let recv_ty = cx.ty(&recv_ast);
-    let key = target.map(|f| std_fn_key(cx, f)).unwrap_or_else(|| format!("?::{name}"));
+    let key = target
+        .map(|f| std_fn_key(cx, f))
+        .unwrap_or_else(|| format!("?::{name}"));
     if let Some(e) = iter::lower_iter_method(cx, m, &recv_ty, &key, out) {
         return e;
     }

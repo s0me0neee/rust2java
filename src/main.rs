@@ -15,7 +15,10 @@ use ra_ap_hir::Semantics;
 const RESULT_JAVA: &str = include_str!("support/Result.java");
 
 #[derive(Parser)]
-#[command(name = "rust2java", about = "Transpile Rust (1.95+) to readable Java 21")]
+#[command(
+    name = "rust2java",
+    about = "Transpile Rust (1.95+) to readable Java 21"
+)]
 struct Args {
     // A cargo project directory, or one or more .rs files.
     #[arg(required = true)]
@@ -50,17 +53,35 @@ fn transpile(args: &Args, project: &frontend::Project) -> Result<ExitCode> {
     for unit in project.units() {
         let lowered = lower::lower_unit(&sema, &unit);
         for d in &lowered.diags {
-            eprintln!("error: {}:{}:{}: {}", unit.path.display(), d.line, d.col, d.msg);
+            eprintln!(
+                "error: {}:{}:{}: {}",
+                unit.path.display(),
+                d.line,
+                d.col,
+                d.msg
+            );
         }
         errors += lowered.diags.len();
-        let (java, report) = emit::print_file(&lowered.file, lowered.comments, &lowered.trailer, lowered.last_line);
+        let (java, report) = emit::print_file(
+            &lowered.file,
+            lowered.comments,
+            &lowered.trailer,
+            lowered.last_line,
+        );
         let dir = args.out.join("src").join(&unit.package);
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join(format!("{}.java", unit.class_name)), java)?;
-        let lines = serde_json::json!({ "rust": unit.path, "stmts": report.stmts, "drift": report.drift });
-        std::fs::write(dir.join(format!("{}.lines.json", unit.class_name)), lines.to_string())?;
+        let lines =
+            serde_json::json!({ "rust": unit.path, "stmts": report.stmts, "drift": report.drift });
+        std::fs::write(
+            dir.join(format!("{}.lines.json", unit.class_name)),
+            lines.to_string(),
+        )?;
         if lowered.needs_result {
-            std::fs::write(dir.join("Result.java"), RESULT_JAVA.replace("PACKAGE", &unit.package))?;
+            std::fs::write(
+                dir.join("Result.java"),
+                RESULT_JAVA.replace("PACKAGE", &unit.package),
+            )?;
         }
         packages.insert(unit.package.clone(), dir);
     }
@@ -86,11 +107,19 @@ fn compile_and_run(out: &Path, package: &str, dir: &Path) -> Result<i32> {
         .filter(|p| p.extension().is_some_and(|e| e == "java"))
         .collect();
     let javac = which::which("javac").context("javac not found on PATH")?;
-    let status = Command::new(javac).arg("-d").arg(&classes).args(&sources).status()?;
+    let status = Command::new(javac)
+        .arg("-d")
+        .arg(&classes)
+        .args(&sources)
+        .status()?;
     if !status.success() {
         anyhow::bail!("javac failed for package {package}");
     }
     let java = which::which("java").context("java not found on PATH")?;
-    let status = Command::new(java).arg("-cp").arg(&classes).arg(format!("{package}.Main")).status()?;
+    let status = Command::new(java)
+        .arg("-cp")
+        .arg(&classes)
+        .arg(format!("{package}.Main"))
+        .status()?;
     Ok(status.code().unwrap_or(1))
 }

@@ -22,7 +22,11 @@ fn cases() -> Vec<Case> {
         .map(|src| {
             let name = src.file_stem().unwrap().to_string_lossy().to_string();
             let stdin = src.with_extension("stdin");
-            Case { name, stdin: stdin.exists().then_some(stdin), src }
+            Case {
+                name,
+                stdin: stdin.exists().then_some(stdin),
+                src,
+            }
         })
         .filter(|c| filter.as_ref().is_none_or(|f| c.name.contains(f.as_str())))
         // `*_needs_<area>` cases wait on another workstream; NEEDS=1 runs them too.
@@ -50,7 +54,10 @@ fn expected(case: &Case, work: &Path) -> (String, i32) {
     let exp = case.src.with_extension("expected");
     let exit = case.src.with_extension("exit");
     if exp.exists() && std::env::var("UPDATE_EXPECTED").is_err() {
-        let code = std::fs::read_to_string(&exit).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+        let code = std::fs::read_to_string(&exit)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
         return (std::fs::read_to_string(&exp).unwrap(), code);
     }
     let bin = work.join(format!("rust_{}", case.name));
@@ -78,17 +85,25 @@ fn differential() {
     let work = tempfile::tempdir().unwrap();
     let out_dir = work.path().join("out");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rust2java"));
-    cmd.args(cases.iter().map(|c| &c.src)).arg("-o").arg(&out_dir);
+    cmd.args(cases.iter().map(|c| &c.src))
+        .arg("-o")
+        .arg(&out_dir);
     let (_, _, diag) = run_with_stdin(&mut cmd, &None);
 
     let mut failures = Vec::new();
     let (mut total_stmts, mut total_drift, mut drift_notes) = (0u64, 0u64, Vec::new());
     for case in &cases {
         let (want, want_code) = expected(case, work.path());
-        let case_diags: Vec<&str> =
-            diag.lines().filter(|l| l.contains(&format!("/{}.rs:", case.name))).collect();
+        let case_diags: Vec<&str> = diag
+            .lines()
+            .filter(|l| l.contains(&format!("/{}.rs:", case.name)))
+            .collect();
         if !case_diags.is_empty() {
-            failures.push(format!("{}: transpile errors:\n  {}", case.name, case_diags.join("\n  ")));
+            failures.push(format!(
+                "{}: transpile errors:\n  {}",
+                case.name,
+                case_diags.join("\n  ")
+            ));
             continue;
         }
         let pkg_dir = out_dir.join("src").join(&case.name);
@@ -96,27 +111,43 @@ fn differential() {
         let files: Vec<PathBuf> = std::fs::read_dir(&pkg_dir)
             .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
             .unwrap_or_default();
-        let sources: Vec<&PathBuf> = files.iter().filter(|p| p.extension().is_some_and(|e| e == "java")).collect();
-        for f in files.iter().filter(|p| p.to_string_lossy().ends_with(".lines.json")) {
-            let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(f).unwrap()).unwrap();
+        let sources: Vec<&PathBuf> = files
+            .iter()
+            .filter(|p| p.extension().is_some_and(|e| e == "java"))
+            .collect();
+        for f in files
+            .iter()
+            .filter(|p| p.to_string_lossy().ends_with(".lines.json"))
+        {
+            let v: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(f).unwrap()).unwrap();
             let drift = v["drift"].as_array().map(|a| a.len()).unwrap_or(0) as u64;
             total_stmts += v["stmts"].as_u64().unwrap_or(0);
             total_drift += drift;
             if drift > 0 {
-                drift_notes.push(format!("  {}: {} drifted {:?}", case.name, drift, v["drift"]));
+                drift_notes.push(format!(
+                    "  {}: {} drifted {:?}",
+                    case.name, drift, v["drift"]
+                ));
             }
         }
         if sources.is_empty() {
             failures.push(format!("{}: no Java output\n{diag}", case.name));
             continue;
         }
-        let (_, code, err) = run_with_stdin(Command::new("javac").arg("-d").arg(&classes).args(&sources), &None);
+        let (_, code, err) = run_with_stdin(
+            Command::new("javac").arg("-d").arg(&classes).args(&sources),
+            &None,
+        );
         if code != 0 {
             failures.push(format!("{}: javac failed:\n{err}", case.name));
             continue;
         }
         let (got, got_code, err) = run_with_stdin(
-            Command::new("java").arg("-cp").arg(&classes).arg(format!("{}.Main", case.name)),
+            Command::new("java")
+                .arg("-cp")
+                .arg(&classes)
+                .arg(format!("{}.Main", case.name)),
             &case.stdin,
         );
         if got != want || got_code != want_code {
@@ -128,7 +159,11 @@ fn differential() {
     }
     let passed = cases.len() - failures.len();
     eprintln!("\n{passed}/{} cases passed", cases.len());
-    let exact = if total_stmts == 0 { 100.0 } else { 100.0 * (total_stmts - total_drift) as f64 / total_stmts as f64 };
+    let exact = if total_stmts == 0 {
+        100.0
+    } else {
+        100.0 * (total_stmts - total_drift) as f64 / total_stmts as f64
+    };
     eprintln!("line match: {exact:.1}% of {total_stmts} statements on their Rust line");
     for n in &drift_notes {
         eprintln!("{n}");

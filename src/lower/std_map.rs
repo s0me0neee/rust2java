@@ -11,11 +11,15 @@ use crate::ty::{Int, Ty};
 // ---- small helpers ---------------------------------------------------------------------------
 
 fn arg_asts(c: &impl HasArgList) -> Vec<ast::Expr> {
-    c.arg_list().map(|al| al.args().collect()).unwrap_or_default()
+    c.arg_list()
+        .map(|al| al.args().collect())
+        .unwrap_or_default()
 }
 
 fn method_name(m: &ast::MethodCallExpr) -> String {
-    m.name_ref().map(|n| n.text().to_string()).unwrap_or_default()
+    m.name_ref()
+        .map(|n| n.text().to_string())
+        .unwrap_or_default()
 }
 
 fn opt_of(v: Expr) -> Expr {
@@ -38,7 +42,11 @@ fn opt_inner(ty: &Ty) -> Option<Ty> {
 
 fn optional(cond: Expr, value: Expr, ret: &Ty) -> Expr {
     let inner = opt_inner(ret);
-    Expr::Ternary(Box::new(cond), Box::new(opt_of(value)), Box::new(opt_empty(inner.as_ref())))
+    Expr::Ternary(
+        Box::new(cond),
+        Box::new(opt_of(value)),
+        Box::new(opt_empty(inner.as_ref())),
+    )
 }
 
 // Java promotes byte/short arithmetic to int; cast back to the Rust type.
@@ -49,9 +57,23 @@ fn narrow(v: Expr, i: Int) -> Expr {
     }
 }
 
-fn push_local(cx: &mut Cx, line: u32, ty: String, init: Option<Expr>, out: &mut Vec<Stmt>, base: &str) -> String {
+fn push_local(
+    cx: &mut Cx,
+    line: u32,
+    ty: String,
+    init: Option<Expr>,
+    out: &mut Vec<Stmt>,
+    base: &str,
+) -> String {
     let name = cx.fresh(base);
-    out.push(Stmt::new(line, StmtKind::Local { ty, name: name.clone(), init }));
+    out.push(Stmt::new(
+        line,
+        StmtKind::Local {
+            ty,
+            name: name.clone(),
+            init,
+        },
+    ));
     name
 }
 
@@ -63,7 +85,9 @@ fn push_raw(out: &mut Vec<Stmt>, line: u32, text: String) {
 fn simple(cx: &mut Cx, e: Expr, ty: &Ty, line: u32, out: &mut Vec<Stmt>) -> Expr {
     let simple = match &e {
         Expr::Name(_) => true,
-        Expr::Raw(s) => s.chars().all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '[' | ']' | '"' | ' ')),
+        Expr::Raw(s) => s
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '[' | ']' | '"' | ' ')),
         _ => false,
     };
     if simple || cx.lambda_depth > 0 {
@@ -76,12 +100,21 @@ fn simple(cx: &mut Cx, e: Expr, ty: &Ty, line: u32, out: &mut Vec<Stmt>) -> Expr
 fn consumed_by(cx: &Cx, e: &ast::Expr) -> Option<String> {
     let parent = e.syntax().parent()?;
     let mc = ast::MethodCallExpr::cast(parent)?;
-    let is_recv = mc.receiver().is_some_and(|r| r.syntax().text_range() == e.syntax().text_range());
-    if is_recv { mc.name_ref().map(|n| n.text().to_string()) } else { let _ = cx; None }
+    let is_recv = mc
+        .receiver()
+        .is_some_and(|r| r.syntax().text_range() == e.syntax().text_range());
+    if is_recv {
+        mc.name_ref().map(|n| n.text().to_string())
+    } else {
+        let _ = cx;
+        None
+    }
 }
 
 fn discarded(m: &ast::MethodCallExpr) -> bool {
-    m.syntax().parent().is_some_and(|p| ast::ExprStmt::can_cast(p.kind()))
+    m.syntax()
+        .parent()
+        .is_some_and(|p| ast::ExprStmt::can_cast(p.kind()))
 }
 
 fn result_java(ret: &Ty) -> String {
@@ -94,11 +127,28 @@ fn result_java(ret: &Ty) -> String {
 fn wrap_ok(cx: &mut Cx, line: u32, ret: &Ty, value: Expr, out: &mut Vec<Stmt>) -> Expr {
     cx.needs_result = true;
     let ty = result_java(ret);
-    let name = push_local(cx, line, ty, Some(Expr::New { ty: "Ok<>".into(), args: vec![value] }), out, "res");
+    let name = push_local(
+        cx,
+        line,
+        ty,
+        Some(Expr::New {
+            ty: "Ok<>".into(),
+            args: vec![value],
+        }),
+        out,
+        "res",
+    );
     Expr::name(name)
 }
 
-fn wrap_try_ok(cx: &mut Cx, line: u32, ret: &Ty, value: Expr, catch: &str, out: &mut Vec<Stmt>) -> Expr {
+fn wrap_try_ok(
+    cx: &mut Cx,
+    line: u32,
+    ret: &Ty,
+    value: Expr,
+    catch: &str,
+    out: &mut Vec<Stmt>,
+) -> Expr {
     cx.needs_result = true;
     let ty = result_java(ret);
     let name = cx.fresh("res");
@@ -115,7 +165,10 @@ fn wrap_try_ok(cx: &mut Cx, line: u32, ret: &Ty, value: Expr, catch: &str, out: 
 }
 
 fn clone_expr(e: Expr, ty: &Ty) -> Expr {
-    let new = |t: &str, e: Expr| Expr::New { ty: t.into(), args: vec![e] };
+    let new = |t: &str, e: Expr| Expr::New {
+        ty: t.into(),
+        args: vec![e],
+    };
     match ty.strip_refs() {
         Ty::Vec(_) => new("ArrayList<>", e),
         Ty::Set { ordered, .. } => new(if *ordered { "TreeSet<>" } else { "HashSet<>" }, e),
@@ -136,13 +189,26 @@ fn default_value(ty: &Ty) -> Expr {
         Ty::F32 => Expr::raw("0.0f"),
         Ty::F64 => Expr::raw("0.0"),
         Ty::Str => Expr::str_lit(""),
-        Ty::Vec(_) => Expr::New { ty: "ArrayList<>".into(), args: vec![] },
-        Ty::Map { ordered, .. } => {
-            Expr::New { ty: if *ordered { "TreeMap<>" } else { "HashMap<>" }.into(), args: vec![] }
-        }
-        Ty::Set { ordered, .. } => Expr::New { ty: if *ordered { "TreeSet<>" } else { "HashSet<>" }.into(), args: vec![] },
-        Ty::Deque(_) => Expr::New { ty: "ArrayDeque<>".into(), args: vec![] },
-        Ty::Heap(_) => Expr::New { ty: "PriorityQueue<>".into(), args: vec![] },
+        Ty::Vec(_) => Expr::New {
+            ty: "ArrayList<>".into(),
+            args: vec![],
+        },
+        Ty::Map { ordered, .. } => Expr::New {
+            ty: if *ordered { "TreeMap<>" } else { "HashMap<>" }.into(),
+            args: vec![],
+        },
+        Ty::Set { ordered, .. } => Expr::New {
+            ty: if *ordered { "TreeSet<>" } else { "HashSet<>" }.into(),
+            args: vec![],
+        },
+        Ty::Deque(_) => Expr::New {
+            ty: "ArrayDeque<>".into(),
+            args: vec![],
+        },
+        Ty::Heap(_) => Expr::New {
+            ty: "PriorityQueue<>".into(),
+            args: vec![],
+        },
         Ty::Option(_) => Expr::raw("Optional.empty()"),
         Ty::Result(..) => Expr::raw("null"),
         _ => Expr::raw("null"),
@@ -151,7 +217,8 @@ fn default_value(ty: &Ty) -> Expr {
 
 // Declares (once) the shared stdin reader on the file's last line.
 pub fn need_stdin(cx: &mut Cx) {
-    let decl = "static final BufferedReader STDIN = new BufferedReader(new InputStreamReader(System.in));";
+    let decl =
+        "static final BufferedReader STDIN = new BufferedReader(new InputStreamReader(System.in));";
     if !cx.file_trailer.iter().any(|t| t.contains("STDIN")) {
         cx.file_trailer.push(decl.into());
     }
@@ -236,7 +303,9 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
     let arg_asts = arg_asts(c);
     match key {
         "String::new" | "String::with_capacity" => Expr::str_lit(""),
-        "String::from" | "ToString::to_string" | "ToOwned::to_owned" => args.into_iter().next().unwrap_or_else(|| Expr::str_lit("")),
+        "String::from" | "ToString::to_string" | "ToOwned::to_owned" => {
+            args.into_iter().next().unwrap_or_else(|| Expr::str_lit(""))
+        }
         "String::from_utf8" | "String::from_utf8_lossy" | "String::from_utf8_unchecked" => {
             let src = args.first().cloned().unwrap_or_else(|| Expr::raw("null"));
             let b = cx.fresh("b");
@@ -244,48 +313,92 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
                 "{}stream().map({b} -> String.valueOf((char) (int) {b})).collect(Collectors.joining())",
                 render(&src)
             ));
-            if key == "String::from_utf8" && consumed_by(cx, &ast::Expr::CallExpr(c.clone())).as_deref().is_none_or(|u| !matches!(u, "unwrap" | "expect")) {
+            if key == "String::from_utf8"
+                && consumed_by(cx, &ast::Expr::CallExpr(c.clone()))
+                    .as_deref()
+                    .is_none_or(|u| !matches!(u, "unwrap" | "expect"))
+            {
                 return wrap_ok(cx, line, &ret, joined, out);
             }
             joined
         }
-        "Vec::new" | "Vec::with_capacity" => Expr::New { ty: "ArrayList<>".into(), args: vec![] },
-        "Vec::from" => Expr::New { ty: "ArrayList<>".into(), args: vec![args[0].clone()] },
-        "Vec::from_iter" | "Vec::collect" => {
-            Expr::call(args[0].clone(), "collect", vec![Expr::raw("Collectors.toCollection(ArrayList::new)")])
-        }
-        "HashMap::new" | "HashMap::with_capacity" => Expr::New { ty: "HashMap<>".into(), args: vec![] },
-        "BTreeMap::new" => Expr::New { ty: "TreeMap<>".into(), args: vec![] },
-        "HashSet::new" | "HashSet::with_capacity" => Expr::New { ty: "HashSet<>".into(), args: vec![] },
-        "BTreeSet::new" => Expr::New { ty: "TreeSet<>".into(), args: vec![] },
-        "VecDeque::new" | "VecDeque::with_capacity" => Expr::New { ty: "ArrayDeque<>".into(), args: vec![] },
+        "Vec::new" | "Vec::with_capacity" => Expr::New {
+            ty: "ArrayList<>".into(),
+            args: vec![],
+        },
+        "Vec::from" => Expr::New {
+            ty: "ArrayList<>".into(),
+            args: vec![args[0].clone()],
+        },
+        "Vec::from_iter" | "Vec::collect" => Expr::call(
+            args[0].clone(),
+            "collect",
+            vec![Expr::raw("Collectors.toCollection(ArrayList::new)")],
+        ),
+        "HashMap::new" | "HashMap::with_capacity" => Expr::New {
+            ty: "HashMap<>".into(),
+            args: vec![],
+        },
+        "BTreeMap::new" => Expr::New {
+            ty: "TreeMap<>".into(),
+            args: vec![],
+        },
+        "HashSet::new" | "HashSet::with_capacity" => Expr::New {
+            ty: "HashSet<>".into(),
+            args: vec![],
+        },
+        "BTreeSet::new" => Expr::New {
+            ty: "TreeSet<>".into(),
+            args: vec![],
+        },
+        "VecDeque::new" | "VecDeque::with_capacity" => Expr::New {
+            ty: "ArrayDeque<>".into(),
+            args: vec![],
+        },
         "BinaryHeap::new" => {
             if heap_is_reverse(c) {
-                Expr::New { ty: "PriorityQueue<>".into(), args: vec![] }
+                Expr::New {
+                    ty: "PriorityQueue<>".into(),
+                    args: vec![],
+                }
             } else {
-                Expr::New { ty: "PriorityQueue<>".into(), args: vec![Expr::raw("Comparator.reverseOrder()")] }
+                Expr::New {
+                    ty: "PriorityQueue<>".into(),
+                    args: vec![Expr::raw("Comparator.reverseOrder()")],
+                }
             }
         }
         "BinaryHeap::from" => {
             let src = args[0].clone();
             if heap_is_reverse(c) {
-                Expr::New { ty: "PriorityQueue<>".into(), args: vec![src] }
+                Expr::New {
+                    ty: "PriorityQueue<>".into(),
+                    args: vec![src],
+                }
             } else {
                 let name = push_local(
                     cx,
                     line,
                     "PriorityQueue<>".into(),
-                    Some(Expr::New { ty: "PriorityQueue<>".into(), args: vec![Expr::raw("Comparator.reverseOrder()")] }),
+                    Some(Expr::New {
+                        ty: "PriorityQueue<>".into(),
+                        args: vec![Expr::raw("Comparator.reverseOrder()")],
+                    }),
                     out,
                     "heap",
                 );
-                out.push(Stmt::new(line, StmtKind::Expr(Expr::call(Expr::name(name.clone()), "addAll", vec![src]))));
+                out.push(Stmt::new(
+                    line,
+                    StmtKind::Expr(Expr::call(Expr::name(name.clone()), "addAll", vec![src])),
+                ));
                 Expr::name(name)
             }
         }
         "Default::default" => default_value(&ret),
         "From::from" | "Into::into" => match ret.strip_refs() {
-            Ty::Vec(_) | Ty::Set { .. } | Ty::Map { .. } | Ty::Deque(_) | Ty::Heap(_) => clone_expr(args[0].clone(), &ret),
+            Ty::Vec(_) | Ty::Set { .. } | Ty::Map { .. } | Ty::Deque(_) | Ty::Heap(_) => {
+                clone_expr(args[0].clone(), &ret)
+            }
             _ => args.into_iter().next().unwrap_or_else(|| Expr::raw("null")),
         },
         "Clone::clone" => {
@@ -305,10 +418,25 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
             );
             optional(cond, Expr::Cast("char".into(), Box::new(n)), &ret)
         }
-        "char::from_u32_unchecked" => Expr::Cast("char".into(), Box::new(args.first().cloned().unwrap_or_else(|| Expr::raw("0")))),
+        "char::from_u32_unchecked" => Expr::Cast(
+            "char".into(),
+            Box::new(args.first().cloned().unwrap_or_else(|| Expr::raw("0"))),
+        ),
         "char::from_digit" => {
-            let d = simple(cx, args.first().cloned().unwrap_or_else(|| Expr::raw("0")), &Ty::Int(Int::U32), line, out);
-            let r = simple(cx, args.get(1).cloned().unwrap_or_else(|| Expr::raw("10")), &Ty::Int(Int::U32), line, out);
+            let d = simple(
+                cx,
+                args.first().cloned().unwrap_or_else(|| Expr::raw("0")),
+                &Ty::Int(Int::U32),
+                line,
+                out,
+            );
+            let r = simple(
+                cx,
+                args.get(1).cloned().unwrap_or_else(|| Expr::raw("10")),
+                &Ty::Int(Int::U32),
+                line,
+                out,
+            );
             let (ds, rs) = (render(&d), render(&r));
             Expr::raw(format!(
                 "(Character.forDigit({ds}, {rs}) == '\\0' ? Optional.<Character>empty() : Optional.of(Character.forDigit({ds}, {rs})))"
@@ -321,7 +449,10 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
             push_raw(
                 out,
                 line,
-                format!("try {{ Thread.sleep({}); }} catch (InterruptedException {ex}) {{ throw new RuntimeException({ex}); }}", render(&ms)),
+                format!(
+                    "try {{ Thread.sleep({}); }} catch (InterruptedException {ex}) {{ throw new RuntimeException({ex}); }}",
+                    render(&ms)
+                ),
             );
             Expr::raw("null")
         }
@@ -341,9 +472,19 @@ fn heap_is_reverse(c: &ast::CallExpr) -> bool {
         .is_some_and(|t| t.syntax().text().to_string().contains("Reverse"))
 }
 
-fn cmp_min_max(cx: &mut Cx, max: bool, arg_asts: &[ast::Expr], mut args: Vec<Expr>, line: u32, out: &mut Vec<Stmt>) -> Expr {
+fn cmp_min_max(
+    cx: &mut Cx,
+    max: bool,
+    arg_asts: &[ast::Expr],
+    mut args: Vec<Expr>,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) -> Expr {
     let (a, b) = (args.remove(0), args.remove(0));
-    let ty = arg_asts.first().map(|e| cx.ty(e)).unwrap_or_else(|| Ty::Int(Int::I32));
+    let ty = arg_asts
+        .first()
+        .map(|e| cx.ty(e))
+        .unwrap_or_else(|| Ty::Int(Int::I32));
     let method = if max { "max" } else { "min" };
     match ty.strip_refs() {
         Ty::Int(_) | Ty::F32 | Ty::F64 => Expr::call(Expr::raw("Math"), method, vec![a, b]),
@@ -353,28 +494,51 @@ fn cmp_min_max(cx: &mut Cx, max: bool, arg_asts: &[ast::Expr], mut args: Vec<Exp
         }
         Ty::Char => {
             let (a, b) = (simple(cx, a, &ty, line, out), simple(cx, b, &ty, line, out));
-            Expr::Ternary(Box::new(Expr::bin(a.clone(), if max { ">=" } else { "<=" }, b.clone())), Box::new(a), Box::new(b))
+            Expr::Ternary(
+                Box::new(Expr::bin(
+                    a.clone(),
+                    if max { ">=" } else { "<=" },
+                    b.clone(),
+                )),
+                Box::new(a),
+                Box::new(b),
+            )
         }
         _ => {
             let (a, b) = (simple(cx, a, &ty, line, out), simple(cx, b, &ty, line, out));
-            let cond = Expr::bin(Expr::call(a.clone(), "compareTo", vec![b.clone()]), if max { ">=" } else { "<=" }, Expr::raw("0"));
+            let cond = Expr::bin(
+                Expr::call(a.clone(), "compareTo", vec![b.clone()]),
+                if max { ">=" } else { "<=" },
+                Expr::raw("0"),
+            );
             Expr::Ternary(Box::new(cond), Box::new(a), Box::new(b))
         }
     }
 }
 
-fn from_str_radix(cx: &mut Cx, c: &ast::CallExpr, key: &str, ret: &Ty, args: Vec<Expr>, out: &mut Vec<Stmt>) -> Expr {
+fn from_str_radix(
+    cx: &mut Cx,
+    c: &ast::CallExpr,
+    key: &str,
+    ret: &Ty,
+    args: Vec<Expr>,
+    out: &mut Vec<Stmt>,
+) -> Expr {
     let line = cx.line(c.syntax());
     let owner = key.split("::").next().unwrap_or("i32");
     let s = args.first().cloned().unwrap_or_else(|| Expr::str_lit(""));
     let radix = args.get(1).cloned().unwrap_or_else(|| Expr::raw("10"));
-    let long = owner.starts_with('i') && matches!(owner, "i64" | "i128") || matches!(owner, "u64" | "u128");
+    let long = owner.starts_with('i') && matches!(owner, "i64" | "i128")
+        || matches!(owner, "u64" | "u128");
     let call = if long {
         Expr::call(Expr::raw("Long"), "parseLong", vec![s, radix])
     } else {
         Expr::call(Expr::raw("Integer"), "parseInt", vec![s, radix])
     };
-    if matches!(consumed_by(cx, &ast::Expr::CallExpr(c.clone())).as_deref(), Some("unwrap" | "expect")) {
+    if matches!(
+        consumed_by(cx, &ast::Expr::CallExpr(c.clone())).as_deref(),
+        Some("unwrap" | "expect")
+    ) {
         return call;
     }
     wrap_try_ok(cx, line, ret, call, "NumberFormatException", out)
@@ -391,7 +555,23 @@ pub fn lower_std_path(cx: &mut Cx, path: &ast::Path, def: ModuleDef) -> Expr {
         .iter()
         .rev()
         .find(|p| {
-            matches!(**p, "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "f32" | "f64" | "char")
+            matches!(
+                **p,
+                "i8" | "i16"
+                    | "i32"
+                    | "i64"
+                    | "i128"
+                    | "isize"
+                    | "u8"
+                    | "u16"
+                    | "u32"
+                    | "u64"
+                    | "u128"
+                    | "usize"
+                    | "f32"
+                    | "f64"
+                    | "char"
+            )
         })
         .copied();
     match last {
@@ -404,19 +584,83 @@ pub fn lower_std_path(cx: &mut Cx, path: &ast::Path, def: ModuleDef) -> Expr {
                 return Expr::raw(e);
             }
         }
-        "PI" => return Expr::raw(if ty_tok == Some("f32") { "(float) Math.PI" } else { "Math.PI" }),
-        "E" => return Expr::raw(if ty_tok == Some("f32") { "(float) Math.E" } else { "Math.E" }),
-        "TAU" => return Expr::raw(if ty_tok == Some("f32") { "(float) Math.TAU" } else { "Math.TAU" }),
-        "SQRT_2" => return Expr::raw(if ty_tok == Some("f32") { "(float) Math.sqrt(2)" } else { "Math.sqrt(2)" }),
-        "LN_2" => return Expr::raw(if ty_tok == Some("f32") { "(float) Math.log(2)" } else { "Math.log(2)" }),
-        "LN_10" => return Expr::raw(if ty_tok == Some("f32") { "(float) Math.log(10)" } else { "Math.log(10)" }),
-        "EPSILON" => {
-            return Expr::raw(if ty_tok == Some("f32") { "Math.ulp(1.0f)" } else { "Math.ulp(1.0)" });
+        "PI" => {
+            return Expr::raw(if ty_tok == Some("f32") {
+                "(float) Math.PI"
+            } else {
+                "Math.PI"
+            });
         }
-        "INFINITY" => return Expr::raw(if ty_tok == Some("f32") { "Float.POSITIVE_INFINITY" } else { "Double.POSITIVE_INFINITY" }),
-        "NEG_INFINITY" => return Expr::raw(if ty_tok == Some("f32") { "Float.NEGATIVE_INFINITY" } else { "Double.NEGATIVE_INFINITY" }),
-        "NAN" => return Expr::raw(if ty_tok == Some("f32") { "Float.NaN" } else { "Double.NaN" }),
-        "MIN_POSITIVE" => return Expr::raw(if ty_tok == Some("f32") { "Float.MIN_NORMAL" } else { "Double.MIN_NORMAL" }),
+        "E" => {
+            return Expr::raw(if ty_tok == Some("f32") {
+                "(float) Math.E"
+            } else {
+                "Math.E"
+            });
+        }
+        "TAU" => {
+            return Expr::raw(if ty_tok == Some("f32") {
+                "(float) Math.TAU"
+            } else {
+                "Math.TAU"
+            });
+        }
+        "SQRT_2" => {
+            return Expr::raw(if ty_tok == Some("f32") {
+                "(float) Math.sqrt(2)"
+            } else {
+                "Math.sqrt(2)"
+            });
+        }
+        "LN_2" => {
+            return Expr::raw(if ty_tok == Some("f32") {
+                "(float) Math.log(2)"
+            } else {
+                "Math.log(2)"
+            });
+        }
+        "LN_10" => {
+            return Expr::raw(if ty_tok == Some("f32") {
+                "(float) Math.log(10)"
+            } else {
+                "Math.log(10)"
+            });
+        }
+        "EPSILON" => {
+            return Expr::raw(if ty_tok == Some("f32") {
+                "Math.ulp(1.0f)"
+            } else {
+                "Math.ulp(1.0)"
+            });
+        }
+        "INFINITY" => {
+            return Expr::raw(if ty_tok == Some("f32") {
+                "Float.POSITIVE_INFINITY"
+            } else {
+                "Double.POSITIVE_INFINITY"
+            });
+        }
+        "NEG_INFINITY" => {
+            return Expr::raw(if ty_tok == Some("f32") {
+                "Float.NEGATIVE_INFINITY"
+            } else {
+                "Double.NEGATIVE_INFINITY"
+            });
+        }
+        "NAN" => {
+            return Expr::raw(if ty_tok == Some("f32") {
+                "Float.NaN"
+            } else {
+                "Double.NaN"
+            });
+        }
+        "MIN_POSITIVE" => {
+            return Expr::raw(if ty_tok == Some("f32") {
+                "Float.MIN_NORMAL"
+            } else {
+                "Double.MIN_NORMAL"
+            });
+        }
         _ => {}
     }
     cx.unsupported(path.syntax(), &format!("std path `{text}`"))
@@ -458,18 +702,31 @@ fn int_const(ty: Option<&str>, which: &str) -> Option<&'static str> {
 
 // ---- std constructors -----------------------------------------------------------------------
 
-pub fn lower_std_ctor(cx: &mut Cx, c: &ast::CallExpr, path: &ast::Path, args: &[Expr]) -> Option<Expr> {
+pub fn lower_std_ctor(
+    cx: &mut Cx,
+    c: &ast::CallExpr,
+    path: &ast::Path,
+    args: &[Expr],
+) -> Option<Expr> {
     let last = path.segment()?.name_ref()?.text().to_string();
     let _ = c;
     match last.as_str() {
-        "Some" => Some(opt_of(args.first().cloned().unwrap_or_else(|| Expr::raw("null")))),
+        "Some" => Some(opt_of(
+            args.first().cloned().unwrap_or_else(|| Expr::raw("null")),
+        )),
         "Ok" => {
             cx.needs_result = true;
-            Some(Expr::New { ty: "Ok<>".into(), args: args.to_vec() })
+            Some(Expr::New {
+                ty: "Ok<>".into(),
+                args: args.to_vec(),
+            })
         }
         "Err" => {
             cx.needs_result = true;
-            Some(Expr::New { ty: "Err<>".into(), args: args.to_vec() })
+            Some(Expr::New {
+                ty: "Err<>".into(),
+                args: args.to_vec(),
+            })
         }
         // Newtypes are erased.
         "Reverse" | "Wrapping" | "Saturating" => args.first().cloned(),
@@ -496,7 +753,14 @@ fn mem_swap(cx: &mut Cx, c: &ast::CallExpr, out: &mut Vec<Stmt>) -> Expr {
     let a_val = expr::lower_expr(cx, &a_place, out);
     let b_val = expr::lower_expr(cx, &b_place, out);
     let ty = cx.ty(&a_place);
-    let tmp = push_local(cx, line, super::stmt::decl_type(&ty), Some(a_val), out, "swap");
+    let tmp = push_local(
+        cx,
+        line,
+        super::stmt::decl_type(&ty),
+        Some(a_val),
+        out,
+        "swap",
+    );
     let to_b = expr::place_assign(cx, &a_place, "=", b_val, out);
     out.push(Stmt::new(line, StmtKind::Expr(to_b)));
     let to_a = expr::place_assign(cx, &b_place, "=", Expr::name(tmp), out);
@@ -507,11 +771,17 @@ fn mem_swap(cx: &mut Cx, c: &ast::CallExpr, out: &mut Vec<Stmt>) -> Expr {
 fn mem_replace(cx: &mut Cx, c: &ast::CallExpr, ret: &Ty, take: bool, out: &mut Vec<Stmt>) -> Expr {
     let line = cx.line(c.syntax());
     let asts = arg_asts(c);
-    let Some(a_ast) = asts.first() else { return cx.unsupported(c.syntax(), "mem::replace without argument") };
+    let Some(a_ast) = asts.first() else {
+        return cx.unsupported(c.syntax(), "mem::replace without argument");
+    };
     let place_ast = ref_inner(a_ast);
     let ty = cx.ty(&place_ast);
     let old = expr::lower_expr(cx, &place_ast, out);
-    let new = if take { default_value(&ty) } else { expr::lower_expr(cx, asts.get(1).unwrap_or(a_ast), out) };
+    let new = if take {
+        default_value(&ty)
+    } else {
+        expr::lower_expr(cx, asts.get(1).unwrap_or(a_ast), out)
+    };
     let tmp = push_local(cx, line, super::stmt::decl_type(&ty), Some(old), out, "old");
     let assign = expr::place_assign(cx, &place_ast, "=", new, out);
     out.push(Stmt::new(line, StmtKind::Expr(assign)));
@@ -521,12 +791,20 @@ fn mem_replace(cx: &mut Cx, c: &ast::CallExpr, ret: &Ty, take: bool, out: &mut V
 
 // ---- std methods ----------------------------------------------------------------------------
 
-pub fn lower_std_method(cx: &mut Cx, m: &ast::MethodCallExpr, recv_ty: &Ty, key: &str, out: &mut Vec<Stmt>) -> Expr {
+pub fn lower_std_method(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    recv_ty: &Ty,
+    key: &str,
+    out: &mut Vec<Stmt>,
+) -> Expr {
     let recv_ast = m.receiver().unwrap();
     let name = key.rsplit("::").next().unwrap_or(key).to_string();
     let line = cx.line(m.syntax());
     // `m.entry(k).or_insert*` must be handled before the `entry()` receiver is lowered.
-    if matches!(name.as_str(), "or_insert" | "or_insert_with" | "or_default") && is_entry_recv(&recv_ast) {
+    if matches!(name.as_str(), "or_insert" | "or_insert_with" | "or_default")
+        && is_entry_recv(&recv_ast)
+    {
         let args = if name == "or_insert" {
             match m.arg_list() {
                 Some(al) => expr::lower_args(cx, al.args(), out),
@@ -560,7 +838,11 @@ pub fn lower_std_method(cx: &mut Cx, m: &ast::MethodCallExpr, recv_ty: &Ty, key:
         return e;
     }
     if name == "elapsed" && key.starts_with("Instant::") {
-        return Expr::call(Expr::raw("Duration"), "ofNanos", vec![Expr::bin(Expr::raw("System.nanoTime()"), "-", recv)]);
+        return Expr::call(
+            Expr::raw("Duration"),
+            "ofNanos",
+            vec![Expr::bin(Expr::raw("System.nanoTime()"), "-", recv)],
+        );
     }
     if let Some(e) = duration_method(cx, &name, recv.clone(), &args) {
         return e;
@@ -568,21 +850,130 @@ pub fn lower_std_method(cx: &mut Cx, m: &ast::MethodCallExpr, recv_ty: &Ty, key:
 
     let t = recv_ty.strip_refs().clone();
     let found = match &t {
-        Ty::Int(i) => lower_int_method(cx, m, recv.clone(), args.clone(), &arg_asts, *i, &name, &ret, line, out),
-        Ty::F32 | Ty::F64 => lower_float_method(cx, m, recv.clone(), args.clone(), t == Ty::F32, &name, &ret, line, out),
-        Ty::Bool | Ty::Char => lower_small_method(cx, recv.clone(), &args, &t, &name, &ret, line, out),
-        Ty::Str => lower_str_method(cx, m, &recv_ast, recv.clone(), args.clone(), &arg_asts, &name, &ret, line, out),
-        Ty::Option(_) => lower_option_method(cx, m, &recv_ast, recv.clone(), args.clone(), &name, &ret, line, out),
-        Ty::Result(..) => lower_result_method(cx, m, &recv_ast, recv.clone(), args.clone(), &name, &ret, line, out),
-        Ty::Vec(elem) => lower_vec_method(cx, m, &recv_ast, recv.clone(), elem, args.clone(), &arg_asts, &name, &ret, line, out),
-        Ty::Map { ordered, k, v } => {
-            lower_map_method(cx, m, &recv_ast, recv.clone(), *ordered, k, v, args.clone(), &arg_asts, &name, &ret, line, out)
+        Ty::Int(i) => lower_int_method(
+            cx,
+            m,
+            recv.clone(),
+            args.clone(),
+            &arg_asts,
+            *i,
+            &name,
+            &ret,
+            line,
+            out,
+        ),
+        Ty::F32 | Ty::F64 => lower_float_method(
+            cx,
+            m,
+            recv.clone(),
+            args.clone(),
+            t == Ty::F32,
+            &name,
+            &ret,
+            line,
+            out,
+        ),
+        Ty::Bool | Ty::Char => {
+            lower_small_method(cx, recv.clone(), &args, &t, &name, &ret, line, out)
         }
-        Ty::Set { ordered, t: elem } => {
-            lower_set_method(cx, m, &recv_ast, recv.clone(), *ordered, elem, args.clone(), &arg_asts, &name, line, out)
-        }
-        Ty::Deque(elem) => lower_deque_method(cx, m, &recv_ast, recv.clone(), elem, args.clone(), &name, &ret, line, out),
-        Ty::Heap(_) => lower_heap_method(cx, m, &recv_ast, recv.clone(), args.clone(), &name, &ret, line, out),
+        Ty::Str => lower_str_method(
+            cx,
+            m,
+            &recv_ast,
+            recv.clone(),
+            args.clone(),
+            &arg_asts,
+            &name,
+            &ret,
+            line,
+            out,
+        ),
+        Ty::Option(_) => lower_option_method(
+            cx,
+            m,
+            &recv_ast,
+            recv.clone(),
+            args.clone(),
+            &name,
+            &ret,
+            line,
+            out,
+        ),
+        Ty::Result(..) => lower_result_method(
+            cx,
+            m,
+            &recv_ast,
+            recv.clone(),
+            args.clone(),
+            &name,
+            &ret,
+            line,
+            out,
+        ),
+        Ty::Vec(elem) => lower_vec_method(
+            cx,
+            m,
+            &recv_ast,
+            recv.clone(),
+            elem,
+            args.clone(),
+            &arg_asts,
+            &name,
+            &ret,
+            line,
+            out,
+        ),
+        Ty::Map { ordered, k, v } => lower_map_method(
+            cx,
+            m,
+            &recv_ast,
+            recv.clone(),
+            *ordered,
+            k,
+            v,
+            args.clone(),
+            &arg_asts,
+            &name,
+            &ret,
+            line,
+            out,
+        ),
+        Ty::Set { ordered, t: elem } => lower_set_method(
+            cx,
+            m,
+            &recv_ast,
+            recv.clone(),
+            *ordered,
+            elem,
+            args.clone(),
+            &arg_asts,
+            &name,
+            line,
+            out,
+        ),
+        Ty::Deque(elem) => lower_deque_method(
+            cx,
+            m,
+            &recv_ast,
+            recv.clone(),
+            elem,
+            args.clone(),
+            &name,
+            &ret,
+            line,
+            out,
+        ),
+        Ty::Heap(_) => lower_heap_method(
+            cx,
+            m,
+            &recv_ast,
+            recv.clone(),
+            args.clone(),
+            &name,
+            &ret,
+            line,
+            out,
+        ),
         Ty::Ordering => lower_ordering_method(cx, recv.clone(), args.clone(), &name),
         _ => None,
     };
@@ -599,7 +990,9 @@ pub fn lower_std_method(cx: &mut Cx, m: &ast::MethodCallExpr, recv_ty: &Ty, key:
     }
     match (recv_ty.strip_refs(), name.as_str()) {
         (t, "to_string") if t.is_str() => recv,
-        (t, "to_string") if t.is_primitive() => Expr::call(Expr::raw("String"), "valueOf", vec![recv]),
+        (t, "to_string") if t.is_primitive() => {
+            Expr::call(Expr::raw("String"), "valueOf", vec![recv])
+        }
         (Ty::Adt { .. }, "to_string") => Expr::call(recv, "toString", vec![]),
         (Ty::Option(_) | Ty::Result(..), "to_string") => Expr::call(recv, "toString", vec![]),
         _ => cx.unsupported(m.syntax(), &format!("std method `{key}` on {recv_ty:?}")),
@@ -612,7 +1005,10 @@ fn is_stdin(cx: &Cx, e: &ast::Expr) -> bool {
     let _ = cx;
     match e {
         ast::Expr::CallExpr(c) => {
-            let text = c.expr().map(|c| c.syntax().text().to_string()).unwrap_or_default();
+            let text = c
+                .expr()
+                .map(|c| c.syntax().text().to_string())
+                .unwrap_or_default();
             text.ends_with("stdin")
         }
         ast::Expr::MethodCallExpr(mc) => match method_name(mc).as_str() {
@@ -626,12 +1022,23 @@ fn is_stdin(cx: &Cx, e: &ast::Expr) -> bool {
 fn is_stdout(cx: &Cx, e: &ast::Expr) -> bool {
     let _ = cx;
     match e {
-        ast::Expr::CallExpr(c) => c.expr().map(|c| c.syntax().text().to_string().ends_with("stdout")).unwrap_or(false),
+        ast::Expr::CallExpr(c) => c
+            .expr()
+            .map(|c| c.syntax().text().to_string().ends_with("stdout"))
+            .unwrap_or(false),
         _ => false,
     }
 }
 
-fn stdio_method(cx: &mut Cx, m: &ast::MethodCallExpr, name: &str, recv_ast: &ast::Expr, ret: &Ty, line: u32, out: &mut Vec<Stmt>) -> Option<Expr> {
+fn stdio_method(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    name: &str,
+    recv_ast: &ast::Expr,
+    ret: &Ty,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) -> Option<Expr> {
     let _ = (recv_ast, ret);
     match name {
         "read_line" | "read_to_string" => {
@@ -641,31 +1048,60 @@ fn stdio_method(cx: &mut Cx, m: &ast::MethodCallExpr, name: &str, recv_ast: &ast
             let place = expr::lower_expr(cx, &place_ast, out);
             let ps = render(&place);
             let l = cx.fresh("line");
-            let used = matches!(consumed_by(cx, &ast::Expr::MethodCallExpr(m.clone())).as_deref(), Some("unwrap" | "expect"));
+            let used = matches!(
+                consumed_by(cx, &ast::Expr::MethodCallExpr(m.clone())).as_deref(),
+                Some("unwrap" | "expect")
+            );
             if used {
                 if name == "read_line" {
-                    let tmp = push_local(cx, line, "String".into(), Some(Expr::raw("STDIN.lines().findFirst().orElse(null)")), out, "line");
+                    let tmp = push_local(
+                        cx,
+                        line,
+                        "String".into(),
+                        Some(Expr::raw("STDIN.lines().findFirst().orElse(null)")),
+                        out,
+                        "line",
+                    );
                     let n = push_local(cx, line, "int".into(), Some(Expr::raw("0")), out, "n");
-                    push_raw(out, line, format!("if ({tmp} != null) {{ {ps} += {tmp} + \"\\n\"; {n} = {tmp}.length() + 1; }}"));
+                    push_raw(
+                        out,
+                        line,
+                        format!(
+                            "if ({tmp} != null) {{ {ps} += {tmp} + \"\\n\"; {n} = {tmp}.length() + 1; }}"
+                        ),
+                    );
                     Some(Expr::name(n))
                 } else {
                     let tmp = push_local(
                         cx,
                         line,
                         "String".into(),
-                        Some(Expr::raw("STDIN.lines().map(l -> l + \"\\n\").collect(Collectors.joining())")),
+                        Some(Expr::raw(
+                            "STDIN.lines().map(l -> l + \"\\n\").collect(Collectors.joining())",
+                        )),
                         out,
                         "rest",
                     );
                     push_raw(out, line, format!("{ps} += {tmp};"));
-                    let n = push_local(cx, line, "int".into(), Some(Expr::call(Expr::name(tmp), "length", vec![])), out, "n");
+                    let n = push_local(
+                        cx,
+                        line,
+                        "int".into(),
+                        Some(Expr::call(Expr::name(tmp), "length", vec![])),
+                        out,
+                        "n",
+                    );
                     Some(Expr::name(n))
                 }
             } else {
                 let app = if name == "read_line" {
-                    Expr::raw(format!("STDIN.lines().findFirst().map({l} -> {l} + \"\\n\").orElse(\"\")"))
+                    Expr::raw(format!(
+                        "STDIN.lines().findFirst().map({l} -> {l} + \"\\n\").orElse(\"\")"
+                    ))
                 } else {
-                    Expr::raw(format!("STDIN.lines().map({l} -> {l} + \"\\n\").collect(Collectors.joining())"))
+                    Expr::raw(format!(
+                        "STDIN.lines().map({l} -> {l} + \"\\n\").collect(Collectors.joining())"
+                    ))
                 };
                 let assign = expr::place_assign(cx, &place_ast, "+=", app, out);
                 out.push(Stmt::new(line, StmtKind::Expr(assign)));
@@ -694,12 +1130,20 @@ fn is_entry_recv(e: &ast::Expr) -> bool {
 }
 
 // `m.entry(k)` chains: or_insert / or_insert_with / or_default -> computeIfAbsent.
-fn entry_method(cx: &mut Cx, m: &ast::MethodCallExpr, name: &str, args: &[Expr], out: &mut Vec<Stmt>) -> Option<Expr> {
+fn entry_method(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    name: &str,
+    args: &[Expr],
+    out: &mut Vec<Stmt>,
+) -> Option<Expr> {
     if !matches!(name, "or_insert" | "or_insert_with" | "or_default") {
         return None;
     }
     let recv_ast = m.receiver()?;
-    let ast::Expr::MethodCallExpr(entry) = &recv_ast else { return None };
+    let ast::Expr::MethodCallExpr(entry) = &recv_ast else {
+        return None;
+    };
     if method_name(entry) != "entry" {
         return None;
     }
@@ -721,14 +1165,19 @@ fn entry_method(cx: &mut Cx, m: &ast::MethodCallExpr, name: &str, args: &[Expr],
         _ => default_value(&v_ty),
     };
     let ignored = cx.fresh("ignored");
-    let f = Expr::Lambda { params: vec![ignored], body: LambdaBody::Expr(Box::new(value)) };
+    let f = Expr::Lambda {
+        params: vec![ignored],
+        body: LambdaBody::Expr(Box::new(value)),
+    };
     Some(Expr::call(map, "computeIfAbsent", vec![key, f]))
 }
 
 // Value produced by a `FnOnce() -> T` argument such as `Vec::new` or `|| expr`.
 fn ctor_value(cx: &mut Cx, a: &ast::Expr, ty: &Ty, out: &mut Vec<Stmt>) -> Option<Expr> {
     if let ast::Expr::ClosureExpr(c) = a {
-        if c.param_list().is_some_and(|pl| pl.params().next().is_some()) {
+        if c.param_list()
+            .is_some_and(|pl| pl.params().next().is_some())
+        {
             return None;
         }
         let body = c.body()?;
@@ -737,27 +1186,51 @@ fn ctor_value(cx: &mut Cx, a: &ast::Expr, ty: &Ty, out: &mut Vec<Stmt>) -> Optio
     let text = a.syntax().text().to_string();
     let last = text.rsplit("::").next().unwrap_or(&text);
     Some(match last {
-        "new" if text.contains("Vec") => Expr::New { ty: "ArrayList<>".into(), args: vec![] },
+        "new" if text.contains("Vec") => Expr::New {
+            ty: "ArrayList<>".into(),
+            args: vec![],
+        },
         "new" if text.contains("String") => Expr::str_lit(""),
-        "new" if text.contains("HashMap") => Expr::New { ty: "HashMap<>".into(), args: vec![] },
-        "new" if text.contains("HashSet") => Expr::New { ty: "HashSet<>".into(), args: vec![] },
+        "new" if text.contains("HashMap") => Expr::New {
+            ty: "HashMap<>".into(),
+            args: vec![],
+        },
+        "new" if text.contains("HashSet") => Expr::New {
+            ty: "HashSet<>".into(),
+            args: vec![],
+        },
         "default" => default_value(ty),
         _ => return None,
     })
 }
 
 // `*m.entry(k).or_insert(v) op= r` -> put / merge. Called from expr::lower_assign.
-pub fn lower_entry_assign(cx: &mut Cx, lhs: &ast::Expr, op: Option<ast::ArithOp>, rhs: &ast::Expr, out: &mut Vec<Stmt>) -> Option<Expr> {
-    let ast::Expr::PrefixExpr(p) = lhs else { return None };
+pub fn lower_entry_assign(
+    cx: &mut Cx,
+    lhs: &ast::Expr,
+    op: Option<ast::ArithOp>,
+    rhs: &ast::Expr,
+    out: &mut Vec<Stmt>,
+) -> Option<Expr> {
+    let ast::Expr::PrefixExpr(p) = lhs else {
+        return None;
+    };
     if p.op_kind() != Some(ast::UnaryOp::Deref) {
         return None;
     }
     let inner = p.expr()?;
-    let ast::Expr::MethodCallExpr(mc) = &inner else { return None };
-    if !matches!(method_name(mc).as_str(), "or_insert" | "or_insert_with" | "or_default") {
+    let ast::Expr::MethodCallExpr(mc) = &inner else {
+        return None;
+    };
+    if !matches!(
+        method_name(mc).as_str(),
+        "or_insert" | "or_insert_with" | "or_default"
+    ) {
         return None;
     }
-    let ast::Expr::MethodCallExpr(entry) = mc.receiver()? else { return None };
+    let ast::Expr::MethodCallExpr(entry) = mc.receiver()? else {
+        return None;
+    };
     if method_name(&entry) != "entry" {
         return None;
     }
@@ -782,12 +1255,19 @@ pub fn lower_entry_assign(cx: &mut Cx, lhs: &ast::Expr, op: Option<ast::ArithOp>
                 ast::ArithOp::Div => Expr::bin(Expr::name(x.clone()), "/", Expr::name(y.clone())),
                 ast::ArithOp::Rem => Expr::bin(Expr::name(x.clone()), "%", Expr::name(y.clone())),
                 ast::ArithOp::BitOr => Expr::bin(Expr::name(x.clone()), "|", Expr::name(y.clone())),
-                ast::ArithOp::BitAnd => Expr::bin(Expr::name(x.clone()), "&", Expr::name(y.clone())),
-                ast::ArithOp::BitXor => Expr::bin(Expr::name(x.clone()), "^", Expr::name(y.clone())),
+                ast::ArithOp::BitAnd => {
+                    Expr::bin(Expr::name(x.clone()), "&", Expr::name(y.clone()))
+                }
+                ast::ArithOp::BitXor => {
+                    Expr::bin(Expr::name(x.clone()), "^", Expr::name(y.clone()))
+                }
                 _ => return None,
             };
             let _ = v_ty;
-            let f = Expr::Lambda { params: vec![x, y], body: LambdaBody::Expr(Box::new(body)) };
+            let f = Expr::Lambda {
+                params: vec![x, y],
+                body: LambdaBody::Expr(Box::new(body)),
+            };
             Some(Expr::call(map, "merge", vec![key, r, f]))
         }
     }
@@ -812,97 +1292,255 @@ fn lower_int_method(
     let b0 = args.first().cloned().unwrap_or_else(|| Expr::raw("0"));
     let b1 = args.get(1).cloned().unwrap_or_else(|| Expr::raw("0"));
     let math = |f: &str, a: Vec<Expr>| Expr::call(Expr::raw("Math"), f, a);
-    let bits = |f: &str, a: Vec<Expr>| Expr::call(Expr::raw(if long { "Long" } else { "Integer" }), f, a);
+    let bits =
+        |f: &str, a: Vec<Expr>| Expr::call(Expr::raw(if long { "Long" } else { "Integer" }), f, a);
     match name {
         "abs" => Some(narrow(math("abs", vec![recv]), i)),
-        "signum" => Some(narrow(Expr::call(Expr::raw(if long { "Long" } else { "Integer" }), "signum", vec![recv]), i)),
-        "pow" => Some(Expr::Cast(i.java().into(), Box::new(math("pow", vec![recv, b0])))),
+        "signum" => Some(narrow(
+            Expr::call(
+                Expr::raw(if long { "Long" } else { "Integer" }),
+                "signum",
+                vec![recv],
+            ),
+            i,
+        )),
+        "pow" => Some(Expr::Cast(
+            i.java().into(),
+            Box::new(math("pow", vec![recv, b0])),
+        )),
         "min" => Some(narrow(math("min", vec![recv, b0]), i)),
         "max" => Some(narrow(math("max", vec![recv, b0]), i)),
-        "rem_euclid" => Some(narrow(math("floorMod", vec![recv, math("abs", vec![b0])]), i)),
+        "rem_euclid" => Some(narrow(
+            math("floorMod", vec![recv, math("abs", vec![b0])]),
+            i,
+        )),
         "div_euclid" => Some(narrow(math("floorDiv", vec![recv, b0]), i)),
-        "div_ceil" => Some(narrow(Expr::bin(Expr::bin(Expr::bin(recv, "+", b0.clone()), "-", Expr::raw("1")), "/", b0), i)),
+        "div_ceil" => Some(narrow(
+            Expr::bin(
+                Expr::bin(Expr::bin(recv, "+", b0.clone()), "-", Expr::raw("1")),
+                "/",
+                b0,
+            ),
+            i,
+        )),
         "count_ones" => Some(bits("bitCount", vec![recv])),
-        "count_zeros" => Some(Expr::bin(Expr::raw(if long { "64" } else { "32" }), "-", bits("bitCount", vec![recv]))),
+        "count_zeros" => Some(Expr::bin(
+            Expr::raw(if long { "64" } else { "32" }),
+            "-",
+            bits("bitCount", vec![recv]),
+        )),
         "leading_zeros" => Some(bits("numberOfLeadingZeros", vec![recv])),
         "trailing_zeros" => Some(bits("numberOfTrailingZeros", vec![recv])),
         "swap_bytes" => Some(bits("reverseBytes", vec![recv])),
         "reverse_bits" => Some(bits("reverse", vec![recv])),
         "rotate_left" => Some(bits("rotateLeft", vec![recv, b0])),
         "rotate_right" => Some(bits("rotateRight", vec![recv, b0])),
-        "is_power_of_two" => Some(Expr::bin(Expr::bin(Expr::bin(recv.clone(), "&", Expr::bin(recv.clone(), "-", Expr::raw("1"))), "==", Expr::raw("0")), "&&", Expr::bin(recv, ">", Expr::raw("0")))),
+        "is_power_of_two" => Some(Expr::bin(
+            Expr::bin(
+                Expr::bin(
+                    recv.clone(),
+                    "&",
+                    Expr::bin(recv.clone(), "-", Expr::raw("1")),
+                ),
+                "==",
+                Expr::raw("0"),
+            ),
+            "&&",
+            Expr::bin(recv, ">", Expr::raw("0")),
+        )),
         "is_positive" => Some(Expr::bin(recv, ">", Expr::raw("0"))),
         "is_negative" => Some(Expr::bin(recv, "<", Expr::raw("0"))),
-        "cmp" => Some(Expr::call(Expr::raw(if long { "Long" } else { "Integer" }), "compare", vec![recv, b0])),
-        "partial_cmp" => Some(opt_of(Expr::call(Expr::raw(if long { "Long" } else { "Integer" }), "compare", vec![recv, b0]))),
+        "cmp" => Some(Expr::call(
+            Expr::raw(if long { "Long" } else { "Integer" }),
+            "compare",
+            vec![recv, b0],
+        )),
+        "partial_cmp" => Some(opt_of(Expr::call(
+            Expr::raw(if long { "Long" } else { "Integer" }),
+            "compare",
+            vec![recv, b0],
+        ))),
         "to_string" => Some(Expr::call(Expr::raw("String"), "valueOf", vec![recv])),
         "clone" | "to_owned" => Some(recv),
         "abs_diff" => Some(narrow(math("abs", vec![Expr::bin(recv, "-", b0)]), i)),
-        _ if name.starts_with("checked_") => Some(checked_int(cx, recv, b0, b1, i, name, ret, line, out)),
+        _ if name.starts_with("checked_") => {
+            Some(checked_int(cx, recv, b0, b1, i, name, ret, line, out))
+        }
         _ if name.starts_with("saturating_") => Some(saturating_int(recv, b0, i, name)),
         _ if name.starts_with("wrapping_") => Some(wrapping_int(recv, b0, i, name)),
         _ => None,
     }
 }
 
-fn checked_int(cx: &mut Cx, recv: Expr, b0: Expr, _b1: Expr, i: Int, name: &str, ret: &Ty, line: u32, out: &mut Vec<Stmt>) -> Expr {
+fn checked_int(
+    cx: &mut Cx,
+    recv: Expr,
+    b0: Expr,
+    _b1: Expr,
+    i: Int,
+    name: &str,
+    ret: &Ty,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) -> Expr {
     let inner = opt_inner(ret);
     let empty = opt_empty(inner.as_ref());
     let yes = |v: Expr| opt_of(narrow(v, i));
     let uint = i.is_unsigned();
     let try_opt = |cx: &mut Cx, out: &mut Vec<Stmt>, v: Expr, exc: &str| {
-        let ty = format!("Optional<{}>", inner.as_ref().map(|t| t.boxed()).unwrap_or_else(|| "Integer".into()));
+        let ty = format!(
+            "Optional<{}>",
+            inner
+                .as_ref()
+                .map(|t| t.boxed())
+                .unwrap_or_else(|| "Integer".into())
+        );
         let n = cx.fresh("chk");
         let ex = cx.fresh("ex");
-        push_raw(out, line, format!("{ty} {n}; try {{ {n} = Optional.of({}); }} catch ({exc} {ex}) {{ {n} = Optional.empty(); }}", render(&v)));
+        push_raw(
+            out,
+            line,
+            format!(
+                "{ty} {n}; try {{ {n} = Optional.of({}); }} catch ({exc} {ex}) {{ {n} = Optional.empty(); }}",
+                render(&v)
+            ),
+        );
         Expr::name(n)
     };
     match name {
         "checked_add" => match i {
-            Int::U8 => conditional(Expr::bin(Expr::bin(recv.clone(), "+", b0.clone()), "<=", Expr::raw("255")), yes(Expr::bin(recv, "+", b0)), empty),
-            Int::U16 => conditional(Expr::bin(Expr::bin(recv.clone(), "+", b0.clone()), "<=", Expr::raw("65535")), yes(Expr::bin(recv, "+", b0)), empty),
-            Int::U32 | Int::Usize => conditional(
-                Expr::bin(Expr::bin(Expr::Cast("long".into(), Box::new(recv.clone())), "+", b0.clone()), "<=", Expr::raw("4294967295L")),
+            Int::U8 => conditional(
+                Expr::bin(
+                    Expr::bin(recv.clone(), "+", b0.clone()),
+                    "<=",
+                    Expr::raw("255"),
+                ),
                 yes(Expr::bin(recv, "+", b0)),
                 empty,
             ),
-            Int::U64 | Int::U128 => try_opt(cx, out, Expr::call(Expr::raw("Math"), "addExact", vec![recv, b0]), "ArithmeticException"),
+            Int::U16 => conditional(
+                Expr::bin(
+                    Expr::bin(recv.clone(), "+", b0.clone()),
+                    "<=",
+                    Expr::raw("65535"),
+                ),
+                yes(Expr::bin(recv, "+", b0)),
+                empty,
+            ),
+            Int::U32 | Int::Usize => conditional(
+                Expr::bin(
+                    Expr::bin(
+                        Expr::Cast("long".into(), Box::new(recv.clone())),
+                        "+",
+                        b0.clone(),
+                    ),
+                    "<=",
+                    Expr::raw("4294967295L"),
+                ),
+                yes(Expr::bin(recv, "+", b0)),
+                empty,
+            ),
+            Int::U64 | Int::U128 => try_opt(
+                cx,
+                out,
+                Expr::call(Expr::raw("Math"), "addExact", vec![recv, b0]),
+                "ArithmeticException",
+            ),
             Int::I8 => range_checked(recv, b0, i, "+", -128, 127, inner.as_ref()),
             Int::I16 => range_checked(recv, b0, i, "+", -32768, 32767, inner.as_ref()),
-            _ => try_opt(cx, out, Expr::call(Expr::raw("Math"), "addExact", vec![recv, b0]), "ArithmeticException"),
+            _ => try_opt(
+                cx,
+                out,
+                Expr::call(Expr::raw("Math"), "addExact", vec![recv, b0]),
+                "ArithmeticException",
+            ),
         },
         "checked_sub" => match i {
-            Int::U8 | Int::U16 | Int::U32 | Int::Usize => {
-                conditional(Expr::bin(recv.clone(), ">=", b0.clone()), yes(Expr::bin(recv, "-", b0)), empty)
-            }
+            Int::U8 | Int::U16 | Int::U32 | Int::Usize => conditional(
+                Expr::bin(recv.clone(), ">=", b0.clone()),
+                yes(Expr::bin(recv, "-", b0)),
+                empty,
+            ),
             Int::U64 | Int::U128 => conditional(
-                Expr::bin(Expr::call(Expr::raw("Long"), "compareUnsigned", vec![recv.clone(), b0.clone()]), ">=", Expr::raw("0")),
+                Expr::bin(
+                    Expr::call(
+                        Expr::raw("Long"),
+                        "compareUnsigned",
+                        vec![recv.clone(), b0.clone()],
+                    ),
+                    ">=",
+                    Expr::raw("0"),
+                ),
                 yes(Expr::bin(recv, "-", b0)),
                 empty,
             ),
             Int::I8 => range_checked(recv, b0, i, "-", -128, 127, inner.as_ref()),
             Int::I16 => range_checked(recv, b0, i, "-", -32768, 32767, inner.as_ref()),
-            _ => try_opt(cx, out, Expr::call(Expr::raw("Math"), "subtractExact", vec![recv, b0]), "ArithmeticException"),
+            _ => try_opt(
+                cx,
+                out,
+                Expr::call(Expr::raw("Math"), "subtractExact", vec![recv, b0]),
+                "ArithmeticException",
+            ),
         },
         "checked_mul" => match i {
             Int::U8 => conditional(
-                Expr::bin(Expr::bin(recv.clone(), "*", b0.clone()), "<=", Expr::raw("255")),
+                Expr::bin(
+                    Expr::bin(recv.clone(), "*", b0.clone()),
+                    "<=",
+                    Expr::raw("255"),
+                ),
                 yes(Expr::bin(recv, "*", b0)),
                 empty,
             ),
             Int::U16 => conditional(
-                Expr::bin(Expr::bin(Expr::Cast("long".into(), Box::new(recv.clone())), "*", b0.clone()), "<=", Expr::raw("65535")),
-                yes(Expr::Cast("int".into(), Box::new(Expr::bin(Expr::Cast("long".into(), Box::new(recv)), "*", b0)))),
+                Expr::bin(
+                    Expr::bin(
+                        Expr::Cast("long".into(), Box::new(recv.clone())),
+                        "*",
+                        b0.clone(),
+                    ),
+                    "<=",
+                    Expr::raw("65535"),
+                ),
+                yes(Expr::Cast(
+                    "int".into(),
+                    Box::new(Expr::bin(
+                        Expr::Cast("long".into(), Box::new(recv)),
+                        "*",
+                        b0,
+                    )),
+                )),
                 empty,
             ),
             Int::U32 | Int::Usize => conditional(
-                Expr::bin(Expr::bin(Expr::Cast("long".into(), Box::new(recv.clone())), "*", b0.clone()), "<=", Expr::raw("4294967295L")),
-                yes(Expr::Cast("int".into(), Box::new(Expr::bin(Expr::Cast("long".into(), Box::new(recv)), "*", b0)))),
+                Expr::bin(
+                    Expr::bin(
+                        Expr::Cast("long".into(), Box::new(recv.clone())),
+                        "*",
+                        b0.clone(),
+                    ),
+                    "<=",
+                    Expr::raw("4294967295L"),
+                ),
+                yes(Expr::Cast(
+                    "int".into(),
+                    Box::new(Expr::bin(
+                        Expr::Cast("long".into(), Box::new(recv)),
+                        "*",
+                        b0,
+                    )),
+                )),
                 empty,
             ),
             Int::I8 => range_checked(recv, b0, i, "*", -128, 127, inner.as_ref()),
             Int::I16 => range_checked(recv, b0, i, "*", -32768, 32767, inner.as_ref()),
-            _ => try_opt(cx, out, Expr::call(Expr::raw("Math"), "multiplyExact", vec![recv, b0]), "ArithmeticException"),
+            _ => try_opt(
+                cx,
+                out,
+                Expr::call(Expr::raw("Math"), "multiplyExact", vec![recv, b0]),
+                "ArithmeticException",
+            ),
         },
         "checked_div" => {
             let minv = int_min(i);
@@ -912,15 +1550,30 @@ fn checked_int(cx: &mut Cx, recv: Expr, b0: Expr, _b1: Expr, i: Int, name: &str,
                 Expr::bin(
                     Expr::bin(b0.clone(), "!=", Expr::raw("0")),
                     "&&",
-                    Expr::Unary("!", Box::new(Expr::bin(Expr::bin(recv.clone(), "==", Expr::raw(minv)), "&&", Expr::bin(b0.clone(), "==", Expr::raw("-1"))))),
+                    Expr::Unary(
+                        "!",
+                        Box::new(Expr::bin(
+                            Expr::bin(recv.clone(), "==", Expr::raw(minv)),
+                            "&&",
+                            Expr::bin(b0.clone(), "==", Expr::raw("-1")),
+                        )),
+                    ),
                 )
             };
             conditional(cond, yes(Expr::bin(recv, "/", b0)), empty)
         }
-        "checked_rem" => conditional(Expr::bin(b0.clone(), "!=", Expr::raw("0")), yes(Expr::bin(recv, "%", b0)), empty),
+        "checked_rem" => conditional(
+            Expr::bin(b0.clone(), "!=", Expr::raw("0")),
+            yes(Expr::bin(recv, "%", b0)),
+            empty,
+        ),
         "checked_neg" => {
             let minv = int_min(i);
-            conditional(Expr::bin(recv.clone(), "==", Expr::raw(minv)), empty, yes(Expr::Unary("-", Box::new(recv))))
+            conditional(
+                Expr::bin(recv.clone(), "==", Expr::raw(minv)),
+                empty,
+                yes(Expr::Unary("-", Box::new(recv))),
+            )
         }
         "checked_abs" => {
             let minv = int_min(i);
@@ -938,14 +1591,26 @@ fn conditional(cond: Expr, a: Expr, b: Expr) -> Expr {
     Expr::Ternary(Box::new(cond), Box::new(a), Box::new(b))
 }
 
-fn range_checked(recv: Expr, b: Expr, i: Int, op: &'static str, lo: i64, hi: i64, _inner: Option<&Ty>) -> Expr {
+fn range_checked(
+    recv: Expr,
+    b: Expr,
+    i: Int,
+    op: &'static str,
+    lo: i64,
+    hi: i64,
+    _inner: Option<&Ty>,
+) -> Expr {
     let val = Expr::bin(recv, op, b);
     let cond = Expr::bin(
         Expr::bin(val.clone(), ">=", Expr::raw(lo.to_string())),
         "&&",
         Expr::bin(val.clone(), "<=", Expr::raw(hi.to_string())),
     );
-    Expr::Ternary(Box::new(cond), Box::new(opt_of(narrow(val, i))), Box::new(Expr::raw("Optional.empty()")))
+    Expr::Ternary(
+        Box::new(cond),
+        Box::new(opt_of(narrow(val, i))),
+        Box::new(Expr::raw("Optional.empty()")),
+    )
 }
 
 fn int_min(i: Int) -> &'static str {
@@ -961,42 +1626,131 @@ fn saturating_int(recv: Expr, b: Expr, i: Int, name: &str) -> Expr {
     let math = |f: &str, a: Vec<Expr>| Expr::call(Expr::raw("Math"), f, a);
     match name {
         "saturating_add" => match i {
-            Int::U8 => narrow(math("min", vec![Expr::bin(recv, "+", b), Expr::raw("255")]), i),
-            Int::U16 => narrow(math("min", vec![Expr::bin(Expr::Cast("long".into(), Box::new(recv)), "+", b), Expr::raw("65535L")]), i),
-            Int::U32 | Int::Usize => narrow(math("min", vec![Expr::bin(Expr::Cast("long".into(), Box::new(recv)), "+", b), Expr::raw("4294967295L")]), i),
-            Int::I8 | Int::I16 => narrow(math("min", vec![Expr::raw(int_max(i)), Expr::bin(recv, "+", b)]), i),
+            Int::U8 => narrow(
+                math("min", vec![Expr::bin(recv, "+", b), Expr::raw("255")]),
+                i,
+            ),
+            Int::U16 => narrow(
+                math(
+                    "min",
+                    vec![
+                        Expr::bin(Expr::Cast("long".into(), Box::new(recv)), "+", b),
+                        Expr::raw("65535L"),
+                    ],
+                ),
+                i,
+            ),
+            Int::U32 | Int::Usize => narrow(
+                math(
+                    "min",
+                    vec![
+                        Expr::bin(Expr::Cast("long".into(), Box::new(recv)), "+", b),
+                        Expr::raw("4294967295L"),
+                    ],
+                ),
+                i,
+            ),
+            Int::I8 | Int::I16 => narrow(
+                math("min", vec![Expr::raw(int_max(i)), Expr::bin(recv, "+", b)]),
+                i,
+            ),
             Int::I32 => narrow(
-                math("max", vec![Expr::raw("Integer.MIN_VALUE"), math("min", vec![Expr::bin(Expr::Cast("long".into(), Box::new(recv)), "+", b), Expr::raw("Integer.MAX_VALUE")])]),
+                math(
+                    "max",
+                    vec![
+                        Expr::raw("Integer.MIN_VALUE"),
+                        math(
+                            "min",
+                            vec![
+                                Expr::bin(Expr::Cast("long".into(), Box::new(recv)), "+", b),
+                                Expr::raw("Integer.MAX_VALUE"),
+                            ],
+                        ),
+                    ],
+                ),
                 i,
             ),
             _ => Expr::bin(recv, "+", b),
         },
         "saturating_sub" => match i {
-            Int::U8 | Int::U16 | Int::U32 | Int::Usize => narrow(math("max", vec![Expr::bin(recv, "-", b), Expr::raw("0")]), i),
-            Int::I8 | Int::I16 => narrow(math("max", vec![Expr::raw(int_min(i)), Expr::bin(recv, "-", b)]), i),
-            Int::I32 => narrow(math("max", vec![Expr::bin(Expr::Cast("long".into(), Box::new(recv)), "-", b), Expr::raw("Integer.MIN_VALUE")]), i),
-            _ => Expr::bin(recv, "-", b),
-        },
-        "saturating_mul" => match i {
-            Int::U8 => narrow(math("min", vec![Expr::bin(recv, "*", b), Expr::raw("255")]), i),
-            Int::U16 => narrow(math("min", vec![Expr::bin(Expr::Cast("long".into(), Box::new(recv)), "*", b), Expr::raw("65535L")]), i),
-            Int::U32 | Int::Usize => narrow(
-                math("min", vec![Expr::bin(Expr::Cast("long".into(), Box::new(recv)), "*", b), Expr::raw("4294967295L")]),
+            Int::U8 | Int::U16 | Int::U32 | Int::Usize => narrow(
+                math("max", vec![Expr::bin(recv, "-", b), Expr::raw("0")]),
+                i,
+            ),
+            Int::I8 | Int::I16 => narrow(
+                math("max", vec![Expr::raw(int_min(i)), Expr::bin(recv, "-", b)]),
                 i,
             ),
             Int::I32 => narrow(
-                math("max", vec![Expr::raw("Integer.MIN_VALUE"), math("min", vec![Expr::bin(Expr::Cast("long".into(), Box::new(recv)), "*", b), Expr::raw("Integer.MAX_VALUE")])]),
+                math(
+                    "max",
+                    vec![
+                        Expr::bin(Expr::Cast("long".into(), Box::new(recv)), "-", b),
+                        Expr::raw("Integer.MIN_VALUE"),
+                    ],
+                ),
+                i,
+            ),
+            _ => Expr::bin(recv, "-", b),
+        },
+        "saturating_mul" => match i {
+            Int::U8 => narrow(
+                math("min", vec![Expr::bin(recv, "*", b), Expr::raw("255")]),
+                i,
+            ),
+            Int::U16 => narrow(
+                math(
+                    "min",
+                    vec![
+                        Expr::bin(Expr::Cast("long".into(), Box::new(recv)), "*", b),
+                        Expr::raw("65535L"),
+                    ],
+                ),
+                i,
+            ),
+            Int::U32 | Int::Usize => narrow(
+                math(
+                    "min",
+                    vec![
+                        Expr::bin(Expr::Cast("long".into(), Box::new(recv)), "*", b),
+                        Expr::raw("4294967295L"),
+                    ],
+                ),
+                i,
+            ),
+            Int::I32 => narrow(
+                math(
+                    "max",
+                    vec![
+                        Expr::raw("Integer.MIN_VALUE"),
+                        math(
+                            "min",
+                            vec![
+                                Expr::bin(Expr::Cast("long".into(), Box::new(recv)), "*", b),
+                                Expr::raw("Integer.MAX_VALUE"),
+                            ],
+                        ),
+                    ],
+                ),
                 i,
             ),
             _ => Expr::bin(recv, "*", b),
         },
         "saturating_abs" => {
             let m = int_min(i);
-            conditional(Expr::bin(recv.clone(), "==", Expr::raw(m)), narrow(Expr::raw(int_max(i)), i), narrow(math("abs", vec![recv]), i))
+            conditional(
+                Expr::bin(recv.clone(), "==", Expr::raw(m)),
+                narrow(Expr::raw(int_max(i)), i),
+                narrow(math("abs", vec![recv]), i),
+            )
         }
         "saturating_neg" => {
             let m = int_min(i);
-            conditional(Expr::bin(recv.clone(), "==", Expr::raw(m)), narrow(Expr::raw(int_max(i)), i), narrow(Expr::Unary("-", Box::new(recv)), i))
+            conditional(
+                Expr::bin(recv.clone(), "==", Expr::raw(m)),
+                narrow(Expr::raw(int_max(i)), i),
+                narrow(Expr::Unary("-", Box::new(recv)), i),
+            )
         }
         _ => Expr::bin(recv, "*", b),
     }
@@ -1024,7 +1778,10 @@ fn wrapping_int(recv: Expr, b: Expr, i: Int, name: &str) -> Expr {
         "wrapping_rem" => narrow(Expr::bin(recv, "%", b), i),
         "wrapping_neg" => narrow(Expr::Unary("-", Box::new(recv)), i),
         "wrapping_shl" => narrow(Expr::bin(recv, "<<", b), i),
-        "wrapping_shr" => narrow(Expr::bin(recv, if i.is_unsigned() { ">>>" } else { ">>" }, b), i),
+        "wrapping_shr" => narrow(
+            Expr::bin(recv, if i.is_unsigned() { ">>>" } else { ">>" }, b),
+            i,
+        ),
         "wrapping_abs" => narrow(Expr::call(Expr::raw("Math"), "abs", vec![recv]), i),
         _ => recv,
     }
@@ -1046,7 +1803,13 @@ fn lower_float_method(
     let _ = (m, ret);
     let cls = if f32 { "Float" } else { "Double" };
     let math = |f: &str, a: Vec<Expr>| Expr::call(Expr::raw("Math"), f, a);
-    let cast = |v: Expr| if f32 { Expr::Cast("float".into(), Box::new(v)) } else { v };
+    let cast = |v: Expr| {
+        if f32 {
+            Expr::Cast("float".into(), Box::new(v))
+        } else {
+            v
+        }
+    };
     let b0 = args.first().cloned().unwrap_or_else(|| Expr::raw("0.0"));
     let b1 = args.get(1).cloned().unwrap_or_else(|| Expr::raw("0.0"));
     Some(match name {
@@ -1056,11 +1819,17 @@ fn lower_float_method(
         "sqrt" => cast(math("sqrt", vec![recv])),
         "floor" => cast(math("floor", vec![recv])),
         "ceil" => cast(math("ceil", vec![recv])),
-        "trunc" => cast(Expr::Ternary(Box::new(Expr::bin(recv.clone(), "<", Expr::raw("0"))), Box::new(math("ceil", vec![recv.clone()])), Box::new(math("floor", vec![recv])))),
+        "trunc" => cast(Expr::Ternary(
+            Box::new(Expr::bin(recv.clone(), "<", Expr::raw("0"))),
+            Box::new(math("ceil", vec![recv.clone()])),
+            Box::new(math("floor", vec![recv])),
+        )),
         "round" => {
             let s = simple(cx, recv, &if f32 { Ty::F32 } else { Ty::F64 }, line, out);
             let r = render(&s);
-            cast(Expr::raw(format!("Math.copySign(Math.floor(Math.abs({r}) + 0.5), {r})")))
+            cast(Expr::raw(format!(
+                "Math.copySign(Math.floor(Math.abs({r}) + 0.5), {r})"
+            )))
         }
         "powi" | "powf" => cast(math("pow", vec![recv, b0])),
         "mul_add" => Expr::bin(Expr::bin(recv, "*", b0), "+", b1),
@@ -1068,14 +1837,22 @@ fn lower_float_method(
             let s = simple(cx, recv, &if f32 { Ty::F32 } else { Ty::F64 }, line, out);
             let r = render(&s);
             let b = render(&b0);
-            Expr::raw(format!("({r} - Math.floor({r} / Math.abs({b})) * Math.abs({b}))"))
+            Expr::raw(format!(
+                "({r} - Math.floor({r} / Math.abs({b})) * Math.abs({b}))"
+            ))
         }
         "is_nan" => Expr::call(Expr::raw(cls), "isNaN", vec![recv]),
         "is_infinite" => Expr::call(Expr::raw(cls), "isInfinite", vec![recv]),
         "is_finite" => Expr::bin(
-            Expr::Unary("!", Box::new(Expr::call(Expr::raw(cls), "isInfinite", vec![recv.clone()]))),
+            Expr::Unary(
+                "!",
+                Box::new(Expr::call(Expr::raw(cls), "isInfinite", vec![recv.clone()])),
+            ),
             "&&",
-            Expr::Unary("!", Box::new(Expr::call(Expr::raw(cls), "isNaN", vec![recv]))),
+            Expr::Unary(
+                "!",
+                Box::new(Expr::call(Expr::raw(cls), "isNaN", vec![recv])),
+            ),
         ),
         "signum" => cast(math("signum", vec![recv])),
         "copysign" => cast(math("copySign", vec![recv, b0])),
@@ -1131,7 +1908,13 @@ fn lower_small_method(
     let c = |f: &str, a: Vec<Expr>| Expr::call(Expr::raw("Character"), f, a);
     Some(match name {
         "is_alphabetic" | "is_uppercase" | "is_lowercase" => c(
-            if name == "is_alphabetic" { "isLetter" } else if name == "is_uppercase" { "isUpperCase" } else { "isLowerCase" },
+            if name == "is_alphabetic" {
+                "isLetter"
+            } else if name == "is_uppercase" {
+                "isUpperCase"
+            } else {
+                "isLowerCase"
+            },
             vec![recv],
         ),
         "is_numeric" => c("isDigit", vec![recv]),
@@ -1139,48 +1922,108 @@ fn lower_small_method(
         "is_whitespace" => c("isWhitespace", vec![recv]),
         "is_control" => c("isISOControl", vec![recv]),
         "is_ascii" => Expr::bin(recv, "<", Expr::raw("128")),
-        "is_ascii_digit" => Expr::bin(Expr::bin(recv.clone(), ">=", Expr::raw("'0'")), "&&", Expr::bin(recv, "<=", Expr::raw("'9'"))),
+        "is_ascii_digit" => Expr::bin(
+            Expr::bin(recv.clone(), ">=", Expr::raw("'0'")),
+            "&&",
+            Expr::bin(recv, "<=", Expr::raw("'9'")),
+        ),
         "is_ascii_alphabetic" => {
-            let lower = Expr::bin(Expr::bin(recv.clone(), ">=", Expr::raw("'a'")), "&&", Expr::bin(recv.clone(), "<=", Expr::raw("'z'")));
-            let upper = Expr::bin(Expr::bin(recv.clone(), ">=", Expr::raw("'A'")), "&&", Expr::bin(recv, "<=", Expr::raw("'Z'")));
+            let lower = Expr::bin(
+                Expr::bin(recv.clone(), ">=", Expr::raw("'a'")),
+                "&&",
+                Expr::bin(recv.clone(), "<=", Expr::raw("'z'")),
+            );
+            let upper = Expr::bin(
+                Expr::bin(recv.clone(), ">=", Expr::raw("'A'")),
+                "&&",
+                Expr::bin(recv, "<=", Expr::raw("'Z'")),
+            );
             Expr::bin(lower, "||", upper)
         }
         "is_ascii_alphanumeric" => {
-            let digit = Expr::bin(Expr::bin(recv.clone(), ">=", Expr::raw("'0'")), "&&", Expr::bin(recv.clone(), "<=", Expr::raw("'9'")));
-            let lower = Expr::bin(Expr::bin(recv.clone(), ">=", Expr::raw("'a'")), "&&", Expr::bin(recv.clone(), "<=", Expr::raw("'z'")));
-            let upper = Expr::bin(Expr::bin(recv.clone(), ">=", Expr::raw("'A'")), "&&", Expr::bin(recv, "<=", Expr::raw("'Z'")));
+            let digit = Expr::bin(
+                Expr::bin(recv.clone(), ">=", Expr::raw("'0'")),
+                "&&",
+                Expr::bin(recv.clone(), "<=", Expr::raw("'9'")),
+            );
+            let lower = Expr::bin(
+                Expr::bin(recv.clone(), ">=", Expr::raw("'a'")),
+                "&&",
+                Expr::bin(recv.clone(), "<=", Expr::raw("'z'")),
+            );
+            let upper = Expr::bin(
+                Expr::bin(recv.clone(), ">=", Expr::raw("'A'")),
+                "&&",
+                Expr::bin(recv, "<=", Expr::raw("'Z'")),
+            );
             Expr::bin(Expr::bin(digit, "||", lower), "||", upper)
         }
         "is_ascii_whitespace" => Expr::bin(
             Expr::bin(recv.clone(), "==", Expr::raw("' '")),
             "||",
-            Expr::bin(Expr::bin(recv.clone(), ">=", Expr::raw("'\\t'")), "&&", Expr::bin(recv, "<=", Expr::raw("'\\r'"))),
+            Expr::bin(
+                Expr::bin(recv.clone(), ">=", Expr::raw("'\\t'")),
+                "&&",
+                Expr::bin(recv, "<=", Expr::raw("'\\r'")),
+            ),
         ),
-        "is_ascii_uppercase" => Expr::bin(Expr::bin(recv.clone(), ">=", Expr::raw("'A'")), "&&", Expr::bin(recv, "<=", Expr::raw("'Z'"))),
-        "is_ascii_lowercase" => Expr::bin(Expr::bin(recv.clone(), ">=", Expr::raw("'a'")), "&&", Expr::bin(recv, "<=", Expr::raw("'z'"))),
+        "is_ascii_uppercase" => Expr::bin(
+            Expr::bin(recv.clone(), ">=", Expr::raw("'A'")),
+            "&&",
+            Expr::bin(recv, "<=", Expr::raw("'Z'")),
+        ),
+        "is_ascii_lowercase" => Expr::bin(
+            Expr::bin(recv.clone(), ">=", Expr::raw("'a'")),
+            "&&",
+            Expr::bin(recv, "<=", Expr::raw("'z'")),
+        ),
         "is_ascii_hexdigit" => {
-            let d = Expr::bin(Expr::bin(recv.clone(), ">=", Expr::raw("'0'")), "&&", Expr::bin(recv.clone(), "<=", Expr::raw("'9'")));
-            let l = Expr::bin(Expr::bin(recv.clone(), ">=", Expr::raw("'a'")), "&&", Expr::bin(recv.clone(), "<=", Expr::raw("'f'")));
-            let u = Expr::bin(Expr::bin(recv.clone(), ">=", Expr::raw("'A'")), "&&", Expr::bin(recv, "<=", Expr::raw("'F'")));
+            let d = Expr::bin(
+                Expr::bin(recv.clone(), ">=", Expr::raw("'0'")),
+                "&&",
+                Expr::bin(recv.clone(), "<=", Expr::raw("'9'")),
+            );
+            let l = Expr::bin(
+                Expr::bin(recv.clone(), ">=", Expr::raw("'a'")),
+                "&&",
+                Expr::bin(recv.clone(), "<=", Expr::raw("'f'")),
+            );
+            let u = Expr::bin(
+                Expr::bin(recv.clone(), ">=", Expr::raw("'A'")),
+                "&&",
+                Expr::bin(recv, "<=", Expr::raw("'F'")),
+            );
             Expr::bin(Expr::bin(d, "||", l), "||", u)
         }
-        "is_digit" => Expr::bin(Expr::call(Expr::raw("Character"), "digit", vec![recv, b0]), ">=", Expr::raw("0")),
+        "is_digit" => Expr::bin(
+            Expr::call(Expr::raw("Character"), "digit", vec![recv, b0]),
+            ">=",
+            Expr::raw("0"),
+        ),
         "to_digit" => {
             let d = Expr::call(Expr::raw("Character"), "digit", vec![recv, b0]);
             let n = cx.fresh("digit");
-            push_raw(
-                out,
-                line,
-                format!("int {n} = {};", render(&d)),
-            );
-            conditional(Expr::bin(Expr::name(n.clone()), ">=", Expr::raw("0")), opt_of(Expr::name(n.clone())), opt_empty(opt_inner(ret).as_ref()))
+            push_raw(out, line, format!("int {n} = {};", render(&d)));
+            conditional(
+                Expr::bin(Expr::name(n.clone()), ">=", Expr::raw("0")),
+                opt_of(Expr::name(n.clone())),
+                opt_empty(opt_inner(ret).as_ref()),
+            )
         }
         "to_ascii_uppercase" | "to_uppercase" => c("toUpperCase", vec![recv]),
         "to_ascii_lowercase" | "to_lowercase" => c("toLowerCase", vec![recv]),
         "to_string" => Expr::call(Expr::raw("String"), "valueOf", vec![recv]),
-        "eq_ignore_ascii_case" => Expr::bin(c("toLowerCase", vec![recv]), "==", c("toLowerCase", vec![b0])),
+        "eq_ignore_ascii_case" => Expr::bin(
+            c("toLowerCase", vec![recv]),
+            "==",
+            c("toLowerCase", vec![b0]),
+        ),
         "cmp" => Expr::call(Expr::raw("Character"), "compare", vec![recv, b0]),
-        "partial_cmp" => opt_of(Expr::call(Expr::raw("Character"), "compare", vec![recv, b0])),
+        "partial_cmp" => opt_of(Expr::call(
+            Expr::raw("Character"),
+            "compare",
+            vec![recv, b0],
+        )),
         "clone" | "to_owned" => recv,
         _ => return None,
     })
@@ -1202,7 +2045,10 @@ fn lower_str_method(
 ) -> Option<Expr> {
     let b0 = args.first().cloned().unwrap_or_else(|| Expr::str_lit(""));
     let b1 = args.get(1).cloned().unwrap_or_else(|| Expr::str_lit(""));
-    let arg0_ty = arg_asts.first().map(|a| cx.ty(a)).unwrap_or_else(|| Ty::Str);
+    let arg0_ty = arg_asts
+        .first()
+        .map(|a| cx.ty(a))
+        .unwrap_or_else(|| Ty::Str);
     match name {
         "len" => return Some(Expr::call(recv, "length", vec![])),
         "is_empty" => return Some(Expr::call(recv, "isEmpty", vec![])),
@@ -1214,7 +2060,15 @@ fn lower_str_method(
             let v = Expr::bin(recv, "+", b0);
             return Some(expr::place_assign(cx, recv_ast, "=", v, out));
         }
-        "clear" => return Some(expr::place_assign(cx, recv_ast, "=", Expr::str_lit(""), out)),
+        "clear" => {
+            return Some(expr::place_assign(
+                cx,
+                recv_ast,
+                "=",
+                Expr::str_lit(""),
+                out,
+            ));
+        }
         "insert" => {
             let i = simple(cx, b0, &Ty::Int(Int::Usize), line, out);
             let pre = Expr::call(recv.clone(), "substring", vec![Expr::raw("0"), i.clone()]);
@@ -1235,30 +2089,54 @@ fn lower_str_method(
                 out,
                 "popped",
             );
-            push_raw(out, line, format!("if ({n}.isPresent()) {ps} = {ps}.substring(0, {ps}.length() - 1);"));
+            push_raw(
+                out,
+                line,
+                format!("if ({n}.isPresent()) {ps} = {ps}.substring(0, {ps}.length() - 1);"),
+            );
             return Some(Expr::name(n));
         }
         "truncate" => {
             let p = expr::lower_expr(cx, recv_ast, out);
             let n = simple(cx, b0, &Ty::Int(Int::Usize), line, out);
             let (ps, ns) = (render(&p), render(&n));
-            push_raw(out, line, format!("if ({ps}.length() > {ns}) {ps} = {ps}.substring(0, {ns});"));
+            push_raw(
+                out,
+                line,
+                format!("if ({ps}.length() > {ns}) {ps} = {ps}.substring(0, {ns});"),
+            );
             return Some(Expr::raw("null"));
         }
         "contains" => {
-            let arg = if matches!(arg0_ty.strip_refs(), Ty::Char) { Expr::call(Expr::raw("String"), "valueOf", vec![b0]) } else { b0 };
+            let arg = if matches!(arg0_ty.strip_refs(), Ty::Char) {
+                Expr::call(Expr::raw("String"), "valueOf", vec![b0])
+            } else {
+                b0
+            };
             return Some(Expr::call(recv, "contains", vec![arg]));
         }
         "starts_with" => {
-            let arg = if matches!(arg0_ty.strip_refs(), Ty::Char) { Expr::call(Expr::raw("String"), "valueOf", vec![b0]) } else { b0 };
+            let arg = if matches!(arg0_ty.strip_refs(), Ty::Char) {
+                Expr::call(Expr::raw("String"), "valueOf", vec![b0])
+            } else {
+                b0
+            };
             return Some(Expr::call(recv, "startsWith", vec![arg]));
         }
         "ends_with" => {
-            let arg = if matches!(arg0_ty.strip_refs(), Ty::Char) { Expr::call(Expr::raw("String"), "valueOf", vec![b0]) } else { b0 };
+            let arg = if matches!(arg0_ty.strip_refs(), Ty::Char) {
+                Expr::call(Expr::raw("String"), "valueOf", vec![b0])
+            } else {
+                b0
+            };
             return Some(Expr::call(recv, "endsWith", vec![arg]));
         }
         "find" | "rfind" => {
-            let getter = if name == "find" { "indexOf" } else { "lastIndexOf" };
+            let getter = if name == "find" {
+                "indexOf"
+            } else {
+                "lastIndexOf"
+            };
             let sv = simple(cx, recv, &Ty::Str, line, out);
             let av = simple(cx, b0, &arg0_ty, line, out);
             let idx = Expr::call(sv, getter, vec![av]);
@@ -1274,10 +2152,18 @@ fn lower_str_method(
         "trim_start" => return Some(Expr::call(recv, "stripLeading", vec![])),
         "trim_end" => return Some(Expr::call(recv, "stripTrailing", vec![])),
         "to_uppercase" | "to_ascii_uppercase" => {
-            return Some(Expr::call(recv, "toUpperCase", vec![Expr::raw("Locale.ROOT")]))
+            return Some(Expr::call(
+                recv,
+                "toUpperCase",
+                vec![Expr::raw("Locale.ROOT")],
+            ));
         }
         "to_lowercase" | "to_ascii_lowercase" => {
-            return Some(Expr::call(recv, "toLowerCase", vec![Expr::raw("Locale.ROOT")]))
+            return Some(Expr::call(
+                recv,
+                "toLowerCase",
+                vec![Expr::raw("Locale.ROOT")],
+            ));
         }
         "repeat" => return Some(Expr::call(recv, "repeat", vec![b0])),
         "eq_ignore_ascii_case" => return Some(Expr::call(recv, "equalsIgnoreCase", vec![b0])),
@@ -1297,22 +2183,52 @@ fn lower_str_method(
             return Some(Expr::call(Expr::raw("Map"), "entry", vec![a, b]));
         }
         "strip_prefix" | "strip_suffix" => {
-            let test = if name == "strip_prefix" { "startsWith" } else { "endsWith" };
+            let test = if name == "strip_prefix" {
+                "startsWith"
+            } else {
+                "endsWith"
+            };
             let sv = simple(cx, recv, &Ty::Str, line, out);
             let av = simple(cx, b0, &arg0_ty, line, out);
             let inner = if name == "strip_prefix" {
-                Expr::call(sv.clone(), "substring", vec![Expr::call(av.clone(), "length", vec![])])
+                Expr::call(
+                    sv.clone(),
+                    "substring",
+                    vec![Expr::call(av.clone(), "length", vec![])],
+                )
             } else {
-                Expr::call(sv.clone(), "substring", vec![Expr::raw("0"), Expr::bin(Expr::call(sv.clone(), "length", vec![]), "-", Expr::call(av.clone(), "length", vec![]))])
+                Expr::call(
+                    sv.clone(),
+                    "substring",
+                    vec![
+                        Expr::raw("0"),
+                        Expr::bin(
+                            Expr::call(sv.clone(), "length", vec![]),
+                            "-",
+                            Expr::call(av.clone(), "length", vec![]),
+                        ),
+                    ],
+                )
             };
-            return Some(conditional(Expr::call(sv, test, vec![av]), opt_of(inner), opt_empty(opt_inner(ret).as_ref())));
+            return Some(conditional(
+                Expr::call(sv, test, vec![av]),
+                opt_of(inner),
+                opt_empty(opt_inner(ret).as_ref()),
+            ));
         }
         _ => {}
     }
     None
 }
 
-fn parse_expr(cx: &mut Cx, m: &ast::MethodCallExpr, recv: Expr, ret: &Ty, line: u32, out: &mut Vec<Stmt>) -> Expr {
+fn parse_expr(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    recv: Expr,
+    ret: &Ty,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) -> Expr {
     let target = match ret.strip_refs() {
         Ty::Result(t, _) => (**t).clone(),
         _ => Ty::Other("?".into()),
@@ -1326,7 +2242,10 @@ fn parse_expr(cx: &mut Cx, m: &ast::MethodCallExpr, recv: Expr, ret: &Ty, line: 
         Ty::Char => Expr::call(recv.clone(), "charAt", vec![Expr::raw("0")]),
         _ => return cx.unsupported(m.syntax(), "`parse` to this type"),
     };
-    if matches!(consumed_by(cx, &ast::Expr::MethodCallExpr(m.clone())).as_deref(), Some("unwrap" | "expect")) {
+    if matches!(
+        consumed_by(cx, &ast::Expr::MethodCallExpr(m.clone())).as_deref(),
+        Some("unwrap" | "expect")
+    ) {
         return call;
     }
     wrap_try_ok(cx, line, ret, call, "NumberFormatException", out)
@@ -1353,12 +2272,26 @@ fn lower_option_method(
         "is_none" => Some(Expr::call(recv, "isEmpty", vec![])),
         "unwrap" => Some(Expr::call(recv, "orElseThrow", vec![])),
         "expect" => {
-            let msg = Expr::New { ty: "RuntimeException".into(), args: vec![b0] };
-            Some(Expr::call(recv, "orElseThrow", vec![Expr::Lambda { params: vec![], body: LambdaBody::Expr(Box::new(msg)) }]))
+            let msg = Expr::New {
+                ty: "RuntimeException".into(),
+                args: vec![b0],
+            };
+            Some(Expr::call(
+                recv,
+                "orElseThrow",
+                vec![Expr::Lambda {
+                    params: vec![],
+                    body: LambdaBody::Expr(Box::new(msg)),
+                }],
+            ))
         }
         "unwrap_or" => Some(Expr::call(recv, "orElse", vec![b0])),
         "unwrap_or_else" => Some(Expr::call(recv, "orElseGet", vec![b0])),
-        "unwrap_or_default" => Some(Expr::call(recv, "orElse", vec![default_value(&inner.unwrap_or(Ty::Other("?".into())))])),
+        "unwrap_or_default" => Some(Expr::call(
+            recv,
+            "orElse",
+            vec![default_value(&inner.unwrap_or(Ty::Other("?".into())))],
+        )),
         "map" | "and_then" | "filter" => {
             let java = if name == "and_then" { "flatMap" } else { name };
             Some(Expr::call(recv, java, vec![b0]))
@@ -1368,12 +2301,22 @@ fn lower_option_method(
             let mapped = Expr::call(recv, "map", vec![b1]);
             Some(Expr::call(mapped, "orElse", vec![b0]))
         }
-        "or" => Some(Expr::call(recv, "or", vec![Expr::Lambda { params: vec![], body: LambdaBody::Expr(Box::new(b0)) }])),
+        "or" => Some(Expr::call(
+            recv,
+            "or",
+            vec![Expr::Lambda {
+                params: vec![],
+                body: LambdaBody::Expr(Box::new(b0)),
+            }],
+        )),
         "or_else" => Some(Expr::call(recv, "or", vec![b0])),
         "ok_or" => {
             cx.needs_result = true;
             let v = cx.fresh("v");
-            let ok_ty = inner.as_ref().map(|t| t.boxed()).unwrap_or_else(|| "Object".into());
+            let ok_ty = inner
+                .as_ref()
+                .map(|t| t.boxed())
+                .unwrap_or_else(|| "Object".into());
             let err_ty = match ret.strip_refs() {
                 Ty::Result(_, e) => e.boxed(),
                 _ => "Object".into(),
@@ -1482,9 +2425,15 @@ fn lower_result_method(
 fn is_unwrapped_source(cx: &Cx, recv_ast: &ast::Expr) -> bool {
     let _ = cx;
     match recv_ast {
-        ast::Expr::MethodCallExpr(mc) => matches!(method_name(mc).as_str(), "parse" | "read_line" | "read_to_string"),
+        ast::Expr::MethodCallExpr(mc) => matches!(
+            method_name(mc).as_str(),
+            "parse" | "read_line" | "read_to_string"
+        ),
         ast::Expr::CallExpr(c) => {
-            let text = c.expr().map(|e| e.syntax().text().to_string()).unwrap_or_default();
+            let text = c
+                .expr()
+                .map(|e| e.syntax().text().to_string())
+                .unwrap_or_default();
             text.ends_with("read_to_string")
                 || text.ends_with("from_str_radix")
                 || text.ends_with("from_utf8")
@@ -1519,7 +2468,11 @@ fn lower_vec_method(
         "push" => Some(Expr::call(recv, "add", vec![b0])),
         "pop" => {
             let cond = Expr::call(recv.clone(), "isEmpty", vec![]);
-            Some(conditional(cond, opt_empty(witness.as_ref()), opt_of(Expr::call(recv, "removeLast", vec![]))))
+            Some(conditional(
+                cond,
+                opt_empty(witness.as_ref()),
+                opt_of(Expr::call(recv, "removeLast", vec![])),
+            ))
         }
         "get" => {
             if let Some(ast::Expr::RangeExpr(r)) = arg_asts.first() {
@@ -1527,26 +2480,49 @@ fn lower_vec_method(
                 return Some(opt_of(sub));
             }
             let cond = Expr::bin(b0.clone(), "<", Expr::call(recv.clone(), "size", vec![]));
-            Some(conditional(cond, opt_of(Expr::call(recv, "get", vec![b0])), opt_empty(witness.as_ref())))
+            Some(conditional(
+                cond,
+                opt_of(Expr::call(recv, "get", vec![b0])),
+                opt_empty(witness.as_ref()),
+            ))
         }
-        "first" => Some(Expr::call(Expr::call(recv, "stream", vec![]), "findFirst", vec![])),
+        "first" => Some(Expr::call(
+            Expr::call(recv, "stream", vec![]),
+            "findFirst",
+            vec![],
+        )),
         "last" => {
             let cond = Expr::call(recv.clone(), "isEmpty", vec![]);
-            Some(conditional(cond, opt_empty(witness.as_ref()), opt_of(Expr::call(recv, "getLast", vec![]))))
+            Some(conditional(
+                cond,
+                opt_empty(witness.as_ref()),
+                opt_of(Expr::call(recv, "getLast", vec![])),
+            ))
         }
         "insert" => Some(Expr::call(recv, "add", vec![b0, b1])),
         "remove" => Some(Expr::call(recv, "remove", vec![b0])),
-        "swap" => Some(Expr::call(Expr::raw("Collections"), "swap", vec![recv, b0, b1])),
+        "swap" => Some(Expr::call(
+            Expr::raw("Collections"),
+            "swap",
+            vec![recv, b0, b1],
+        )),
         "clear" => Some(Expr::call(recv, "clear", vec![])),
         "truncate" => {
             let p = simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out);
             let n = simple(cx, b0, &Ty::Int(Int::Usize), line, out);
             let (ps, ns) = (render(&p), render(&n));
-            push_raw(out, line, format!("if ({ps}.size() > {ns}) {ps}.subList({ns}, {ps}.size()).clear();"));
+            push_raw(
+                out,
+                line,
+                format!("if ({ps}.size() > {ns}) {ps}.subList({ns}, {ps}.size()).clear();"),
+            );
             Some(Expr::raw("null"))
         }
         "extend" => {
-            let at = arg_asts.first().map(|a| cx.ty(a)).unwrap_or_else(|| Ty::Other("?".into()));
+            let at = arg_asts
+                .first()
+                .map(|a| cx.ty(a))
+                .unwrap_or_else(|| Ty::Other("?".into()));
             let arg = if matches!(at.strip_refs(), Ty::Iter(_)) {
                 Expr::call(b0, "collect", vec![Expr::raw("Collectors.toList()")])
             } else {
@@ -1565,7 +2541,9 @@ fn lower_vec_method(
             push_raw(
                 out,
                 line,
-                format!("for (int {i} = {ps}.size() - 1; {i} > 0; {i}--) if ({ps}.get({i}).equals({ps}.get({i} - 1))) {ps}.remove({i});"),
+                format!(
+                    "for (int {i} = {ps}.size() - 1; {i} > 0; {i}--) if ({ps}.get({i}).equals({ps}.get({i} - 1))) {ps}.remove({i});"
+                ),
             );
             Some(Expr::raw("null"))
         }
@@ -1590,18 +2568,43 @@ fn lower_vec_method(
         "contains" => Some(Expr::call(recv, "contains", vec![b0])),
         "binary_search" | "binary_search_by" => {
             cx.needs_result = true;
-            let n = push_local(cx, line, "int".into(), Some(Expr::call(Expr::raw("Collections"), "binarySearch", vec![recv, b0])), out, "pos");
+            let n = push_local(
+                cx,
+                line,
+                "int".into(),
+                Some(Expr::call(
+                    Expr::raw("Collections"),
+                    "binarySearch",
+                    vec![recv, b0],
+                )),
+                out,
+                "pos",
+            );
             let idx = Expr::name(n);
             Some(conditional(
                 Expr::bin(idx.clone(), ">=", Expr::raw("0")),
-                Expr::New { ty: "Ok<Integer, Integer>".into(), args: vec![idx.clone()] },
-                Expr::New { ty: "Err<Integer, Integer>".into(), args: vec![Expr::bin(Expr::Unary("-", Box::new(idx)), "-", Expr::raw("1"))] },
+                Expr::New {
+                    ty: "Ok<Integer, Integer>".into(),
+                    args: vec![idx.clone()],
+                },
+                Expr::New {
+                    ty: "Err<Integer, Integer>".into(),
+                    args: vec![Expr::bin(
+                        Expr::Unary("-", Box::new(idx)),
+                        "-",
+                        Expr::raw("1"),
+                    )],
+                },
             ))
         }
         "split_at" => {
             let i = simple(cx, b0, &Ty::Int(Int::Usize), line, out);
             let a = Expr::call(recv.clone(), "subList", vec![Expr::raw("0"), i.clone()]);
-            let b = Expr::call(recv.clone(), "subList", vec![i, Expr::call(recv, "size", vec![])]);
+            let b = Expr::call(
+                recv.clone(),
+                "subList",
+                vec![i, Expr::call(recv, "size", vec![])],
+            );
             Some(Expr::call(Expr::raw("Map"), "entry", vec![a, b]))
         }
         "clone" => Some(clone_expr(recv, &Ty::Vec(Box::new(elem.clone())))),
@@ -1627,9 +2630,13 @@ fn typed_lambda(f: Expr, elem: &Ty) -> Expr {
 
 fn negate_lambda(f: Expr) -> Expr {
     match f {
-        Expr::Lambda { params, body: LambdaBody::Expr(e) } => {
-            Expr::Lambda { params, body: LambdaBody::Expr(Box::new(Expr::Unary("!", e))) }
-        }
+        Expr::Lambda {
+            params,
+            body: LambdaBody::Expr(e),
+        } => Expr::Lambda {
+            params,
+            body: LambdaBody::Expr(Box::new(Expr::Unary("!", e))),
+        },
         other => other,
     }
 }
@@ -1656,12 +2663,24 @@ fn lower_map_method(
     match name {
         "insert" => {
             let put = Expr::call(recv, "put", vec![b0, b1]);
-            if discarded(m) { Some(put) } else { Some(Expr::call(Expr::raw("Optional"), "ofNullable", vec![put])) }
+            if discarded(m) {
+                Some(put)
+            } else {
+                Some(Expr::call(Expr::raw("Optional"), "ofNullable", vec![put]))
+            }
         }
-        "get" | "get_mut" => Some(Expr::call(Expr::raw("Optional"), "ofNullable", vec![Expr::call(recv, "get", vec![b0])])),
+        "get" | "get_mut" => Some(Expr::call(
+            Expr::raw("Optional"),
+            "ofNullable",
+            vec![Expr::call(recv, "get", vec![b0])],
+        )),
         "remove" => {
             let call = Expr::call(recv, "remove", vec![b0]);
-            if discarded(m) { Some(call) } else { Some(Expr::call(Expr::raw("Optional"), "ofNullable", vec![call])) }
+            if discarded(m) {
+                Some(call)
+            } else {
+                Some(Expr::call(Expr::raw("Optional"), "ofNullable", vec![call]))
+            }
         }
         "contains_key" => Some(Expr::call(recv, "containsKey", vec![b0])),
         "len" => Some(Expr::call(recv, "size", vec![])),
@@ -1712,19 +2731,25 @@ fn lower_set_method(
         "union" => {
             let s = render(&recv);
             let o = render(&b0);
-            Some(Expr::raw(format!("Stream.concat({s}.stream(), {o}.stream()).distinct()")))
+            Some(Expr::raw(format!(
+                "Stream.concat({s}.stream(), {o}.stream()).distinct()"
+            )))
         }
         "intersection" => {
             let x = cx.fresh("x");
             let s = render(&recv);
             let o = render(&b0);
-            Some(Expr::raw(format!("{s}.stream().filter({x} -> {o}.contains({x}))")))
+            Some(Expr::raw(format!(
+                "{s}.stream().filter({x} -> {o}.contains({x}))"
+            )))
         }
         "difference" => {
             let x = cx.fresh("x");
             let s = render(&recv);
             let o = render(&b0);
-            Some(Expr::raw(format!("{s}.stream().filter({x} -> !{o}.contains({x}))")))
+            Some(Expr::raw(format!(
+                "{s}.stream().filter({x} -> !{o}.contains({x}))"
+            )))
         }
         "symmetric_difference" => {
             let x = cx.fresh("x");
@@ -1736,11 +2761,19 @@ fn lower_set_method(
         }
         "is_subset" => {
             let x = cx.fresh("x");
-            Some(Expr::raw(format!("{}.stream().allMatch({x} -> {}.contains({x}))", render(&recv), render(&b0))))
+            Some(Expr::raw(format!(
+                "{}.stream().allMatch({x} -> {}.contains({x}))",
+                render(&recv),
+                render(&b0)
+            )))
         }
         "is_superset" => {
             let x = cx.fresh("x");
-            Some(Expr::raw(format!("{}.stream().allMatch({x} -> {}.contains({x}))", render(&b0), render(&recv))))
+            Some(Expr::raw(format!(
+                "{}.stream().allMatch({x} -> {}.contains({x}))",
+                render(&b0),
+                render(&recv)
+            )))
         }
         "clone" => Some(Expr::New {
             ty: if ordered { "TreeSet<>" } else { "HashSet<>" }.into(),
@@ -1769,7 +2802,13 @@ fn lower_deque_method(
 ) -> Option<Expr> {
     let _ = (cx, ret, line, out);
     let b0 = args.first().cloned().unwrap_or_else(|| Expr::raw("0"));
-    let opt_nullable = |f: &str| Expr::call(Expr::raw("Optional"), "ofNullable", vec![Expr::call(recv.clone(), f, vec![])]);
+    let opt_nullable = |f: &str| {
+        Expr::call(
+            Expr::raw("Optional"),
+            "ofNullable",
+            vec![Expr::call(recv.clone(), f, vec![])],
+        )
+    };
     match name {
         "push_back" | "push" => Some(Expr::call(recv, "addLast", vec![b0])),
         "push_front" => Some(Expr::call(recv, "addFirst", vec![b0])),
@@ -1782,8 +2821,15 @@ fn lower_deque_method(
         "clear" => Some(Expr::call(recv, "clear", vec![])),
         "contains" => Some(Expr::call(recv, "contains", vec![b0])),
         "extend" => Some(Expr::call(recv, "addAll", vec![b0])),
-        "get" => Some(Expr::call(Expr::call(Expr::call(recv, "stream", vec![]), "skip", vec![b0]), "findFirst", vec![])),
-        "clone" => Some(Expr::New { ty: "ArrayDeque<>".into(), args: vec![recv] }),
+        "get" => Some(Expr::call(
+            Expr::call(Expr::call(recv, "stream", vec![]), "skip", vec![b0]),
+            "findFirst",
+            vec![],
+        )),
+        "clone" => Some(Expr::New {
+            ty: "ArrayDeque<>".into(),
+            args: vec![recv],
+        }),
         "iter" | "into_iter" => Some(Expr::call(recv, "stream", vec![])),
         _ => {
             let _ = m;
@@ -1804,16 +2850,33 @@ fn lower_heap_method(
     out: &mut Vec<Stmt>,
 ) -> Option<Expr> {
     let _ = (cx, ret, line, out);
-    let opt_nullable = |f: &str| Expr::call(Expr::raw("Optional"), "ofNullable", vec![Expr::call(recv.clone(), f, vec![])]);
+    let opt_nullable = |f: &str| {
+        Expr::call(
+            Expr::raw("Optional"),
+            "ofNullable",
+            vec![Expr::call(recv.clone(), f, vec![])],
+        )
+    };
     match name {
-        "push" => Some(Expr::call(recv, "add", vec![args.into_iter().next().unwrap_or_else(|| Expr::raw("null"))])),
+        "push" => Some(Expr::call(
+            recv,
+            "add",
+            vec![args.into_iter().next().unwrap_or_else(|| Expr::raw("null"))],
+        )),
         "pop" => Some(opt_nullable("poll")),
         "peek" => Some(opt_nullable("peek")),
         "len" => Some(Expr::call(recv, "size", vec![])),
         "is_empty" => Some(Expr::call(recv, "isEmpty", vec![])),
         "clear" => Some(Expr::call(recv, "clear", vec![])),
-        "into_sorted_vec" => Some(Expr::call(Expr::call(recv, "stream", vec![]), "sorted", vec![])),
-        "clone" => Some(Expr::New { ty: "PriorityQueue<>".into(), args: vec![recv] }),
+        "into_sorted_vec" => Some(Expr::call(
+            Expr::call(recv, "stream", vec![]),
+            "sorted",
+            vec![],
+        )),
+        "clone" => Some(Expr::New {
+            ty: "PriorityQueue<>".into(),
+            args: vec![recv],
+        }),
         _ => None,
     }
 }
@@ -1840,7 +2903,8 @@ fn fs_read(cx: &mut Cx, c: &ast::CallExpr, ret: &Ty, path: Expr, out: &mut Vec<S
     cx.import("java.nio.file.*");
     cx.import("java.io.*");
     let usage = consumed_by(cx, &ast::Expr::CallExpr(c.clone()));
-    let keep = !matches!(usage.as_deref(), Some("unwrap" | "expect")) && !parent_is_stmt(&ast::Expr::CallExpr(c.clone()));
+    let keep = !matches!(usage.as_deref(), Some("unwrap" | "expect"))
+        && !parent_is_stmt(&ast::Expr::CallExpr(c.clone()));
     let read = Expr::raw(format!("Files.readString(Path.of({}))", render(&path)));
     if keep {
         return wrap_try_ok(cx, line, ret, read, "IOException", out);
@@ -1850,24 +2914,48 @@ fn fs_read(cx: &mut Cx, c: &ast::CallExpr, ret: &Ty, path: Expr, out: &mut Vec<S
     push_raw(
         out,
         line,
-        format!("String {text}; try {{ {text} = {}; }} catch (IOException {ex}) {{ throw new UncheckedIOException({ex}); }}", render(&read)),
+        format!(
+            "String {text}; try {{ {text} = {}; }} catch (IOException {ex}) {{ throw new UncheckedIOException({ex}); }}",
+            render(&read)
+        ),
     );
     Expr::name(text)
 }
 
 fn parent_is_stmt(e: &ast::Expr) -> bool {
-    e.syntax().parent().is_some_and(|p| ast::ExprStmt::can_cast(p.kind()))
+    e.syntax()
+        .parent()
+        .is_some_and(|p| ast::ExprStmt::can_cast(p.kind()))
 }
 
-fn fs_write(cx: &mut Cx, c: &ast::CallExpr, ret: &Ty, path: Expr, contents: Expr, out: &mut Vec<Stmt>) -> Expr {
+fn fs_write(
+    cx: &mut Cx,
+    c: &ast::CallExpr,
+    ret: &Ty,
+    path: Expr,
+    contents: Expr,
+    out: &mut Vec<Stmt>,
+) -> Expr {
     let line = cx.line(c.syntax());
     cx.import("java.nio.file.*");
     cx.import("java.io.*");
-    let write = format!("Files.writeString(Path.of({}), {})", render(&path), render(&contents));
+    let write = format!(
+        "Files.writeString(Path.of({}), {})",
+        render(&path),
+        render(&contents)
+    );
     let usage = consumed_by(cx, &ast::Expr::CallExpr(c.clone()));
-    if matches!(usage.as_deref(), Some("unwrap" | "expect")) || parent_is_stmt(&ast::Expr::CallExpr(c.clone())) {
+    if matches!(usage.as_deref(), Some("unwrap" | "expect"))
+        || parent_is_stmt(&ast::Expr::CallExpr(c.clone()))
+    {
         let ex = cx.fresh("ex");
-        push_raw(out, line, format!("try {{ {write}; }} catch (IOException {ex}) {{ throw new UncheckedIOException({ex}); }}"));
+        push_raw(
+            out,
+            line,
+            format!(
+                "try {{ {write}; }} catch (IOException {ex}) {{ throw new UncheckedIOException({ex}); }}"
+            ),
+        );
         return Expr::raw("null");
     }
     cx.needs_result = true;
@@ -1877,7 +2965,9 @@ fn fs_write(cx: &mut Cx, c: &ast::CallExpr, ret: &Ty, path: Expr, contents: Expr
     push_raw(
         out,
         line,
-        format!("{ty} {n}; try {{ {write}; {n} = new Ok<>(null); }} catch (IOException {ex}) {{ {n} = new Err<>({ex}); }}"),
+        format!(
+            "{ty} {n}; try {{ {write}; {n} = new Ok<>(null); }} catch (IOException {ex}) {{ {n} = new Err<>({ex}); }}"
+        ),
     );
     Expr::name(n)
 }
@@ -1892,23 +2982,42 @@ pub fn lower_array_expr(cx: &mut Cx, a: &ast::ArrayExpr, out: &mut Vec<Stmt>) ->
     }
     let items: Vec<Expr> = exprs.iter().map(|e| expr::lower_expr(cx, e, out)).collect();
     if items.is_empty() {
-        return Expr::New { ty: "ArrayList<>".into(), args: vec![] };
+        return Expr::New {
+            ty: "ArrayList<>".into(),
+            args: vec![],
+        };
     }
     // `()` elements are `null` in Java, which `List.of` rejects.
-    let factory = if exprs.iter().any(|e| cx.ty(e).is_unit()) { ("Arrays", "asList") } else { ("List", "of") };
+    let factory = if exprs.iter().any(|e| cx.ty(e).is_unit()) {
+        ("Arrays", "asList")
+    } else {
+        ("List", "of")
+    };
     let list = Expr::call(Expr::raw(factory.0), factory.1, items);
-    Expr::New { ty: "ArrayList<>".into(), args: vec![list] }
+    Expr::New {
+        ty: "ArrayList<>".into(),
+        args: vec![list],
+    }
 }
 
 // `[x; n]` / `vec![x; n]`.
-pub fn lower_repeat(cx: &mut Cx, node: &ra_ap_syntax::SyntaxNode, elem: &ast::Expr, count: &ast::Expr, out: &mut Vec<Stmt>) -> Expr {
+pub fn lower_repeat(
+    cx: &mut Cx,
+    node: &ra_ap_syntax::SyntaxNode,
+    elem: &ast::Expr,
+    count: &ast::Expr,
+    out: &mut Vec<Stmt>,
+) -> Expr {
     let elem_ty = cx.ty(elem);
     let n = expr::lower_expr(cx, count, out);
     let n = simple(cx, n, &Ty::Int(Int::Usize), cx.line(node), out);
     if crate::lower::is_cell_value_ty(&elem_ty) || matches!(elem_ty.strip_refs(), Ty::Option(_)) {
         let x = expr::lower_expr(cx, elem, out);
         let copies = Expr::call(Expr::raw("Collections"), "nCopies", vec![n, x]);
-        return Expr::New { ty: "ArrayList<>".into(), args: vec![copies] };
+        return Expr::New {
+            ty: "ArrayList<>".into(),
+            args: vec![copies],
+        };
     }
     // Re-evaluate the element expression per slot: Rust clones it n times.
     let mut inner = Vec::new();
@@ -1920,18 +3029,41 @@ pub fn lower_repeat(cx: &mut Cx, node: &ra_ap_syntax::SyntaxNode, elem: &ast::Ex
     }
     let i = cx.fresh("i");
     let range = Expr::call(Expr::raw("IntStream"), "range", vec![Expr::raw("0"), n]);
-    let mapped = Expr::call(range, "mapToObj", vec![Expr::Lambda { params: vec![i], body: LambdaBody::Expr(Box::new(x)) }]);
-    Expr::call(mapped, "collect", vec![Expr::raw("Collectors.toCollection(ArrayList::new)")])
+    let mapped = Expr::call(
+        range,
+        "mapToObj",
+        vec![Expr::Lambda {
+            params: vec![i],
+            body: LambdaBody::Expr(Box::new(x)),
+        }],
+    );
+    Expr::call(
+        mapped,
+        "collect",
+        vec![Expr::raw("Collectors.toCollection(ArrayList::new)")],
+    )
 }
 
 // `&v[a..b]`, `&s[a..]` -> subList / substring.
-pub fn lower_slice_range(cx: &mut Cx, base: Expr, base_ty: &Ty, r: &ast::RangeExpr, out: &mut Vec<Stmt>) -> Expr {
+pub fn lower_slice_range(
+    cx: &mut Cx,
+    base: Expr,
+    base_ty: &Ty,
+    r: &ast::RangeExpr,
+    out: &mut Vec<Stmt>,
+) -> Expr {
     use ast::RangeItem;
     let line = cx.line(r.syntax());
     let start = r.start().map(|e| expr::lower_expr(cx, &e, out));
     let end = r.end().map(|e| expr::lower_expr(cx, &e, out));
     let inclusive = r.op_kind() == Some(ast::RangeOp::Inclusive);
-    let end = end.map(|e| if inclusive { Expr::bin(e, "+", Expr::raw("1")) } else { e });
+    let end = end.map(|e| {
+        if inclusive {
+            Expr::bin(e, "+", Expr::raw("1"))
+        } else {
+            e
+        }
+    });
     let base = simple(cx, base, base_ty, line, out);
     let from = start.unwrap_or_else(|| Expr::raw("0"));
     match base_ty.strip_refs() {

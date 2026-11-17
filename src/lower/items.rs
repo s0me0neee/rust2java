@@ -1,9 +1,12 @@
 // Items: module class, functions, consts, structs, enums, impls, traits.
 
-use ra_ap_hir::{Adt, AsAssocItem, AssocItemContainer, Function, HasSource, Impl, ModuleDef, StructKind, Trait, Variant};
+use ra_ap_hir::{
+    Adt, AsAssocItem, AssocItemContainer, Function, HasSource, Impl, ModuleDef, StructKind, Trait,
+    Variant,
+};
 use ra_ap_syntax::{
-    AstNode, SyntaxNode, ast, ast::HasAttrs, ast::HasGenericParams, ast::HasModuleItem, ast::HasName,
-    ast::HasTypeBounds, ast::HasVisibility,
+    AstNode, SyntaxNode, ast, ast::HasAttrs, ast::HasGenericParams, ast::HasModuleItem,
+    ast::HasName, ast::HasTypeBounds, ast::HasVisibility,
 };
 
 use super::stmt::{self, Dest};
@@ -85,16 +88,26 @@ fn lower_items(cx: &mut Cx, items: &[ast::Item], members: &mut Vec<Member>) {
                 let adt = impl_self_adt(cx, imp);
                 let defined_here = adt.is_some_and(|a| adts.iter().flatten().any(|x| *x == a));
                 if adt.is_some() && !defined_here {
-                    cx.error(imp.syntax(), "impl for a type defined in another file is not supported");
+                    cx.error(
+                        imp.syntax(),
+                        "impl for a type defined in another file is not supported",
+                    );
                     continue;
                 }
                 if adt.is_some() {
                     continue;
                 }
-                let Some(class) = lower_foreign_impl(cx, imp) else { continue };
-                match impl_classes.iter().find(|(n, _)| *n == class_name_of(&class.header)) {
+                let Some(class) = lower_foreign_impl(cx, imp) else {
+                    continue;
+                };
+                match impl_classes
+                    .iter()
+                    .find(|(n, _)| *n == class_name_of(&class.header))
+                {
                     Some((_, idx)) => {
-                        let Member::Class(existing) = &mut members[*idx] else { continue };
+                        let Member::Class(existing) = &mut members[*idx] else {
+                            continue;
+                        };
                         existing.members.extend(class.members);
                         existing.close_line = existing.close_line.max(class.close_line);
                     }
@@ -113,7 +126,11 @@ fn lower_items(cx: &mut Cx, items: &[ast::Item], members: &mut Vec<Member>) {
                 members.push(lower_inline_module(cx, m));
             }
             ast::Item::Fn(f) => {
-                let vis = if f.visibility().is_some() { "public " } else { "" };
+                let vis = if f.visibility().is_some() {
+                    "public "
+                } else {
+                    ""
+                };
                 members.push(Member::Method(lower_fn(cx, f, &format!("{vis}static "))));
             }
             ast::Item::Const(c) => {
@@ -156,10 +173,19 @@ fn adt_of_item(cx: &Cx, item: &ast::Item) -> Option<Adt> {
 fn impl_self_adt(cx: &Cx, imp: &ast::Impl) -> Option<Adt> {
     let def = cx.sema.to_impl_def(imp)?;
     let adt = def.self_ty(cx.db).strip_references().as_adt()?;
-    adt.module(cx.db).krate(cx.db).origin(cx.db).is_local().then_some(adt)
+    adt.module(cx.db)
+        .krate(cx.db)
+        .origin(cx.db)
+        .is_local()
+        .then_some(adt)
 }
 
-fn claim_impls<'a>(cx: &Cx, items: &'a [ast::Item], adt: Option<Adt>, claimed: &mut [bool]) -> Vec<&'a ast::Impl> {
+fn claim_impls<'a>(
+    cx: &Cx,
+    items: &'a [ast::Item],
+    adt: Option<Adt>,
+    claimed: &mut [bool],
+) -> Vec<&'a ast::Impl> {
     let Some(adt) = adt else { return Vec::new() };
     let mut out = Vec::new();
     for (j, item) in items.iter().enumerate() {
@@ -181,7 +207,11 @@ fn claim_impls<'a>(cx: &Cx, items: &'a [ast::Item], adt: Option<Adt>, claimed: &
 fn lower_struct(cx: &mut Cx, s: &ast::Struct, adt: Option<Adt>, impls: Vec<&ast::Impl>) -> Class {
     let name = escape_keyword(&s.name().map(|n| n.text().to_string()).unwrap_or_default());
     let line = cx.line(s.syntax());
-    let vis = if s.visibility().is_some() { "public " } else { "" };
+    let vis = if s.visibility().is_some() {
+        "public "
+    } else {
+        ""
+    };
     let kind = adt
         .and_then(|a| a.as_struct())
         .map(|st| st.kind(cx.db))
@@ -198,10 +228,17 @@ fn lower_struct(cx: &mut Cx, s: &ast::Struct, adt: Option<Adt>, impls: Vec<&ast:
     let derives = derives_of(s);
     let mut members: Vec<Member> = fields
         .iter()
-        .map(|f| Member::Field { line: f.line, text: format!("{}{} {};", f.vis, f.ty.java(), f.name) })
+        .map(|f| Member::Field {
+            line: f.line,
+            text: format!("{}{} {};", f.vis, f.ty.java(), f.name),
+        })
         .collect();
     let mut implements = Vec::new();
-    let target = Target { java: adt_java_name_opt(cx, adt, &name), interface: false, generics: generic_decls.clone() };
+    let target = Target {
+        java: adt_java_name_opt(cx, adt, &name),
+        interface: false,
+        generics: generic_decls.clone(),
+    };
     if !impls.is_empty() {
         let (impl_members, traits) = lower_impls(cx, &impls, &target);
         members.extend(impl_members);
@@ -217,7 +254,16 @@ fn lower_struct(cx: &mut Cx, s: &ast::Struct, adt: Option<Adt>, impls: Vec<&ast:
     } else {
         trailer.push(canonical_ctor(&name, &fields));
     }
-    trailer.extend(derive_methods(cx, s.syntax(), &name, &generic_decls, kind, &fields, &derives, true));
+    trailer.extend(derive_methods(
+        cx,
+        s.syntax(),
+        &name,
+        &generic_decls,
+        kind,
+        &fields,
+        &derives,
+        true,
+    ));
     let impl_clause = if implements.is_empty() {
         String::new()
     } else {
@@ -233,13 +279,24 @@ fn lower_struct(cx: &mut Cx, s: &ast::Struct, adt: Option<Adt>, impls: Vec<&ast:
 }
 
 fn adt_java_name_opt(cx: &Cx, adt: Option<Adt>, fallback: &str) -> String {
-    adt.map(|a| adt_java_name(cx, a)).unwrap_or_else(|| fallback.to_string())
+    adt.map(|a| adt_java_name(cx, a))
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 fn canonical_ctor(name: &str, fields: &[FieldInfo]) -> String {
-    let params: Vec<String> = fields.iter().map(|f| format!("{} {}", f.ty.java(), f.name)).collect();
-    let body: Vec<String> = fields.iter().map(|f| format!("this.{0} = {0};", f.name)).collect();
-    format!("public {name}({}) {{ {} }}", params.join(", "), body.join(" "))
+    let params: Vec<String> = fields
+        .iter()
+        .map(|f| format!("{} {}", f.ty.java(), f.name))
+        .collect();
+    let body: Vec<String> = fields
+        .iter()
+        .map(|f| format!("this.{0} = {0};", f.name))
+        .collect();
+    format!(
+        "public {name}({}) {{ {} }}",
+        params.join(", "),
+        body.join(" ")
+    )
 }
 
 fn field_list_info(cx: &mut Cx, list: Option<ast::FieldList>) -> Vec<FieldInfo> {
@@ -247,17 +304,42 @@ fn field_list_info(cx: &mut Cx, list: Option<ast::FieldList>) -> Vec<FieldInfo> 
     match list {
         Some(ast::FieldList::RecordFieldList(rfl)) => {
             for f in rfl.fields() {
-                let name = escape_keyword(&f.name().map(|n| n.text().to_string()).unwrap_or_default());
-                let ty = f.ty().map(|t| cx.type_ref(&t)).unwrap_or(Ty::Other("?".into()));
-                let vis = if f.visibility().is_some() { "public ".to_string() } else { String::new() };
-                out.push(FieldInfo { line: cx.line(f.syntax()), name, ty, vis });
+                let name =
+                    escape_keyword(&f.name().map(|n| n.text().to_string()).unwrap_or_default());
+                let ty = f
+                    .ty()
+                    .map(|t| cx.type_ref(&t))
+                    .unwrap_or(Ty::Other("?".into()));
+                let vis = if f.visibility().is_some() {
+                    "public ".to_string()
+                } else {
+                    String::new()
+                };
+                out.push(FieldInfo {
+                    line: cx.line(f.syntax()),
+                    name,
+                    ty,
+                    vis,
+                });
             }
         }
         Some(ast::FieldList::TupleFieldList(tfl)) => {
             for (i, f) in tfl.fields().enumerate() {
-                let ty = f.ty().map(|t| cx.type_ref(&t)).unwrap_or(Ty::Other("?".into()));
-                let vis = if f.visibility().is_some() { "public ".to_string() } else { String::new() };
-                out.push(FieldInfo { line: cx.line(f.syntax()), name: format!("_{i}"), ty, vis });
+                let ty = f
+                    .ty()
+                    .map(|t| cx.type_ref(&t))
+                    .unwrap_or(Ty::Other("?".into()));
+                let vis = if f.visibility().is_some() {
+                    "public ".to_string()
+                } else {
+                    String::new()
+                };
+                out.push(FieldInfo {
+                    line: cx.line(f.syntax()),
+                    name: format!("_{i}"),
+                    ty,
+                    vis,
+                });
             }
         }
         None => {}
@@ -270,7 +352,11 @@ fn field_list_info(cx: &mut Cx, list: Option<ast::FieldList>) -> Vec<FieldInfo> 
 fn lower_enum(cx: &mut Cx, e: &ast::Enum, adt: Option<Adt>, impls: Vec<&ast::Impl>) -> Class {
     let name = escape_keyword(&e.name().map(|n| n.text().to_string()).unwrap_or_default());
     let line = cx.line(e.syntax());
-    let vis = if e.visibility().is_some() { "public " } else { "" };
+    let vis = if e.visibility().is_some() {
+        "public "
+    } else {
+        ""
+    };
     let eh = adt.and_then(|a| a.as_enum());
     let plain = eh.is_some_and(|en| enum_is_plain(cx, en));
     let close_line = impls
@@ -282,18 +368,30 @@ fn lower_enum(cx: &mut Cx, e: &ast::Enum, adt: Option<Adt>, impls: Vec<&ast::Imp
     let generic_decls = generic_param_decls(cx, e.generic_param_list(), e.where_clause());
     let generics = wrap_generics(&generic_decls);
     let derives = derives_of(e);
-    let target = Target { java: name.clone(), interface: !plain, generics: generic_decls.clone() };
-    let (impl_members, implements) =
-        if impls.is_empty() { (Vec::new(), Vec::new()) } else { lower_impls(cx, &impls, &target) };
+    let target = Target {
+        java: name.clone(),
+        interface: !plain,
+        generics: generic_decls.clone(),
+    };
+    let (impl_members, implements) = if impls.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        lower_impls(cx, &impls, &target)
+    };
     let mut members = Vec::new();
     let mut trailer = Vec::new();
     let header;
     if plain {
-        let Some(en) = eh else { return empty_class(line, close_line, &name) };
+        let Some(en) = eh else {
+            return empty_class(line, close_line, &name);
+        };
         if derives.iter().any(|d| d == "Ord" || d == "PartialOrd")
             && en.variants(cx.db).iter().any(|v| v.value(cx.db).is_some())
         {
-            cx.error(e.syntax(), "derive(Ord) on an enum with explicit discriminants is not supported");
+            cx.error(
+                e.syntax(),
+                "derive(Ord) on an enum with explicit discriminants is not supported",
+            );
         }
         let variants: Vec<(String, i128, u32)> = en
             .variants(cx.db)
@@ -311,7 +409,10 @@ fn lower_enum(cx: &mut Cx, e: &ast::Enum, adt: Option<Adt>, impls: Vec<&ast::Imp
             .collect();
         for (i, (vname, value, vline)) in variants.iter().enumerate() {
             let sep = if i + 1 == variants.len() { ";" } else { "," };
-            members.push(Member::Raw { line: *vline, text: format!("{vname}({value}){sep}") });
+            members.push(Member::Raw {
+                line: *vline,
+                text: format!("{vname}({value}){sep}"),
+            });
         }
         members.extend(impl_members);
         if derives.iter().any(|d| d == "Debug") {
@@ -322,7 +423,10 @@ fn lower_enum(cx: &mut Cx, e: &ast::Enum, adt: Option<Adt>, impls: Vec<&ast::Imp
         header = format!("{vis}enum {name}{}", impl_clause(&implements));
     } else {
         if derives.iter().any(|d| d == "PartialOrd" || d == "Ord") {
-            cx.error(e.syntax(), "derive(Ord/PartialOrd) on a data enum is not supported yet");
+            cx.error(
+                e.syntax(),
+                "derive(Ord/PartialOrd) on a data enum is not supported yet",
+            );
         }
         if derives.iter().any(|d| d == "Debug") {
             trailer.push("String debug();".to_string());
@@ -344,17 +448,36 @@ fn lower_enum(cx: &mut Cx, e: &ast::Enum, adt: Option<Adt>, impls: Vec<&ast::Imp
                 )));
             }
         }
-        header = format!("{vis}sealed interface {name}{generics}{}", implements_clause(&implements, true));
+        header = format!(
+            "{vis}sealed interface {name}{generics}{}",
+            implements_clause(&implements, true)
+        );
     }
-    Class { line, header, members, close_line, trailer }
+    Class {
+        line,
+        header,
+        members,
+        close_line,
+        trailer,
+    }
 }
 
 fn empty_class(line: u32, close_line: u32, name: &str) -> Class {
-    Class { line, header: format!("static final class {name}"), members: Vec::new(), close_line, trailer: Vec::new() }
+    Class {
+        line,
+        header: format!("static final class {name}"),
+        members: Vec::new(),
+        close_line,
+        trailer: Vec::new(),
+    }
 }
 
 fn impl_clause(implements: &[String]) -> String {
-    if implements.is_empty() { String::new() } else { format!(" implements {}", implements.join(", ")) }
+    if implements.is_empty() {
+        String::new()
+    } else {
+        format!(" implements {}", implements.join(", "))
+    }
 }
 
 fn implements_clause(implements: &[String], is_interface: bool) -> String {
@@ -377,8 +500,14 @@ fn lower_variant_record(
     fallback_line: u32,
 ) -> Class {
     let vname = escape_keyword(v.name(cx.db).as_str());
-    let vline = v.source(cx.db).map(|s| cx.line(s.value.syntax())).unwrap_or(fallback_line);
-    let close_line = v.source(cx.db).map(|s| cx.end_line(s.value.syntax())).unwrap_or(vline);
+    let vline = v
+        .source(cx.db)
+        .map(|s| cx.line(s.value.syntax()))
+        .unwrap_or(fallback_line);
+    let close_line = v
+        .source(cx.db)
+        .map(|s| cx.end_line(s.value.syntax()))
+        .unwrap_or(vline);
     let kind = v.kind(cx.db);
     let fields: Vec<FieldInfo> = match v.source(cx.db) {
         Some(src) => field_list_info(cx, src.value.field_list()),
@@ -386,7 +515,10 @@ fn lower_variant_record(
     };
     let generics = enum_generics.to_string();
     let type_args = generic_arg_names(enum_generics);
-    let components: Vec<String> = fields.iter().map(|f| format!("{} {}", f.ty.java(), f.name)).collect();
+    let components: Vec<String> = fields
+        .iter()
+        .map(|f| format!("{} {}", f.ty.java(), f.name))
+        .collect();
     let impl_iface = if type_args.is_empty() {
         enum_name.to_string()
     } else {
@@ -394,12 +526,24 @@ fn lower_variant_record(
     };
     let node = v.source(cx.db).map(|src| src.value.syntax().clone());
     let trailer = match node {
-        Some(node) => derive_methods(cx, &node, &vname, generic_decls, kind, &fields, derives, false),
+        Some(node) => derive_methods(
+            cx,
+            &node,
+            &vname,
+            generic_decls,
+            kind,
+            &fields,
+            derives,
+            false,
+        ),
         None => Vec::new(),
     };
     Class {
         line: vline,
-        header: format!("record {vname}{generics}({}) implements {impl_iface}", components.join(", ")),
+        header: format!(
+            "record {vname}{generics}({}) implements {impl_iface}",
+            components.join(", ")
+        ),
         members: Vec::new(),
         close_line,
         trailer,
@@ -408,10 +552,20 @@ fn lower_variant_record(
 
 fn generic_arg_names(generics: &str) -> Vec<String> {
     let g = generics.trim();
-    let inner = g.strip_prefix('<').and_then(|s| s.strip_suffix('>')).unwrap_or("");
+    let inner = g
+        .strip_prefix('<')
+        .and_then(|s| s.strip_suffix('>'))
+        .unwrap_or("");
     inner
         .split(',')
-        .map(|p| p.trim().split(" extends ").next().unwrap_or("").trim().to_string())
+        .map(|p| {
+            p.trim()
+                .split(" extends ")
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        })
         .filter(|p| !p.is_empty())
         .collect()
 }
@@ -420,7 +574,11 @@ fn generic_arg_names(generics: &str) -> Vec<String> {
 
 fn lower_inline_module(cx: &mut Cx, m: &ast::Module) -> Member {
     let name = pascal_case(&m.name().map(|n| n.text().to_string()).unwrap_or_default());
-    let vis = if m.visibility().is_some() { "public " } else { "" };
+    let vis = if m.visibility().is_some() {
+        "public "
+    } else {
+        ""
+    };
     let mut members = Vec::new();
     if let Some(list) = m.item_list() {
         let items: Vec<ast::Item> = list.items().collect();
@@ -439,7 +597,11 @@ fn lower_inline_module(cx: &mut Cx, m: &ast::Module) -> Member {
 
 fn lower_trait(cx: &mut Cx, t: &ast::Trait) -> Option<Member> {
     let name = escape_keyword(&t.name()?.text().to_string());
-    let vis = if t.visibility().is_some() { "public " } else { "" };
+    let vis = if t.visibility().is_some() {
+        "public "
+    } else {
+        ""
+    };
     let generics = generic_params(cx, t.generic_param_list(), t.where_clause());
     let mut supers = Vec::new();
     if let Some(bounds) = t.type_bound_list() {
@@ -451,7 +613,11 @@ fn lower_trait(cx: &mut Cx, t: &ast::Trait) -> Option<Member> {
             }
         }
     }
-    let extends = if supers.is_empty() { String::new() } else { format!(" extends {}", supers.join(", ")) };
+    let extends = if supers.is_empty() {
+        String::new()
+    } else {
+        format!(" extends {}", supers.join(", "))
+    };
     let saved_self = std::mem::replace(&mut cx.self_ty_java, name.clone());
     let mut members = Vec::new();
     if let Some(list) = t.assoc_item_list() {
@@ -512,35 +678,57 @@ fn lower_impls(cx: &mut Cx, impls: &[&ast::Impl], target: &Target) -> (Vec<Membe
                         continue;
                     }
                     "Debug" => {
-                        cx.error(imp.syntax(), "manual Debug impls are not supported yet (use #[derive(Debug)])");
+                        cx.error(
+                            imp.syntax(),
+                            "manual Debug impls are not supported yet (use #[derive(Debug)])",
+                        );
                         continue;
                     }
                     "Ord" | "PartialOrd" => {
-                        cx.error(imp.syntax(), "manual Ord/PartialOrd impls are not supported yet (use #[derive])");
+                        cx.error(
+                            imp.syntax(),
+                            "manual Ord/PartialOrd impls are not supported yet (use #[derive])",
+                        );
                         continue;
                     }
                     "PartialEq" | "Eq" | "Hash" => {
-                        cx.error(imp.syntax(), "manual PartialEq/Eq/Hash impls are not supported yet (use #[derive])");
+                        cx.error(
+                            imp.syntax(),
+                            "manual PartialEq/Eq/Hash impls are not supported yet (use #[derive])",
+                        );
                         continue;
                     }
                     "Iterator" => {
-                        cx.error(imp.syntax(), "impl Iterator for a user type is not supported yet");
+                        cx.error(
+                            imp.syntax(),
+                            "impl Iterator for a user type is not supported yet",
+                        );
                         continue;
                     }
                     _ => {}
                 }
             }
         }
-        let Some(list) = imp.assoc_item_list() else { continue };
+        let Some(list) = imp.assoc_item_list() else {
+            continue;
+        };
         for item in list.assoc_items() {
             match item {
                 ast::AssocItem::Fn(f) => {
                     let is_static = f.param_list().and_then(|p| p.self_param()).is_none();
-                    let vis = if f.visibility().is_some() { "public " } else { "" };
+                    let vis = if f.visibility().is_some() {
+                        "public "
+                    } else {
+                        ""
+                    };
                     let trait_impl = tr.is_some();
                     let static_generics: &[String] = if is_static { &target.generics } else { &[] };
                     let modifiers = if is_static {
-                        if trait_impl { "public static ".to_string() } else { format!("{vis}static ") }
+                        if trait_impl {
+                            "public static ".to_string()
+                        } else {
+                            format!("{vis}static ")
+                        }
                     } else if target.interface {
                         "default ".to_string()
                     } else if trait_impl {
@@ -549,7 +737,13 @@ fn lower_impls(cx: &mut Cx, impls: &[&ast::Impl], target: &Target) -> (Vec<Membe
                         vis.to_string()
                     };
                     let saved = std::mem::replace(&mut cx.self_ty_java, target.java.clone());
-                    members.push(Member::Method(lower_fn_inner(cx, &f, &modifiers, static_generics, None)));
+                    members.push(Member::Method(lower_fn_inner(
+                        cx,
+                        &f,
+                        &modifiers,
+                        static_generics,
+                        None,
+                    )));
                     cx.self_ty_java = saved;
                 }
                 ast::AssocItem::Const(c) => {
@@ -578,7 +772,14 @@ fn display_method(cx: &mut Cx, imp: &ast::Impl, target: &Target) -> Option<Metho
     let fname = cx.declare("f");
     let mut stmts = vec![Stmt::new(
         line,
-        StmtKind::Local { ty: "var".into(), name: fname.clone(), init: Some(Expr::New { ty: "StringBuilder".into(), args: Vec::new() }) },
+        StmtKind::Local {
+            ty: "var".into(),
+            name: fname.clone(),
+            init: Some(Expr::New {
+                ty: "StringBuilder".into(),
+                args: Vec::new(),
+            }),
+        },
     )];
     if let Some(body) = fmt_fn.body()
         && let Some(text) = body.stmt_list()
@@ -594,10 +795,17 @@ fn display_method(cx: &mut Cx, imp: &ast::Impl, target: &Target) -> Option<Metho
         }
     }
     let close_line = cx.end_line(fmt_fn.syntax());
-    stmts.push(Stmt::new(close_line, StmtKind::Return(Some(Expr::raw(format!("{fname}.toString()"))))));
+    stmts.push(Stmt::new(
+        close_line,
+        StmtKind::Return(Some(Expr::raw(format!("{fname}.toString()")))),
+    ));
     cx.in_display = saved_display;
     cx.self_ty_java = saved_self;
-    Some(Method { line, header: "public String toString()".into(), body: Some(crate::jir::Block { stmts, close_line }) })
+    Some(Method {
+        line,
+        header: "public String toString()".into(),
+        body: Some(crate::jir::Block { stmts, close_line }),
+    })
 }
 
 // `impl Trait for ForeignType` -> static methods in a `<Trait>Impls` nested class.
@@ -621,7 +829,10 @@ fn lower_foreign_impl(cx: &mut Cx, imp: &ast::Impl) -> Option<Class> {
                     && sp.mut_token().is_some()
                     && (cx.convert(&self_ty).is_primitive() || cx.convert(&self_ty).is_str())
                 {
-                    cx.error(f.syntax(), "`&mut self` on a foreign primitive/String type is not supported yet");
+                    cx.error(
+                        f.syntax(),
+                        "`&mut self` on a foreign primitive/String type is not supported yet",
+                    );
                     continue;
                 }
                 let saved_self_ty = std::mem::replace(&mut cx.self_ty_java, self_java.clone());
@@ -641,7 +852,13 @@ fn lower_foreign_impl(cx: &mut Cx, imp: &ast::Impl) -> Option<Class> {
             _ => {}
         }
     }
-    Some(Class { line, header: format!("static final class {class_name}"), members, close_line: cx.end_line(imp.syntax()), trailer: Vec::new() })
+    Some(Class {
+        line,
+        header: format!("static final class {class_name}"),
+        members,
+        close_line: cx.end_line(imp.syntax()),
+        trailer: Vec::new(),
+    })
 }
 
 // Java class holding the static methods of a trait impl on a foreign type.
@@ -649,7 +866,15 @@ fn foreign_impl_class(cx: &Cx, imp: Impl) -> Option<String> {
     let tr = imp.trait_(cx.db)?;
     let base = format!("{}Impls", escape_keyword(tr.name(cx.db).as_str()));
     let module = imp.module(cx.db);
-    if module == cx.module { Some(base) } else { Some(format!("{}.{}", module_class_from(cx.db, cx.module, module), base)) }
+    if module == cx.module {
+        Some(base)
+    } else {
+        Some(format!(
+            "{}.{}",
+            module_class_from(cx.db, cx.module, module),
+            base
+        ))
+    }
 }
 
 fn imp_is_foreign(cx: &Cx, imp: Impl) -> bool {
@@ -689,11 +914,17 @@ fn lower_fn_inner(
     }
     if let Some(pl) = f.param_list() {
         for p in pl.params() {
-            let ty = p.ty().map(|t| cx.type_ref(&t)).unwrap_or(Ty::Other("?".into()));
+            let ty = p
+                .ty()
+                .map(|t| cx.type_ref(&t))
+                .unwrap_or(Ty::Other("?".into()));
             let jty = param_type(cx, &ty);
             match p.pat() {
                 Some(ast::Pat::IdentPat(ip)) if ip.pat().is_none() => {
-                    let n = ip.name().map(|n| n.text().to_string()).unwrap_or_else(|| "_".into());
+                    let n = ip
+                        .name()
+                        .map(|n| n.text().to_string())
+                        .unwrap_or_else(|| "_".into());
                     params.push(format!("{jty} {}", cx.declare(&n)));
                     if is_cell_param(&ty) {
                         cx.mark_cell(&ip);
@@ -715,8 +946,16 @@ fn lower_fn_inner(
         }
     }
     let generics = wrap_generics(&generics);
-    let ret_java = if ret.is_unit() { "void".to_string() } else { ret.java() };
-    let header = format!("{modifiers}{generics}{ret_java} {}({})", escape_keyword(&name), params.join(", "));
+    let ret_java = if ret.is_unit() {
+        "void".to_string()
+    } else {
+        ret.java()
+    };
+    let header = format!(
+        "{modifiers}{generics}{ret_java} {}({})",
+        escape_keyword(&name),
+        params.join(", ")
+    );
     cx.ret_ty = Some(ret);
     let body = f.body().map(|b| {
         let mut block = stmt::lower_block(cx, &b, &Dest::Return);
@@ -745,13 +984,25 @@ fn is_cell_param(ty: &Ty) -> bool {
 }
 
 fn wrap_generics(decls: &[String]) -> String {
-    if decls.is_empty() { String::new() } else { format!("<{}> ", decls.join(", ")) }
+    if decls.is_empty() {
+        String::new()
+    } else {
+        format!("<{}> ", decls.join(", "))
+    }
 }
 
 // `<T extends Comparable<T>>` for generic fns/structs/enums/traits (empty when not generic).
-pub fn generic_params(cx: &mut Cx, list: Option<ast::GenericParamList>, where_clause: Option<ast::WhereClause>) -> String {
+pub fn generic_params(
+    cx: &mut Cx,
+    list: Option<ast::GenericParamList>,
+    where_clause: Option<ast::WhereClause>,
+) -> String {
     let decls = generic_param_decls(cx, list, where_clause);
-    if decls.is_empty() { String::new() } else { format!("<{}>", decls.join(", ")) }
+    if decls.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", decls.join(", "))
+    }
 }
 
 pub fn lower_local_item(cx: &mut Cx, item: &ast::Item, out: &mut Vec<Stmt>) {
@@ -795,15 +1046,23 @@ pub fn lower_record_expr(cx: &mut Cx, r: &ast::RecordExpr, out: &mut Vec<Stmt>) 
     };
     let fields = variant.fields(cx.db);
     let names = java_field_names(cx, &fields);
-    let decl: Vec<String> = fields.iter().map(|f| f.name(cx.db).as_str().to_string()).collect();
+    let decl: Vec<String> = fields
+        .iter()
+        .map(|f| f.name(cx.db).as_str().to_string())
+        .collect();
     let Some(list) = r.record_expr_field_list() else {
-        return Expr::New { ty: target, args: Vec::new() };
+        return Expr::New {
+            ty: target,
+            args: Vec::new(),
+        };
     };
     let spread = list.spread();
     let spread_impure = spread.as_ref().is_some_and(|e| !is_pure(e));
     let mut provided: Vec<(usize, Option<ast::Expr>, String)> = Vec::new();
     for f in list.fields() {
-        let Some(name) = record_field_name(&f) else { continue };
+        let Some(name) = record_field_name(&f) else {
+            continue;
+        };
         let Some(idx) = decl.iter().position(|d| *d == name) else {
             return cx.unsupported(r.syntax(), "struct literal field");
         };
@@ -811,7 +1070,9 @@ pub fn lower_record_expr(cx: &mut Cx, r: &ast::RecordExpr, out: &mut Vec<Stmt>) 
         provided.push((idx, f.expr(), name));
     }
     let in_order = provided.windows(2).all(|w| w[0].0 < w[1].0);
-    let impure = provided.iter().any(|(_, e, _)| e.as_ref().is_some_and(|e| !is_pure(e)));
+    let impure = provided
+        .iter()
+        .any(|(_, e, _)| e.as_ref().is_some_and(|e| !is_pure(e)));
     // Rust evaluates the written fields in order, then the `..base` expression.
     let hoist_fields = (!in_order && impure) || (spread_impure && !provided.is_empty());
     let mut hoisted: Vec<(usize, Expr)> = Vec::new();
@@ -823,7 +1084,14 @@ pub fn lower_record_expr(cx: &mut Cx, r: &ast::RecordExpr, out: &mut Vec<Stmt>) 
                 None => Expr::name(cx.lookup(name)),
             };
             let tmp = cx.fresh("fld");
-            out.push(Stmt::new(line, StmtKind::Local { ty: stmt::decl_type(&want), name: tmp.clone(), init: Some(v) }));
+            out.push(Stmt::new(
+                line,
+                StmtKind::Local {
+                    ty: stmt::decl_type(&want),
+                    name: tmp.clone(),
+                    init: Some(v),
+                },
+            ));
             hoisted.push((*idx, Expr::name(tmp)));
         }
     }
@@ -833,7 +1101,14 @@ pub fn lower_record_expr(cx: &mut Cx, r: &ast::RecordExpr, out: &mut Vec<Stmt>) 
         let v = if spread_impure {
             let tmp = cx.fresh("base");
             let ty = cx.ty(&spread);
-            out.push(Stmt::new(line, StmtKind::Local { ty: stmt::decl_type(&ty), name: tmp.clone(), init: Some(v) }));
+            out.push(Stmt::new(
+                line,
+                StmtKind::Local {
+                    ty: stmt::decl_type(&ty),
+                    name: tmp.clone(),
+                    init: Some(v),
+                },
+            ));
             Expr::name(tmp)
         } else {
             v
@@ -857,7 +1132,10 @@ pub fn lower_record_expr(cx: &mut Cx, r: &ast::RecordExpr, out: &mut Vec<Stmt>) 
         }
     }
     let ty = cx.ty(&ast::Expr::RecordExpr(r.clone()));
-    Expr::New { ty: diamond(cx, &target, &ty), args }
+    Expr::New {
+        ty: diamond(cx, &target, &ty),
+        args,
+    }
 }
 
 fn diamond(cx: &Cx, target: &str, ty: &Ty) -> String {
@@ -876,7 +1154,11 @@ fn record_field_name(f: &ast::RecordExprField) -> Option<String> {
     }
     // `Point { x }` parses as a bare path expression.
     match f.expr()? {
-        ast::Expr::PathExpr(p) => p.path()?.segment()?.name_ref().map(|n| n.text().to_string()),
+        ast::Expr::PathExpr(p) => p
+            .path()?
+            .segment()?
+            .name_ref()
+            .map(|n| n.text().to_string()),
         _ => None,
     }
 }
@@ -884,19 +1166,27 @@ fn record_field_name(f: &ast::RecordExprField) -> Option<String> {
 // Path in value position resolving to an item (const, static, fn value, unit variant/struct).
 pub fn lower_def_path(cx: &mut Cx, path: &ast::Path, def: ModuleDef) -> Expr {
     let db = cx.db;
-    let local = def.module(db).is_some_and(|m| m.krate(db).origin(db).is_local());
+    let local = def
+        .module(db)
+        .is_some_and(|m| m.krate(db).origin(db).is_local());
     if !local {
         return std_map::lower_std_path(cx, path, def);
     }
     let qualify = |cx: &Cx, name: String| -> Expr {
         match def.module(cx.db) {
-            Some(m) if m != cx.module => Expr::raw(format!("{}.{name}", module_class_from(cx.db, cx.module, m))),
+            Some(m) if m != cx.module => {
+                Expr::raw(format!("{}.{name}", module_class_from(cx.db, cx.module, m)))
+            }
             _ => Expr::raw(name),
         }
     };
     match def {
         ModuleDef::Const(c) => {
-            let n = escape_keyword(&c.name(db).map(|n| n.as_str().to_string()).unwrap_or_default());
+            let n = escape_keyword(
+                &c.name(db)
+                    .map(|n| n.as_str().to_string())
+                    .unwrap_or_default(),
+            );
             // Associated consts live on their type's class or the trait interface.
             if let Some(assoc) = c.as_assoc_item(db) {
                 match assoc.container(db) {
@@ -928,7 +1218,9 @@ pub fn lower_def_path(cx: &mut Cx, path: &ast::Path, def: ModuleDef) -> Expr {
                 return Expr::raw(format!("{}::{name}", impl_owner_java(cx, imp)));
             }
             let owner = match def.module(db) {
-                Some(m) if m != cx.module && m.name(db).is_some() => module_class_from(db, cx.module, m),
+                Some(m) if m != cx.module && m.name(db).is_some() => {
+                    module_class_from(db, cx.module, m)
+                }
                 _ => cx.class_name.clone(),
             };
             Expr::raw(format!("{owner}::{name}"))
@@ -938,7 +1230,10 @@ pub fn lower_def_path(cx: &mut Cx, path: &ast::Path, def: ModuleDef) -> Expr {
             if enum_is_plain(cx, e) {
                 Expr::raw(variant_java_name(cx, v))
             } else if v.kind(db) == StructKind::Unit {
-                Expr::New { ty: variant_java_name(cx, v), args: Vec::new() }
+                Expr::New {
+                    ty: variant_java_name(cx, v),
+                    args: Vec::new(),
+                }
             } else {
                 Expr::raw(format!("{}::new", variant_java_name(cx, v)))
             }
@@ -955,22 +1250,38 @@ pub fn lower_def_path(cx: &mut Cx, path: &ast::Path, def: ModuleDef) -> Expr {
 }
 
 // Tuple-struct / tuple-variant constructor calls `Foo(a, b)`.
-pub fn lower_ctor_call(cx: &mut Cx, c: &ast::CallExpr, path: &ast::Path, args: Vec<Expr>, out: &mut Vec<Stmt>) -> Expr {
+pub fn lower_ctor_call(
+    cx: &mut Cx,
+    c: &ast::CallExpr,
+    path: &ast::Path,
+    args: Vec<Expr>,
+    out: &mut Vec<Stmt>,
+) -> Expr {
     let _ = out;
     if let Some(e) = std_map::lower_std_ctor(cx, c, path, &args) {
         return e;
     }
     let target = match cx.sema.resolve_path(path) {
-        Some(ra_ap_hir::PathResolution::Def(ModuleDef::Adt(Adt::Struct(s)))) => adt_java_name(cx, Adt::Struct(s)),
+        Some(ra_ap_hir::PathResolution::Def(ModuleDef::Adt(Adt::Struct(s)))) => {
+            adt_java_name(cx, Adt::Struct(s))
+        }
         Some(ra_ap_hir::PathResolution::Def(ModuleDef::EnumVariant(v))) => variant_java_name(cx, v),
         _ => return cx.unsupported(c.syntax(), "tuple struct / variant constructor"),
     };
     let ty = cx.ty(&ast::Expr::CallExpr(c.clone()));
-    Expr::New { ty: diamond(cx, &target, &ty), args }
+    Expr::New {
+        ty: diamond(cx, &target, &ty),
+        args,
+    }
 }
 
 // Method calls resolving to `impl LocalTrait for ForeignType`: dispatched statically.
-pub fn lower_foreign_impl_call(cx: &mut Cx, m: &ast::MethodCallExpr, f: Function, out: &mut Vec<Stmt>) -> Option<Expr> {
+pub fn lower_foreign_impl_call(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    f: Function,
+    out: &mut Vec<Stmt>,
+) -> Option<Expr> {
     let imp = match f.as_assoc_item(cx.db)?.container(cx.db) {
         AssocItemContainer::Impl(imp) => imp,
         AssocItemContainer::Trait(_) => return None,
@@ -983,16 +1294,26 @@ pub fn lower_foreign_impl_call(cx: &mut Cx, m: &ast::MethodCallExpr, f: Function
     let recv = expr::lower_expr(cx, &recv_ast, out);
     let args = expr::call_args(cx, m, out);
     let name = escape_keyword(f.name(cx.db).as_str());
-    Some(Expr::static_call(format!("{class}.{name}"), std::iter::once(recv).chain(args).collect()))
+    Some(Expr::static_call(
+        format!("{class}.{name}"),
+        std::iter::once(recv).chain(args).collect(),
+    ))
 }
 
 // Trait associated fns called on a concrete local type: `<Type>::method(..)`.
-pub fn lower_trait_static_call(cx: &mut Cx, path: &ast::Path, f: Function, args: Vec<Expr>) -> Option<Expr> {
+pub fn lower_trait_static_call(
+    cx: &mut Cx,
+    path: &ast::Path,
+    f: Function,
+    args: Vec<Expr>,
+) -> Option<Expr> {
     let qualifier = path.qualifier()?;
     let owner = if qualifier.syntax().text().to_string() == "Self" {
         cx.self_ty_java.clone()
     } else {
-        let Some(ra_ap_hir::PathResolution::Def(ModuleDef::Adt(adt))) = cx.sema.resolve_path(&qualifier) else {
+        let Some(ra_ap_hir::PathResolution::Def(ModuleDef::Adt(adt))) =
+            cx.sema.resolve_path(&qualifier)
+        else {
             return None;
         };
         if !adt.module(cx.db).krate(cx.db).origin(cx.db).is_local() {
@@ -1002,11 +1323,20 @@ pub fn lower_trait_static_call(cx: &mut Cx, path: &ast::Path, f: Function, args:
     };
     let name = escape_keyword(f.name(cx.db).as_str());
     // `Default::default` has no impl method; the derived one is `default_`.
-    let name = if name == "default" { "default_".to_string() } else { name };
+    let name = if name == "default" {
+        "default_".to_string()
+    } else {
+        name
+    };
     Some(Expr::static_call(format!("{owner}.{name}"), args))
 }
 
-pub fn lower_foreign_static_call(cx: &mut Cx, imp: Impl, name: &str, args: Vec<Expr>) -> Option<Expr> {
+pub fn lower_foreign_static_call(
+    cx: &mut Cx,
+    imp: Impl,
+    name: &str,
+    args: Vec<Expr>,
+) -> Option<Expr> {
     let _ = cx;
     if !imp_is_foreign(cx, imp) {
         return None;
@@ -1043,27 +1373,43 @@ fn lower_const(
     }
     Some(Member::Field {
         line: cx.line(node),
-        text: format!("static final {} {} = {};", ty.java(), escape_keyword(&name), crate::emit::render_expr(&v)),
+        text: format!(
+            "static final {} {} = {};",
+            ty.java(),
+            escape_keyword(&name),
+            crate::emit::render_expr(&v)
+        ),
     })
 }
 
 // --- generics ----------------------------------------------------------------------------
 
-fn generic_param_decls(cx: &mut Cx, list: Option<ast::GenericParamList>, where_clause: Option<ast::WhereClause>) -> Vec<String> {
+fn generic_param_decls(
+    cx: &mut Cx,
+    list: Option<ast::GenericParamList>,
+    where_clause: Option<ast::WhereClause>,
+) -> Vec<String> {
     let Some(list) = list else { return Vec::new() };
     let mut extra: Vec<(String, Vec<ast::TypeBound>)> = Vec::new();
     if let Some(wc) = where_clause {
         for pred in wc.predicates() {
-            let Some(ast::Type::PathType(pt)) = pred.ty() else { continue };
+            let Some(ast::Type::PathType(pt)) = pred.ty() else {
+                continue;
+            };
             let Some(path) = pt.path() else { continue };
             let name = path.syntax().text().to_string();
-            let bounds = pred.type_bound_list().map(|b| b.bounds().collect()).unwrap_or_default();
+            let bounds = pred
+                .type_bound_list()
+                .map(|b| b.bounds().collect())
+                .unwrap_or_default();
             extra.push((name, bounds));
         }
     }
     let mut out = Vec::new();
     for p in list.generic_params() {
-        let ast::GenericParam::TypeParam(tp) = p else { continue };
+        let ast::GenericParam::TypeParam(tp) = p else {
+            continue;
+        };
         let name = tp.name().map(|n| n.text().to_string()).unwrap_or_default();
         let mut bounds: Vec<String> = Vec::new();
         if let Some(bl) = tp.type_bound_list() {
@@ -1097,13 +1443,16 @@ fn bound_java(cx: &mut Cx, b: &ast::TypeBound, param: &str) -> Option<String> {
     if b.question_mark_token().is_some() {
         return None;
     }
-    let ast::Type::PathType(pt) = b.ty()? else { return None };
+    let ast::Type::PathType(pt) = b.ty()? else {
+        return None;
+    };
     let path = pt.path()?;
     let name = path.segment()?.name_ref()?.text().to_string();
     if name == "Sized" {
         return None;
     }
-    if let Some(ra_ap_hir::PathResolution::Def(ModuleDef::Trait(tr))) = cx.sema.resolve_path(&path) {
+    if let Some(ra_ap_hir::PathResolution::Def(ModuleDef::Trait(tr))) = cx.sema.resolve_path(&path)
+    {
         if tr.module(cx.db).krate(cx.db).origin(cx.db).is_local() {
             return Some(trait_java_name(cx.db, cx.module, tr));
         }
@@ -1119,7 +1468,9 @@ fn bound_java(cx: &mut Cx, b: &ast::TypeBound, param: &str) -> Option<String> {
 fn derives_of(item: &impl HasAttrs) -> Vec<String> {
     let mut out = Vec::new();
     for attr in item.attrs() {
-        let Some((name, tree)) = attr.as_simple_call() else { continue };
+        let Some((name, tree)) = attr.as_simple_call() else {
+            continue;
+        };
         if name != "derive" {
             continue;
         }
@@ -1153,11 +1504,19 @@ fn derive_methods(
     if has("Clone") {
         let generics = wrap_generics(generic_decls);
         out.push(match kind {
-            StructKind::Unit if unit_struct => format!("public {name} clone() {{ return INSTANCE; }}"),
+            StructKind::Unit if unit_struct => {
+                format!("public {name} clone() {{ return INSTANCE; }}")
+            }
             StructKind::Unit => format!("public {name} clone() {{ return this; }}"),
             _ => {
-                let args: Vec<String> = fields.iter().map(|f| clone_value(&f.ty, &format!("this.{}", f.name))).collect();
-                format!("public {name}{generics} clone() {{ return new {name}({}); }}", args.join(", "))
+                let args: Vec<String> = fields
+                    .iter()
+                    .map(|f| clone_value(&f.ty, &format!("this.{}", f.name)))
+                    .collect();
+                format!(
+                    "public {name}{generics} clone() {{ return new {name}({}); }}",
+                    args.join(", ")
+                )
             }
         });
     }
@@ -1212,7 +1571,10 @@ fn debug_method(cx: &mut Cx, name: &str, kind: StructKind, fields: &[FieldInfo])
     }
     parts.push(Expr::str_lit(&lit));
     let expr = str_concat(parts);
-    format!("public String debug() {{ return {}; }}", crate::emit::render_expr(&expr))
+    format!(
+        "public String debug() {{ return {}; }}",
+        crate::emit::render_expr(&expr)
+    )
 }
 
 pub fn debug_value(cx: &mut Cx, ty: &Ty, v: Expr, depth: usize) -> Expr {
@@ -1223,11 +1585,18 @@ pub fn debug_value(cx: &mut Cx, ty: &Ty, v: Expr, depth: usize) -> Expr {
         Ty::Adt { .. } => Expr::call(v, "debug", vec![]),
         Ty::Option(inner) => {
             let x = format!("x{depth}");
-            let body = str_concat(vec![Expr::str_lit("Some("), debug_value(cx, inner, Expr::name(&x), depth + 1), Expr::str_lit(")")]);
+            let body = str_concat(vec![
+                Expr::str_lit("Some("),
+                debug_value(cx, inner, Expr::name(&x), depth + 1),
+                Expr::str_lit(")"),
+            ]);
             let mapped = Expr::call(
                 v,
                 "map",
-                vec![Expr::Lambda { params: vec![x], body: crate::jir::LambdaBody::Expr(Box::new(body)) }],
+                vec![Expr::Lambda {
+                    params: vec![x],
+                    body: crate::jir::LambdaBody::Expr(Box::new(body)),
+                }],
             );
             Expr::call(mapped, "orElse", vec![Expr::str_lit("None")])
         }
@@ -1235,15 +1604,28 @@ pub fn debug_value(cx: &mut Cx, ty: &Ty, v: Expr, depth: usize) -> Expr {
         Ty::Set { t, .. } => debug_seq(cx, v, t, depth, "{", "}"),
         Ty::Map { k, v: val, .. } => {
             let e = format!("e{depth}");
-            let key = debug_value(cx, k, Expr::call(Expr::name(&e), "getKey", vec![]), depth + 1);
-            let value = debug_value(cx, val, Expr::call(Expr::name(&e), "getValue", vec![]), depth + 1);
+            let key = debug_value(
+                cx,
+                k,
+                Expr::call(Expr::name(&e), "getKey", vec![]),
+                depth + 1,
+            );
+            let value = debug_value(
+                cx,
+                val,
+                Expr::call(Expr::name(&e), "getValue", vec![]),
+                depth + 1,
+            );
             let body = str_concat(vec![key, Expr::str_lit(": "), value]);
             let stream = Expr::call(v, "entrySet", vec![]);
             let stream = Expr::call(stream, "stream", vec![]);
             let mapped = Expr::call(
                 stream,
                 "map",
-                vec![Expr::Lambda { params: vec![e], body: crate::jir::LambdaBody::Expr(Box::new(body)) }],
+                vec![Expr::Lambda {
+                    params: vec![e],
+                    body: crate::jir::LambdaBody::Expr(Box::new(body)),
+                }],
             );
             join_collect(mapped, "{", "}")
         }
@@ -1261,15 +1643,29 @@ pub fn debug_value(cx: &mut Cx, ty: &Ty, v: Expr, depth: usize) -> Expr {
             // Generic Debug: at least match Rust for the common String/char payloads.
             let s1 = format!("s{depth}");
             let c1 = format!("c{depth}");
-            let quoted_str = str_concat(vec![Expr::str_lit("\""), Expr::name(&s1), Expr::str_lit("\"")]);
-            let quoted_char = str_concat(vec![Expr::str_lit("'"), Expr::name(&c1), Expr::str_lit("'")]);
+            let quoted_str = str_concat(vec![
+                Expr::str_lit("\""),
+                Expr::name(&s1),
+                Expr::str_lit("\""),
+            ]);
+            let quoted_char = str_concat(vec![
+                Expr::str_lit("'"),
+                Expr::name(&c1),
+                Expr::str_lit("'"),
+            ]);
             let inner = Expr::Ternary(
-                Box::new(Expr::InstanceOf(Box::new(v.clone()), format!("Character {c1}"))),
+                Box::new(Expr::InstanceOf(
+                    Box::new(v.clone()),
+                    format!("Character {c1}"),
+                )),
                 Box::new(quoted_char),
                 Box::new(Expr::call(Expr::raw("String"), "valueOf", vec![v.clone()])),
             );
             Expr::Ternary(
-                Box::new(Expr::InstanceOf(Box::new(v.clone()), format!("String {s1}"))),
+                Box::new(Expr::InstanceOf(
+                    Box::new(v.clone()),
+                    format!("String {s1}"),
+                )),
                 Box::new(quoted_str),
                 Box::new(inner),
             )
@@ -1285,7 +1681,10 @@ fn debug_seq(cx: &mut Cx, v: Expr, inner: &Ty, depth: usize, open: &str, close: 
     let mapped = Expr::call(
         stream,
         "map",
-        vec![Expr::Lambda { params: vec![x], body: crate::jir::LambdaBody::Expr(Box::new(body)) }],
+        vec![Expr::Lambda {
+            params: vec![x],
+            body: crate::jir::LambdaBody::Expr(Box::new(body)),
+        }],
     );
     join_collect(mapped, open, close)
 }
@@ -1297,14 +1696,20 @@ fn join_collect(stream: Expr, open: &str, close: &str) -> Expr {
         vec![Expr::call(
             Expr::raw("Collectors"),
             "joining",
-            vec![Expr::str_lit(", "), Expr::str_lit(open), Expr::str_lit(close)],
+            vec![
+                Expr::str_lit(", "),
+                Expr::str_lit(open),
+                Expr::str_lit(close),
+            ],
         )],
     )
 }
 
 fn str_concat(parts: Vec<Expr>) -> Expr {
     let mut it = parts.into_iter();
-    let Some(mut acc) = it.next() else { return Expr::str_lit("") };
+    let Some(mut acc) = it.next() else {
+        return Expr::str_lit("");
+    };
     for p in it {
         acc = Expr::bin(acc, "+", p);
     }
@@ -1319,22 +1724,36 @@ fn equals_method(name: &str, fields: &[FieldInfo]) -> String {
             .iter()
             .map(|f| format!("Objects.equals(this.{0}, other.{0})", f.name))
             .collect();
-        format!("if (!(o instanceof {name} other)) return false; return {};", conds.join(" && "))
+        format!(
+            "if (!(o instanceof {name} other)) return false; return {};",
+            conds.join(" && ")
+        )
     };
     format!("public boolean equals(Object o) {{ {body} }}")
 }
 
 fn hash_method(fields: &[FieldInfo]) -> String {
     let args: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
-    format!("public int hashCode() {{ return Objects.hash({}); }}", args.join(", "))
+    format!(
+        "public int hashCode() {{ return Objects.hash({}); }}",
+        args.join(", ")
+    )
 }
 
 fn compare_method(cx: &mut Cx, node: &SyntaxNode, name: &str, fields: &[FieldInfo]) -> String {
     let mut body = String::new();
     for (i, f) in fields.iter().enumerate() {
-        match compare_field(&f.ty, &format!("this.{}", f.name), &format!("other.{}", f.name), i) {
+        match compare_field(
+            &f.ty,
+            &format!("this.{}", f.name),
+            &format!("other.{}", f.name),
+            i,
+        ) {
             Some(code) => body.push_str(&code),
-            None => cx.error(node, &format!("derive(Ord/PartialOrd): cannot compare field `{}`", f.name)),
+            None => cx.error(
+                node,
+                &format!("derive(Ord/PartialOrd): cannot compare field `{}`", f.name),
+            ),
         }
     }
     body.push_str("return 0;");
@@ -1393,13 +1812,21 @@ fn clone_value(ty: &Ty, v: &str) -> String {
     }
 }
 
-fn default_method(name: &str, generic_decls: &[String], kind: StructKind, fields: &[FieldInfo]) -> String {
+fn default_method(
+    name: &str,
+    generic_decls: &[String],
+    kind: StructKind,
+    fields: &[FieldInfo],
+) -> String {
     let generics = wrap_generics(generic_decls);
     if kind == StructKind::Unit {
         return format!("public static {generics}{name} default_() {{ return INSTANCE; }}");
     }
     let args: Vec<String> = fields.iter().map(|f| default_value(&f.ty)).collect();
-    format!("public static {generics}{name} default_() {{ return new {name}({}); }}", args.join(", "))
+    format!(
+        "public static {generics}{name} default_() {{ return new {name}({}); }}",
+        args.join(", ")
+    )
 }
 
 fn default_value(ty: &Ty) -> String {
@@ -1412,13 +1839,27 @@ fn default_value(ty: &Ty) -> String {
         Ty::Char => "'\\0'".into(),
         Ty::Str => "\"\"".into(),
         Ty::Vec(_) => "new ArrayList<>()".into(),
-        Ty::Map { ordered, .. } => if *ordered { "new TreeMap<>()" } else { "new HashMap<>()" }.into(),
-        Ty::Set { ordered, .. } => if *ordered { "new TreeSet<>()" } else { "new HashSet<>()" }.into(),
+        Ty::Map { ordered, .. } => if *ordered {
+            "new TreeMap<>()"
+        } else {
+            "new HashMap<>()"
+        }
+        .into(),
+        Ty::Set { ordered, .. } => if *ordered {
+            "new TreeSet<>()"
+        } else {
+            "new HashSet<>()"
+        }
+        .into(),
         Ty::Deque(_) => "new ArrayDeque<>()".into(),
         Ty::Option(_) => "Optional.empty()".into(),
         Ty::Adt { java, .. } => format!("{java}.default_()"),
         Ty::Tuple(ts) if ts.len() == 2 => {
-            format!("Map.entry({}, {})", default_value(&ts[0]), default_value(&ts[1]))
+            format!(
+                "Map.entry({}, {})",
+                default_value(&ts[0]),
+                default_value(&ts[1])
+            )
         }
         _ => "null".into(),
     }
@@ -1446,14 +1887,20 @@ fn is_pure(e: &ast::Expr) -> bool {
 //   struct                        -> `static final class S` with the same field naming
 
 pub fn enum_is_plain(cx: &Cx, e: ra_ap_hir::Enum) -> bool {
-    e.variants(cx.db).iter().all(|v| v.kind(cx.db) == ra_ap_hir::StructKind::Unit)
+    e.variants(cx.db)
+        .iter()
+        .all(|v| v.kind(cx.db) == ra_ap_hir::StructKind::Unit)
 }
 
 // Java type name of a local ADT as seen from the current file (`Shape` or `Geometry.Shape`).
 pub fn adt_java_name(cx: &Cx, adt: ra_ap_hir::Adt) -> String {
     let name = escape_keyword(adt.name(cx.db).as_str());
     let m = adt.module(cx.db);
-    if m == cx.module { name } else { format!("{}.{name}", module_class_from(cx.db, cx.module, m)) }
+    if m == cx.module {
+        name
+    } else {
+        format!("{}.{name}", module_class_from(cx.db, cx.module, m))
+    }
 }
 
 // `Shape.Circle` for any variant of a local enum.
@@ -1469,7 +1916,11 @@ pub fn java_field_names(cx: &Cx, fields: &[ra_ap_hir::Field]) -> Vec<String> {
         .map(|f| {
             let n = f.name(cx.db);
             let s = n.as_str();
-            if s.chars().all(|c| c.is_ascii_digit()) { format!("_{s}") } else { escape_keyword(s) }
+            if s.chars().all(|c| c.is_ascii_digit()) {
+                format!("_{s}")
+            } else {
+                escape_keyword(s)
+            }
         })
         .collect()
 }
@@ -1478,7 +1929,11 @@ pub fn java_field_names(cx: &Cx, fields: &[ra_ap_hir::Field]) -> Vec<String> {
 pub fn need_tuple(cx: &mut Cx, n: usize) {
     let params: Vec<String> = (0..n).map(|i| format!("T{i}")).collect();
     let fields: Vec<String> = (0..n).map(|i| format!("T{i} _{i}")).collect();
-    let decl = format!("record Tuple{n}<{}>({}) {{}}", params.join(", "), fields.join(", "));
+    let decl = format!(
+        "record Tuple{n}<{}>({}) {{}}",
+        params.join(", "),
+        fields.join(", ")
+    );
     if !cx.file_trailer.contains(&decl) {
         cx.file_trailer.insert(0, decl);
     }

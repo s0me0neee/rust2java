@@ -30,13 +30,32 @@ fn main() {{
     )
     .unwrap();
     let binary = work.path().join("reference");
-    let rustc = Command::new("rustc").args(["--edition", "2024"]).arg(&reference).arg("-o").arg(&binary).output().unwrap();
-    assert!(rustc.status.success(), "{}", String::from_utf8_lossy(&rustc.stderr));
+    let rustc = Command::new("rustc")
+        .args(["--edition", "2024"])
+        .arg(&reference)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        rustc.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rustc.stderr)
+    );
     let expected = Command::new(binary).output().unwrap();
 
     let output_dir = work.path().join("out");
-    let transpile = Command::new(env!("CARGO_BIN_EXE_rust2java")).arg(&source).arg("-o").arg(&output_dir).output().unwrap();
-    assert!(transpile.status.success(), "{}", String::from_utf8_lossy(&transpile.stderr));
+    let transpile = Command::new(env!("CARGO_BIN_EXE_rust2java"))
+        .arg(&source)
+        .arg("-o")
+        .arg(&output_dir)
+        .output()
+        .unwrap();
+    assert!(
+        transpile.status.success(),
+        "{}",
+        String::from_utf8_lossy(&transpile.stderr)
+    );
     let probe = work.path().join("Probe.java");
     std::fs::write(
         &probe,
@@ -57,9 +76,28 @@ public class Probe {
     .unwrap();
     let classes = work.path().join("classes");
     let java = output_dir.join("src/fmt_java_probe/Main.java");
-    let javac = Command::new("javac").arg("-d").arg(&classes).arg(java).arg(probe).output().unwrap();
-    assert!(javac.status.success(), "{}", String::from_utf8_lossy(&javac.stderr));
-    let result = Command::new("java").arg("-cp").arg(classes).arg("fmt_java_probe.Probe").output().unwrap();
-    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let javac = Command::new("javac")
+        .arg("-d")
+        .arg(&classes)
+        .arg(java)
+        .arg(probe)
+        .output()
+        .unwrap();
+    assert!(
+        javac.status.success(),
+        "{}",
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let result = Command::new("java")
+        .arg("-cp")
+        .arg(classes)
+        .arg("fmt_java_probe.Probe")
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
     assert_eq!(result.stdout, expected.stdout);
 }

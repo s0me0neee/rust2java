@@ -7,17 +7,30 @@ pub enum Expr {
     Name(String),
     Field(Box<Expr>, String),
     // `recv.name(args)` or `name(args)`
-    Call { recv: Option<Box<Expr>>, name: String, args: Vec<Expr> },
-    New { ty: String, args: Vec<Expr> },
+    Call {
+        recv: Option<Box<Expr>>,
+        name: String,
+        args: Vec<Expr>,
+    },
+    New {
+        ty: String,
+        args: Vec<Expr>,
+    },
     Unary(&'static str, Box<Expr>),
     Binary(Box<Expr>, &'static str, Box<Expr>),
     Assign(Box<Expr>, &'static str, Box<Expr>),
     Ternary(Box<Expr>, Box<Expr>, Box<Expr>),
     Cast(String, Box<Expr>),
-    Lambda { params: Vec<String>, body: LambdaBody },
+    Lambda {
+        params: Vec<String>,
+        body: LambdaBody,
+    },
     // `e instanceof <pattern text>`
     InstanceOf(Box<Expr>, String),
-    Switch { scrut: Box<Expr>, arms: Vec<Arm> },
+    Switch {
+        scrut: Box<Expr>,
+        arms: Vec<Arm>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -56,21 +69,49 @@ pub struct Stmt {
 #[derive(Clone, Debug)]
 pub enum StmtKind {
     // `ty name = init;` / `ty name;`
-    Local { ty: String, name: String, init: Option<Expr> },
+    Local {
+        ty: String,
+        name: String,
+        init: Option<Expr>,
+    },
     Expr(Expr),
-    If { cond: Expr, then: Block, els: Option<Box<Stmt>> },
-    While { label: Option<String>, cond: Expr, body: Block },
+    If {
+        cond: Expr,
+        then: Block,
+        els: Option<Box<Stmt>>,
+    },
+    While {
+        label: Option<String>,
+        cond: Expr,
+        body: Block,
+    },
     // `for (header) body`, header is raw text such as `int i = 0; i < n; i++`.
-    For { label: Option<String>, header: String, body: Block },
-    ForEach { label: Option<String>, ty: String, name: String, iter: Expr, body: Block },
-    Switch { scrut: Expr, arms: Vec<Arm> },
+    For {
+        label: Option<String>,
+        header: String,
+        body: Block,
+    },
+    ForEach {
+        label: Option<String>,
+        ty: String,
+        name: String,
+        iter: Expr,
+        body: Block,
+    },
+    Switch {
+        scrut: Expr,
+        arms: Vec<Arm>,
+    },
     Return(Option<Expr>),
     Break(Option<String>),
     Continue(Option<String>),
     Throw(Expr),
     Block(Block),
     // Labeled block, used for `'a: { ... break 'a; }`.
-    Labeled { label: String, body: Block },
+    Labeled {
+        label: String,
+        body: Block,
+    },
     Raw(String),
 }
 
@@ -119,11 +160,19 @@ impl Expr {
     }
 
     pub fn call(recv: Expr, name: impl Into<String>, args: Vec<Expr>) -> Expr {
-        Expr::Call { recv: Some(Box::new(recv)), name: name.into(), args }
+        Expr::Call {
+            recv: Some(Box::new(recv)),
+            name: name.into(),
+            args,
+        }
     }
 
     pub fn static_call(name: impl Into<String>, args: Vec<Expr>) -> Expr {
-        Expr::Call { recv: None, name: name.into(), args }
+        Expr::Call {
+            recv: None,
+            name: name.into(),
+            args,
+        }
     }
 
     pub fn bin(l: Expr, op: &'static str, r: Expr) -> Expr {
@@ -136,8 +185,10 @@ impl Expr {
 
     // Whether this expression may stand alone as a Java statement.
     pub fn is_statement_expr(&self) -> bool {
-        matches!(self, Expr::Call { .. } | Expr::New { .. } | Expr::Assign(..))
-            || matches!(self, Expr::Unary(op, _) if op.starts_with("++") || op.starts_with("--"))
+        matches!(
+            self,
+            Expr::Call { .. } | Expr::New { .. } | Expr::Assign(..)
+        ) || matches!(self, Expr::Unary(op, _) if op.starts_with("++") || op.starts_with("--"))
     }
 }
 

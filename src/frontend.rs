@@ -36,7 +36,10 @@ pub fn load(inputs: &[PathBuf]) -> Result<Project> {
         let tmp = wrap_files(inputs)?;
         (tmp.path().to_path_buf(), Some(tmp))
     };
-    let cargo_config = CargoConfig { sysroot: Some(RustLibSource::Discover), ..CargoConfig::default() };
+    let cargo_config = CargoConfig {
+        sysroot: Some(RustLibSource::Discover),
+        ..CargoConfig::default()
+    };
     let load_config = LoadCargoConfig {
         load_out_dirs_from_check: false,
         with_proc_macro_server: ProcMacroServerChoice::None,
@@ -57,11 +60,17 @@ fn wrap_files(files: &[PathBuf]) -> Result<tempfile::TempDir> {
     );
     for f in files {
         if f.extension().is_none_or(|e| e != "rs") {
-            bail!("{}: expected a cargo project directory or .rs files", f.display());
+            bail!(
+                "{}: expected a cargo project directory or .rs files",
+                f.display()
+            );
         }
         let abs = std::fs::canonicalize(f).with_context(|| format!("reading {}", f.display()))?;
         let stem = abs.file_stem().unwrap().to_string_lossy().replace('-', "_");
-        manifest.push_str(&format!("[[bin]]\nname = \"{stem}\"\npath = {:?}\n\n", abs.display().to_string()));
+        manifest.push_str(&format!(
+            "[[bin]]\nname = \"{stem}\"\npath = {:?}\n\n",
+            abs.display().to_string()
+        ));
     }
     std::fs::write(tmp.path().join("Cargo.toml"), manifest)?;
     Ok(tmp)
@@ -81,9 +90,14 @@ impl Project {
                 .unwrap_or_else(|| "main".into())
                 .replace('-', "_");
             for module in krate.modules(db) {
-                let Some(file_id) = module.definition_source_file_id(db).file_id() else { continue };
+                let Some(file_id) = module.definition_source_file_id(db).file_id() else {
+                    continue;
+                };
                 // Inline `mod x { .. }` shares the parent file; it is lowered as a nested class.
-                if !matches!(module.definition_source(db).value, ModuleSource::SourceFile(_)) {
+                if !matches!(
+                    module.definition_source(db).value,
+                    ModuleSource::SourceFile(_)
+                ) {
                     continue;
                 }
                 let path = self.vfs.file_path(file_id.file_id(db)).to_string();
@@ -91,7 +105,10 @@ impl Project {
                 let class_name = if is_root {
                     "Main".to_string()
                 } else {
-                    let name = module.name(db).map(|n| n.as_str().to_string()).unwrap_or_default();
+                    let name = module
+                        .name(db)
+                        .map(|n| n.as_str().to_string())
+                        .unwrap_or_default();
                     pascal_case(&name)
                 };
                 units.push(Unit {
@@ -114,7 +131,9 @@ pub fn pascal_case(s: &str) -> String {
         .filter(|p| !p.is_empty())
         .map(|p| {
             let mut c = p.chars();
-            c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+            c.next()
+                .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                .unwrap_or_default()
         })
         .collect()
 }
@@ -124,8 +143,17 @@ pub fn module_java_path(db: &RootDatabase, module: Module) -> String {
     if module.is_crate_root(db) {
         return "Main".into();
     }
-    let name = pascal_case(module.name(db).map(|n| n.as_str().to_string()).unwrap_or_default().as_str());
-    if matches!(module.definition_source(db).value, ModuleSource::SourceFile(_)) {
+    let name = pascal_case(
+        module
+            .name(db)
+            .map(|n| n.as_str().to_string())
+            .unwrap_or_default()
+            .as_str(),
+    );
+    if matches!(
+        module.definition_source(db).value,
+        ModuleSource::SourceFile(_)
+    ) {
         name
     } else {
         match module.parent(db) {
@@ -137,7 +165,10 @@ pub fn module_java_path(db: &RootDatabase, module: Module) -> String {
 
 // First module whose definition is a whole file.
 pub fn top_module(db: &RootDatabase, mut module: Module) -> Module {
-    while !matches!(module.definition_source(db).value, ModuleSource::SourceFile(_)) {
+    while !matches!(
+        module.definition_source(db).value,
+        ModuleSource::SourceFile(_)
+    ) {
         match module.parent(db) {
             Some(p) => module = p,
             None => break,
@@ -187,11 +218,17 @@ pub fn convert(sema: &Semantics<'_, RootDatabase>, from: Module, ty: &ra_ap_hir:
         return Ty::Never;
     }
     if ty.is_reference() {
-        let inner = ty.as_reference().map(|(t, _)| convert(sema, from, &t)).unwrap_or(Ty::Other("&?".into()));
+        let inner = ty
+            .as_reference()
+            .map(|(t, _)| convert(sema, from, &t))
+            .unwrap_or(Ty::Other("&?".into()));
         if inner == Ty::Str && !ty.is_mutable_reference() {
             return Ty::Str;
         }
-        return Ty::Ref { mutable: ty.is_mutable_reference(), inner: Box::new(inner) };
+        return Ty::Ref {
+            mutable: ty.is_mutable_reference(),
+            inner: Box::new(inner),
+        };
     }
     if ty.is_bool() {
         return Ty::Bool;
@@ -221,26 +258,44 @@ pub fn convert(sema: &Semantics<'_, RootDatabase>, from: Module, ty: &ra_ap_hir:
         return Ty::Vec(Box::new(convert(sema, from, &elem)));
     }
     if ty.is_tuple() {
-        return Ty::Tuple(ty.tuple_fields(db).iter().map(|t| convert(sema, from, t)).collect());
+        return Ty::Tuple(
+            ty.tuple_fields(db)
+                .iter()
+                .map(|t| convert(sema, from, t))
+                .collect(),
+        );
     }
     if let Some(p) = ty.as_type_param(db) {
         return Ty::Param(p.name(db).as_str().to_string());
     }
     // `dyn Trait` / `impl Trait` of a crate trait become its interface; std traits (Fn*, Iterator)
     // fall through to the callable / iterator mappings below.
-    if let Some(tr) = ty.as_dyn_trait().or_else(|| ty.as_impl_traits(db).and_then(|mut it| it.next()))
+    if let Some(tr) = ty
+        .as_dyn_trait()
+        .or_else(|| ty.as_impl_traits(db).and_then(|mut it| it.next()))
         && tr.module(db).krate(db).origin(db).is_local()
     {
-        return Ty::Adt { name: tr.name(db).as_str().to_string(), java: trait_java_name(db, from, tr), args: vec![] };
+        return Ty::Adt {
+            name: tr.name(db).as_str().to_string(),
+            java: trait_java_name(db, from, tr),
+            args: vec![],
+        };
     }
-    let args: Vec<Ty> = ty.type_arguments().map(|t| convert(sema, from, &t)).collect();
+    let args: Vec<Ty> = ty
+        .type_arguments()
+        .map(|t| convert(sema, from, &t))
+        .collect();
     let arg = |i: usize| Box::new(args.get(i).cloned().unwrap_or(Ty::Other("?".into())));
     if let Some(adt) = ty.as_adt() {
         let module = adt.module(db);
         let krate = module.krate(db);
         let name = adt.name(db).as_str().to_string();
         if krate.origin(db).is_local() {
-            let java = if module == from { name.clone() } else { format!("{}.{}", module_class_from(sema.db, from, module), name) };
+            let java = if module == from {
+                name.clone()
+            } else {
+                format!("{}.{}", module_class_from(sema.db, from, module), name)
+            };
             let args = match adt {
                 Adt::Struct(_) | Adt::Enum(_) | Adt::Union(_) => args.clone(),
             };
@@ -255,29 +310,63 @@ pub fn convert(sema: &Semantics<'_, RootDatabase>, from: Module, ty: &ra_ap_hir:
             match name.as_str() {
                 "String" => return Ty::Str,
                 "Vec" => return Ty::Vec(arg(0)),
-                "HashMap" => return Ty::Map { ordered: false, k: arg(0), v: arg(1) },
-                "BTreeMap" => return Ty::Map { ordered: true, k: arg(0), v: arg(1) },
-                "HashSet" => return Ty::Set { ordered: false, t: arg(0) },
-                "BTreeSet" => return Ty::Set { ordered: true, t: arg(0) },
+                "HashMap" => {
+                    return Ty::Map {
+                        ordered: false,
+                        k: arg(0),
+                        v: arg(1),
+                    };
+                }
+                "BTreeMap" => {
+                    return Ty::Map {
+                        ordered: true,
+                        k: arg(0),
+                        v: arg(1),
+                    };
+                }
+                "HashSet" => {
+                    return Ty::Set {
+                        ordered: false,
+                        t: arg(0),
+                    };
+                }
+                "BTreeSet" => {
+                    return Ty::Set {
+                        ordered: true,
+                        t: arg(0),
+                    };
+                }
                 "VecDeque" => return Ty::Deque(arg(0)),
                 "BinaryHeap" => return Ty::Heap(arg(0)),
                 "Option" => return Ty::Option(arg(0)),
                 "Result" => return Ty::Result(arg(0), arg(1)),
-                "Box" | "Rc" | "Arc" | "RefCell" | "Cell" | "Reverse" | "Wrapping" => return *arg(0),
+                "Box" | "Rc" | "Arc" | "RefCell" | "Cell" | "Reverse" | "Wrapping" => {
+                    return *arg(0);
+                }
                 "Ordering" => return Ty::Ordering,
                 _ => {}
             }
         }
     }
     if let Some(c) = ty.as_callable(db) {
-        let params = c.params().iter().map(|p| convert(sema, from, p.ty())).collect();
+        let params = c
+            .params()
+            .iter()
+            .map(|p| convert(sema, from, p.ty()))
+            .collect();
         let ret = convert(sema, from, &c.return_type());
-        return Ty::Fn { params, ret: Box::new(ret) };
+        return Ty::Fn {
+            params,
+            ret: Box::new(ret),
+        };
     }
     if ty.clone().impls_iterator(db)
         && let Some(item) = ty.clone().iterator_item(db)
     {
         return Ty::Iter(Box::new(convert(sema, from, &item)));
     }
-    Ty::Other(ty.display(db, from.krate(db).to_display_target(db)).to_string())
+    Ty::Other(
+        ty.display(db, from.krate(db).to_display_target(db))
+            .to_string(),
+    )
 }

@@ -19,7 +19,10 @@ pub fn lower_for(cx: &mut Cx, f: &ast::ForExpr, out: &mut Vec<Stmt>) {
         out.push(Stmt::new(line, StmtKind::Expr(e)));
         return;
     };
-    let rust_label = f.label().and_then(|l| l.lifetime()).map(|l| l.text().to_string());
+    let rust_label = f
+        .label()
+        .and_then(|l| l.lifetime())
+        .map(|l| l.text().to_string());
     cx.loops.push(LoopFrame {
         java_label: rust_label.as_deref().map(stmt::java_label_name),
         rust_label,
@@ -33,17 +36,53 @@ pub fn lower_for(cx: &mut Cx, f: &ast::ForExpr, out: &mut Vec<Stmt>) {
     cx.pop_scope();
     let label = cx.loops.pop().unwrap().java_label;
     out.push(match stmt {
-        ForStmt::Counted { header, body } => Stmt::new(line, StmtKind::For { label, header, body }),
-        ForStmt::Each { ty, name, iter, body } => Stmt::new(line, StmtKind::ForEach { label, ty, name, iter, body }),
+        ForStmt::Counted { header, body } => Stmt::new(
+            line,
+            StmtKind::For {
+                label,
+                header,
+                body,
+            },
+        ),
+        ForStmt::Each {
+            ty,
+            name,
+            iter,
+            body,
+        } => Stmt::new(
+            line,
+            StmtKind::ForEach {
+                label,
+                ty,
+                name,
+                iter,
+                body,
+            },
+        ),
     });
 }
 
 enum ForStmt {
-    Counted { header: String, body: Block },
-    Each { ty: String, name: String, iter: Expr, body: Block },
+    Counted {
+        header: String,
+        body: Block,
+    },
+    Each {
+        ty: String,
+        name: String,
+        iter: Expr,
+        body: Block,
+    },
 }
 
-fn lower_for_kind(cx: &mut Cx, f: &ast::ForExpr, p: &ast::Pat, iterable: &ast::Expr, line: u32, out: &mut Vec<Stmt>) -> ForStmt {
+fn lower_for_kind(
+    cx: &mut Cx,
+    f: &ast::ForExpr,
+    p: &ast::Pat,
+    iterable: &ast::Expr,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) -> ForStmt {
     // `for i in a..b` and `(a..b).rev()` / `.step_by(k)`: counted loops.
     if let Some(name) = simple_ident(p)
         && let Some((r, shape)) = range_loop_shape(iterable)
@@ -57,22 +96,40 @@ fn lower_for_kind(cx: &mut Cx, f: &ast::ForExpr, p: &ast::Pat, iterable: &ast::E
         let jt = ty.java();
         let captured = matches!(p, ast::Pat::IdentPat(ip) if cx.binding_captured(ip));
         // Lambdas can't capture a mutating loop counter: count with a temp, rebind per iteration.
-        let counter = if captured { cx.fresh(&name) } else { cx.declare(&name) };
+        let counter = if captured {
+            cx.fresh(&name)
+        } else {
+            cx.declare(&name)
+        };
         let (s, e) = (render(&start), render(&end));
         let cmp = if inclusive { "<=" } else { "<" };
         let header = match shape {
             RangeShape::Plain => format!("{jt} {counter} = {s}; {counter} {cmp} {e}; {counter}++"),
             RangeShape::Rev => {
-                let first = if inclusive { e } else { render(&Expr::bin(end, "-", Expr::raw("1"))) };
+                let first = if inclusive {
+                    e
+                } else {
+                    render(&Expr::bin(end, "-", Expr::raw("1")))
+                };
                 format!("{jt} {counter} = {first}; {counter} >= {s}; {counter}--")
             }
             RangeShape::StepBy(_) => {
-                format!("{jt} {counter} = {s}; {counter} {cmp} {e}; {counter} += {}", render(&step.unwrap()))
+                format!(
+                    "{jt} {counter} = {s}; {counter} {cmp} {e}; {counter} += {}",
+                    render(&step.unwrap())
+                )
             }
         };
         let rebind = captured.then(|| {
             let var = cx.declare(&name);
-            Stmt::new(line, StmtKind::Local { ty: jt.clone(), name: var, init: Some(Expr::name(counter.clone())) })
+            Stmt::new(
+                line,
+                StmtKind::Local {
+                    ty: jt.clone(),
+                    name: var,
+                    init: Some(Expr::name(counter.clone())),
+                },
+            )
         });
         let mut body = loop_body(cx, f);
         if let Some(r) = rebind {
@@ -101,7 +158,12 @@ fn lower_for_kind(cx: &mut Cx, f: &ast::ForExpr, p: &ast::Pat, iterable: &ast::E
         if plain_idx.is_none() {
             super::pat::bind_pattern(cx, &fields[0], Expr::name(idx.clone()), &mut binds);
         }
-        super::pat::bind_pattern(cx, &fields[1], Expr::call(list, "get", vec![Expr::name(idx)]), &mut binds);
+        super::pat::bind_pattern(
+            cx,
+            &fields[1],
+            Expr::call(list, "get", vec![Expr::name(idx)]),
+            &mut binds,
+        );
         let mut body = loop_body(cx, f);
         binds.append(&mut body.stmts);
         body.stmts = binds;
@@ -141,11 +203,18 @@ fn lower_for_kind(cx: &mut Cx, f: &ast::ForExpr, p: &ast::Pat, iterable: &ast::E
     let mut body = loop_body(cx, f);
     binds.append(&mut body.stmts);
     body.stmts = binds;
-    ForStmt::Each { ty: stmt::decl_type(&elem_ty), name, iter, body }
+    ForStmt::Each {
+        ty: stmt::decl_type(&elem_ty),
+        name,
+        iter,
+        body,
+    }
 }
 
 fn loop_body(cx: &mut Cx, f: &ast::ForExpr) -> Block {
-    f.loop_body().map(|b| stmt::lower_block(cx, &b, &Dest::Discard)).unwrap_or_default()
+    f.loop_body()
+        .map(|b| stmt::lower_block(cx, &b, &Dest::Discard))
+        .unwrap_or_default()
 }
 
 enum RangeShape {
@@ -157,10 +226,14 @@ enum RangeShape {
 fn range_loop_shape(e: &ast::Expr) -> Option<(ast::RangeExpr, RangeShape)> {
     use ast::RangeItem;
     match strip_parens(e) {
-        ast::Expr::RangeExpr(r) if r.start().is_some() && r.end().is_some() => Some((r, RangeShape::Plain)),
+        ast::Expr::RangeExpr(r) if r.start().is_some() && r.end().is_some() => {
+            Some((r, RangeShape::Plain))
+        }
         ast::Expr::MethodCallExpr(m) => {
             let name = method_name(&m);
-            let ast::Expr::RangeExpr(r) = strip_parens(&m.receiver()?) else { return None };
+            let ast::Expr::RangeExpr(r) = strip_parens(&m.receiver()?) else {
+                return None;
+            };
             r.start()?;
             r.end()?;
             match name.as_str() {
@@ -175,7 +248,9 @@ fn range_loop_shape(e: &ast::Expr) -> Option<(ast::RangeExpr, RangeShape)> {
 
 // `v.iter().enumerate()` where `v` is a list: returns `v`.
 fn enumerate_of_list(cx: &Cx, e: &ast::Expr) -> Option<ast::Expr> {
-    let ast::Expr::MethodCallExpr(m) = strip_parens(e) else { return None };
+    let ast::Expr::MethodCallExpr(m) = strip_parens(e) else {
+        return None;
+    };
     if method_name(&m) != "enumerate" {
         return None;
     }
@@ -197,7 +272,11 @@ fn iter_mut_of_list(cx: &Cx, e: &ast::Expr) -> Option<ast::Expr> {
 // `v.iter()` / `v.iter_mut()` / `v.into_iter()` / `&v` where v is a list: returns `v`.
 fn list_receiver_of_iter(cx: &Cx, e: &ast::Expr) -> Option<ast::Expr> {
     let target = match strip_parens(e) {
-        ast::Expr::MethodCallExpr(m) if matches!(method_name(&m).as_str(), "iter" | "iter_mut" | "into_iter") => m.receiver()?,
+        ast::Expr::MethodCallExpr(m)
+            if matches!(method_name(&m).as_str(), "iter" | "iter_mut" | "into_iter") =>
+        {
+            m.receiver()?
+        }
         ast::Expr::RefExpr(r) => r.expr()?,
         other => other,
     };
@@ -205,10 +284,20 @@ fn list_receiver_of_iter(cx: &Cx, e: &ast::Expr) -> Option<ast::Expr> {
 }
 
 // Right-hand side of `for (T x : ...)`.
-fn for_each_source(cx: &mut Cx, iterable: &ast::Expr, it_ty: &Ty, elem_ty: &Ty, out: &mut Vec<Stmt>) -> Expr {
+fn for_each_source(
+    cx: &mut Cx,
+    iterable: &ast::Expr,
+    it_ty: &Ty,
+    elem_ty: &Ty,
+    out: &mut Vec<Stmt>,
+) -> Expr {
     // `&v`, `v.iter()`, `v.into_iter()` over a collection: iterate the collection itself.
     let collection = match iterable {
-        ast::Expr::MethodCallExpr(m) if matches!(method_name(m).as_str(), "iter" | "iter_mut" | "into_iter") => m.receiver(),
+        ast::Expr::MethodCallExpr(m)
+            if matches!(method_name(m).as_str(), "iter" | "iter_mut" | "into_iter") =>
+        {
+            m.receiver()
+        }
         ast::Expr::RefExpr(r) => r.expr(),
         _ => None,
     };
@@ -231,7 +320,10 @@ fn for_each_source(cx: &mut Cx, iterable: &ast::Expr, it_ty: &Ty, elem_ty: &Ty, 
         && cx.pulled_iters.contains_key(&local)
     {
         let it = expr::lower_expr(cx, iterable, out);
-        return Expr::Cast(format!("Iterable<{}>", elem_ty.boxed()), Box::new(Expr::raw(format!("() -> {}", render(&it)))));
+        return Expr::Cast(
+            format!("Iterable<{}>", elem_ty.boxed()),
+            Box::new(Expr::raw(format!("() -> {}", render(&it)))),
+        );
     }
     let src = expr::lower_expr(cx, iterable, out);
     match it_ty.strip_refs() {
@@ -260,13 +352,21 @@ fn simple_ident(p: &ast::Pat) -> Option<String> {
 }
 
 fn method_name(m: &ast::MethodCallExpr) -> String {
-    m.name_ref().map(|n| n.text().to_string()).unwrap_or_default()
+    m.name_ref()
+        .map(|n| n.text().to_string())
+        .unwrap_or_default()
 }
 
 fn range_bounds(cx: &mut Cx, r: &ast::RangeExpr, out: &mut Vec<Stmt>) -> (Expr, Expr, bool) {
     use ast::RangeItem;
-    let start = r.start().map(|s| expr::lower_expr(cx, &s, out)).unwrap_or(Expr::raw("0"));
-    let end = r.end().map(|e| expr::lower_expr(cx, &e, out)).unwrap_or(Expr::raw("Integer.MAX_VALUE"));
+    let start = r
+        .start()
+        .map(|s| expr::lower_expr(cx, &s, out))
+        .unwrap_or(Expr::raw("0"));
+    let end = r
+        .end()
+        .map(|e| expr::lower_expr(cx, &e, out))
+        .unwrap_or(Expr::raw("Integer.MAX_VALUE"));
     let inclusive = r.op_kind() == Some(ast::RangeOp::Inclusive);
     (start, end, inclusive)
 }
@@ -278,12 +378,23 @@ fn range_is_long(cx: &Cx, r: &ast::RangeExpr) -> bool {
 // A range used as a value: a boxed stream, so it composes like any other iterator.
 pub fn lower_range_expr(cx: &mut Cx, r: &ast::RangeExpr, out: &mut Vec<Stmt>) -> Expr {
     use ast::RangeItem;
-    let class = if range_is_long(cx, r) { "LongStream" } else { "IntStream" };
+    let class = if range_is_long(cx, r) {
+        "LongStream"
+    } else {
+        "IntStream"
+    };
     if r.end().is_none() {
         // `a..` is unbounded.
-        let start = r.start().map(|s| expr::lower_expr(cx, &s, out)).unwrap_or(Expr::raw("0"));
+        let start = r
+            .start()
+            .map(|s| expr::lower_expr(cx, &s, out))
+            .unwrap_or(Expr::raw("0"));
         let i = cx.fresh("i");
-        return boxed(Expr::call(Expr::raw(class), "iterate", vec![start, Expr::raw(format!("{i} -> {i} + 1"))]));
+        return boxed(Expr::call(
+            Expr::raw(class),
+            "iterate",
+            vec![start, Expr::raw(format!("{i} -> {i} + 1"))],
+        ));
     }
     let (s, e, inclusive) = range_bounds(cx, r, out);
     let m = if inclusive { "rangeClosed" } else { "range" };
@@ -298,14 +409,23 @@ fn boxed(e: Expr) -> Expr {
 fn ensure_simple(cx: &mut Cx, e: Expr, ty: &Ty, line: u32, out: &mut Vec<Stmt>) -> Expr {
     let simple = match &e {
         Expr::Name(_) => true,
-        Expr::Raw(s) => s.chars().all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '[' | ']')),
+        Expr::Raw(s) => s
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '[' | ']')),
         _ => false,
     };
     if simple || cx.lambda_depth > 0 {
         return e;
     }
     let tmp = cx.fresh("src");
-    out.push(Stmt::new(line, StmtKind::Local { ty: stmt::decl_type(ty), name: tmp.clone(), init: Some(e) }));
+    out.push(Stmt::new(
+        line,
+        StmtKind::Local {
+            ty: stmt::decl_type(ty),
+            name: tmp.clone(),
+            init: Some(e),
+        },
+    ));
     Expr::name(tmp)
 }
 
@@ -313,15 +433,40 @@ fn ensure_simple(cx: &mut Cx, e: Expr, ty: &Ty, line: u32, out: &mut Vec<Stmt>) 
 
 // `let mut it = s.chars().peekable();` used with `next()`/`peek()`: materialize into a list and
 // walk it with a ListIterator. Returns false if the binding should stay a plain stream.
-pub fn lower_iter_let(cx: &mut Cx, l: &ast::LetStmt, ip: &ast::IdentPat, rust_name: &str, ty: &Ty, out: &mut Vec<Stmt>) -> bool {
-    let Ty::Iter(item) = ty.strip_refs() else { return false };
-    let Some(init) = l.initializer() else { return false };
-    let Some(local) = cx.sema.to_def(ip) else { return false };
-    let Some(scope) = ip.syntax().ancestors().find(|n| ast::Fn::can_cast(n.kind())) else { return false };
-    let pulled = cx.expanded_descendants(&scope).into_iter().filter_map(ast::MethodCallExpr::cast).any(|m| {
-        matches!(method_name(&m).as_str(), "next" | "peek" | "next_if" | "next_if_eq")
-            && m.receiver().and_then(|r| cx.local_of_path(&r)) == Some(local)
-    });
+pub fn lower_iter_let(
+    cx: &mut Cx,
+    l: &ast::LetStmt,
+    ip: &ast::IdentPat,
+    rust_name: &str,
+    ty: &Ty,
+    out: &mut Vec<Stmt>,
+) -> bool {
+    let Ty::Iter(item) = ty.strip_refs() else {
+        return false;
+    };
+    let Some(init) = l.initializer() else {
+        return false;
+    };
+    let Some(local) = cx.sema.to_def(ip) else {
+        return false;
+    };
+    let Some(scope) = ip
+        .syntax()
+        .ancestors()
+        .find(|n| ast::Fn::can_cast(n.kind()))
+    else {
+        return false;
+    };
+    let pulled = cx
+        .expanded_descendants(&scope)
+        .into_iter()
+        .filter_map(ast::MethodCallExpr::cast)
+        .any(|m| {
+            matches!(
+                method_name(&m).as_str(),
+                "next" | "peek" | "next_if" | "next_if_eq"
+            ) && m.receiver().and_then(|r| cx.local_of_path(&r)) == Some(local)
+        });
     if !pulled {
         return false;
     }
@@ -330,16 +475,26 @@ pub fn lower_iter_let(cx: &mut Cx, l: &ast::LetStmt, ip: &ast::IdentPat, rust_na
     let name = cx.declare(rust_name);
     let items = cx.fresh(&format!("{name}_items"));
     let b = item.boxed();
-    out.push(Stmt::new(line, StmtKind::Local {
-        ty: format!("List<{b}>"),
-        name: items.clone(),
-        init: Some(Expr::call(src, "toList", vec![])),
-    }));
-    out.push(Stmt::new(line, StmtKind::Local {
-        ty: format!("ListIterator<{b}>"),
-        name,
-        init: Some(Expr::call(Expr::name(items.clone()), "listIterator", vec![])),
-    }));
+    out.push(Stmt::new(
+        line,
+        StmtKind::Local {
+            ty: format!("List<{b}>"),
+            name: items.clone(),
+            init: Some(Expr::call(src, "toList", vec![])),
+        },
+    ));
+    out.push(Stmt::new(
+        line,
+        StmtKind::Local {
+            ty: format!("ListIterator<{b}>"),
+            name,
+            init: Some(Expr::call(
+                Expr::name(items.clone()),
+                "listIterator",
+                vec![],
+            )),
+        },
+    ));
     cx.pulled_iters.insert(local, items);
     true
 }
@@ -347,7 +502,9 @@ pub fn lower_iter_let(cx: &mut Cx, l: &ast::LetStmt, ip: &ast::IdentPat, rust_na
 // ---- iterator methods ------------------------------------------------------------------------
 
 fn arg_exprs(m: &ast::MethodCallExpr) -> Vec<ast::Expr> {
-    m.arg_list().map(|al| al.args().collect()).unwrap_or_default()
+    m.arg_list()
+        .map(|al| al.args().collect())
+        .unwrap_or_default()
 }
 
 fn lower_arg(cx: &mut Cx, a: &ast::Expr, out: &mut Vec<Stmt>) -> Expr {
@@ -355,7 +512,13 @@ fn lower_arg(cx: &mut Cx, a: &ast::Expr, out: &mut Vec<Stmt>) -> Expr {
 }
 
 // Iterator sources, adaptors and consumers. Returns None when the method isn't iterator-related.
-pub fn lower_iter_method(cx: &mut Cx, m: &ast::MethodCallExpr, recv_ty: &Ty, key: &str, out: &mut Vec<Stmt>) -> Option<Expr> {
+pub fn lower_iter_method(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    recv_ty: &Ty,
+    key: &str,
+    out: &mut Vec<Stmt>,
+) -> Option<Expr> {
     let _ = key;
     let name = method_name(m);
     let recv_ast = m.receiver()?;
@@ -367,7 +530,10 @@ pub fn lower_iter_method(cx: &mut Cx, m: &ast::MethodCallExpr, recv_ty: &Ty, key
     }
     // Set algebra streams: std_map builds the stream from the two sets.
     if matches!(recv_ty.strip_refs(), Ty::Set { .. })
-        && matches!(name.as_str(), "union" | "intersection" | "difference" | "symmetric_difference")
+        && matches!(
+            name.as_str(),
+            "union" | "intersection" | "difference" | "symmetric_difference"
+        )
     {
         return None;
     }
@@ -387,21 +553,39 @@ pub fn lower_iter_method(cx: &mut Cx, m: &ast::MethodCallExpr, recv_ty: &Ty, key
         }
         return Some(lower_source(cx, m, &name, recv_ty, &recv_ast, out));
     }
-    Some(lower_adaptor(cx, m, &name, &recv_ast, recv_ty, &ret_ty, out))
+    Some(lower_adaptor(
+        cx, m, &name, &recv_ast, recv_ty, &ret_ty, out,
+    ))
 }
 
-fn lower_source(cx: &mut Cx, m: &ast::MethodCallExpr, name: &str, recv_ty: &Ty, recv_ast: &ast::Expr, out: &mut Vec<Stmt>) -> Expr {
+fn lower_source(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    name: &str,
+    recv_ty: &Ty,
+    recv_ast: &ast::Expr,
+    out: &mut Vec<Stmt>,
+) -> Expr {
     let line = cx.line(m.syntax());
     let recv = expr::lower_expr(cx, recv_ast, out);
     let args = arg_exprs(m);
     match (recv_ty.strip_refs(), name) {
-        (Ty::Map { .. }, "iter" | "into_iter" | "iter_mut") => Expr::call(Expr::call(recv, "entrySet", vec![]), "stream", vec![]),
-        (Ty::Map { .. }, "keys" | "into_keys") => Expr::call(Expr::call(recv, "keySet", vec![]), "stream", vec![]),
-        (Ty::Map { .. }, "values" | "into_values") => Expr::call(Expr::call(recv, "values", vec![]), "stream", vec![]),
-        (Ty::Vec(_) | Ty::Set { .. } | Ty::Deque(_) | Ty::Heap(_) | Ty::Option(_), "iter" | "into_iter") => {
+        (Ty::Map { .. }, "iter" | "into_iter" | "iter_mut") => {
+            Expr::call(Expr::call(recv, "entrySet", vec![]), "stream", vec![])
+        }
+        (Ty::Map { .. }, "keys" | "into_keys") => {
+            Expr::call(Expr::call(recv, "keySet", vec![]), "stream", vec![])
+        }
+        (Ty::Map { .. }, "values" | "into_values") => {
+            Expr::call(Expr::call(recv, "values", vec![]), "stream", vec![])
+        }
+        (
+            Ty::Vec(_) | Ty::Set { .. } | Ty::Deque(_) | Ty::Heap(_) | Ty::Option(_),
+            "iter" | "into_iter",
+        ) => Expr::call(recv, "stream", vec![]),
+        (Ty::Vec(t) | Ty::Deque(t), "iter_mut") if !super::is_cell_value_ty(t) => {
             Expr::call(recv, "stream", vec![])
         }
-        (Ty::Vec(t) | Ty::Deque(t), "iter_mut") if !super::is_cell_value_ty(t) => Expr::call(recv, "stream", vec![]),
         (Ty::Vec(t), "drain") => {
             if cx.lambda_depth > 0 {
                 return cx.unsupported(m.syntax(), "`drain` inside a closure");
@@ -410,18 +594,31 @@ fn lower_source(cx: &mut Cx, m: &ast::MethodCallExpr, name: &str, recv_ty: &Ty, 
             let part = match args.first().map(strip_parens) {
                 Some(ast::Expr::RangeExpr(r)) if r.syntax().text() != ".." => {
                     let (s, e, incl) = range_bounds(cx, &r, out);
-                    let e = if incl { Expr::bin(e, "+", Expr::raw("1")) } else { e };
+                    let e = if incl {
+                        Expr::bin(e, "+", Expr::raw("1"))
+                    } else {
+                        e
+                    };
                     Expr::call(recv.clone(), "subList", vec![s, e])
                 }
                 _ => recv.clone(),
             };
             let tmp = cx.fresh("drained");
-            out.push(Stmt::new(line, StmtKind::Local {
-                ty: format!("List<{}>", t.boxed()),
-                name: tmp.clone(),
-                init: Some(Expr::New { ty: "ArrayList<>".into(), args: vec![part.clone()] }),
-            }));
-            out.push(Stmt::new(line, StmtKind::Expr(Expr::call(part, "clear", vec![]))));
+            out.push(Stmt::new(
+                line,
+                StmtKind::Local {
+                    ty: format!("List<{}>", t.boxed()),
+                    name: tmp.clone(),
+                    init: Some(Expr::New {
+                        ty: "ArrayList<>".into(),
+                        args: vec![part.clone()],
+                    }),
+                },
+            ));
+            out.push(Stmt::new(
+                line,
+                StmtKind::Expr(Expr::call(part, "clear", vec![])),
+            ));
             Expr::call(Expr::name(tmp), "stream", vec![])
         }
         (Ty::Vec(_), "windows" | "chunks") => {
@@ -431,7 +628,9 @@ fn lower_source(cx: &mut Cx, m: &ast::MethodCallExpr, name: &str, recv_ty: &Ty, 
             let i = cx.fresh("i");
             let (vs, ks) = (render(&v), render(&k));
             if name == "windows" {
-                Expr::raw(format!("IntStream.rangeClosed(0, {vs}.size() - {ks}).mapToObj({i} -> {vs}.subList({i}, {i} + {ks}))"))
+                Expr::raw(format!(
+                    "IntStream.rangeClosed(0, {vs}.size() - {ks}).mapToObj({i} -> {vs}.subList({i}, {i} + {ks}))"
+                ))
             } else {
                 Expr::raw(format!(
                     "IntStream.range(0, ({vs}.size() + {ks} - 1) / {ks}).mapToObj({i} -> {vs}.subList({i} * {ks}, Math.min({vs}.size(), {i} * {ks} + {ks})))"
@@ -440,14 +639,20 @@ fn lower_source(cx: &mut Cx, m: &ast::MethodCallExpr, name: &str, recv_ty: &Ty, 
         }
         (Ty::Str, "chars") => {
             let c = cx.fresh("c");
-            Expr::call(Expr::call(recv, "chars", vec![]), "mapToObj", vec![Expr::raw(format!("{c} -> (char) {c}"))])
+            Expr::call(
+                Expr::call(recv, "chars", vec![]),
+                "mapToObj",
+                vec![Expr::raw(format!("{c} -> (char) {c}"))],
+            )
         }
         (Ty::Str, "bytes") => boxed(Expr::call(recv, "chars", vec![])),
         (Ty::Str, "char_indices") => {
             let s = ensure_simple(cx, recv, recv_ty, line, out);
             let i = cx.fresh("i");
             let ss = render(&s);
-            Expr::raw(format!("IntStream.range(0, {ss}.length()).mapToObj({i} -> Map.entry({i}, {ss}.charAt({i})))"))
+            Expr::raw(format!(
+                "IntStream.range(0, {ss}.length()).mapToObj({i} -> Map.entry({i}, {ss}.charAt({i})))"
+            ))
         }
         (Ty::Str, "lines") => Expr::call(recv, "lines", vec![]),
         (Ty::Other(t), "lines") if t.contains("Stdin") => {
@@ -456,7 +661,11 @@ fn lower_source(cx: &mut Cx, m: &ast::MethodCallExpr, name: &str, recv_ty: &Ty, 
         }
         (Ty::Str, "split_whitespace" | "split_ascii_whitespace") => {
             let w = cx.fresh("w");
-            let parts = Expr::call(Expr::call(recv, "strip", vec![]), "split", vec![Expr::str_lit("\\s+")]);
+            let parts = Expr::call(
+                Expr::call(recv, "strip", vec![]),
+                "split",
+                vec![Expr::str_lit("\\s+")],
+            );
             Expr::call(
                 Expr::call(Expr::raw("Arrays"), "stream", vec![parts]),
                 "filter",
@@ -478,9 +687,16 @@ fn lower_source(cx: &mut Cx, m: &ast::MethodCallExpr, name: &str, recv_ty: &Ty, 
             };
             cx.import("java.util.regex.Pattern");
             let quoted = Expr::call(Expr::raw("Pattern"), "quote", vec![pat]);
-            Expr::call(Expr::raw("Arrays"), "stream", vec![Expr::call(recv, "split", vec![quoted, limit])])
+            Expr::call(
+                Expr::raw("Arrays"),
+                "stream",
+                vec![Expr::call(recv, "split", vec![quoted, limit])],
+            )
         }
-        _ => cx.unsupported(m.syntax(), &format!("iterator source `{name}` on {recv_ty:?}")),
+        _ => cx.unsupported(
+            m.syntax(),
+            &format!("iterator source `{name}` on {recv_ty:?}"),
+        ),
     }
 }
 
@@ -510,17 +726,25 @@ fn lower_adaptor(
         && r.end().is_some()
         && matches!(name, "rev" | "step_by")
     {
-        let class = if range_is_long(cx, &r) { "LongStream" } else { "IntStream" };
+        let class = if range_is_long(cx, &r) {
+            "LongStream"
+        } else {
+            "IntStream"
+        };
         let (s, e, inclusive) = range_bounds(cx, &r, out);
         let i = cx.fresh("i");
         let (ss, es) = (render(&s), render(&e));
         return if name == "rev" {
             let first = if inclusive { es } else { format!("{es} - 1") };
-            boxed(Expr::raw(format!("{class}.iterate({first}, {i} -> {i} >= {ss}, {i} -> {i} - 1)")))
+            boxed(Expr::raw(format!(
+                "{class}.iterate({first}, {i} -> {i} >= {ss}, {i} -> {i} - 1)"
+            )))
         } else {
             let k = render(&lower_arg(cx, &args[0], out));
             let cmp = if inclusive { "<=" } else { "<" };
-            boxed(Expr::raw(format!("{class}.iterate({ss}, {i} -> {i} {cmp} {es}, {i} -> {i} + {k})")))
+            boxed(Expr::raw(format!(
+                "{class}.iterate({ss}, {i} -> {i} {cmp} {es}, {i} -> {i} + {k})"
+            )))
         };
     }
     let direct_list = matches!(strip_parens(recv_ast), ast::Expr::MethodCallExpr(_))
@@ -542,7 +766,9 @@ fn lower_adaptor(
         let v = ensure_simple(cx, v, &lt, line, out);
         let i = cx.fresh("i");
         let vs = render(&v);
-        return Expr::raw(format!("IntStream.range(0, {vs}.size()).mapToObj({i} -> Map.entry({i}, {vs}.get({i})))"));
+        return Expr::raw(format!(
+            "IntStream.range(0, {vs}.size()).mapToObj({i} -> Map.entry({i}, {vs}.get({i})))"
+        ));
     }
 
     let src = expr::lower_expr(cx, recv_ast, out);
@@ -563,16 +789,26 @@ fn lower_adaptor(
         }
         "filter_map" => {
             let f = lower_arg(cx, &args[0], out);
-            Expr::call(call("map", vec![f]), "flatMap", vec![Expr::raw("Optional::stream")])
+            Expr::call(
+                call("map", vec![f]),
+                "flatMap",
+                vec![Expr::raw("Optional::stream")],
+            )
         }
         "map_while" => {
             let f = lower_arg(cx, &args[0], out);
-            let mapped = Expr::call(call("map", vec![f]), "takeWhile", vec![Expr::raw("Optional::isPresent")]);
+            let mapped = Expr::call(
+                call("map", vec![f]),
+                "takeWhile",
+                vec![Expr::raw("Optional::isPresent")],
+            );
             Expr::call(mapped, "map", vec![Expr::raw("Optional::get")])
         }
         "flat_map" => {
             let inner_ty = match strip_parens(&args[0]) {
-                ast::Expr::ClosureExpr(c) => c.body().map(|b| cx.ty(&b)).unwrap_or(Ty::Other("?".into())),
+                ast::Expr::ClosureExpr(c) => {
+                    c.body().map(|b| cx.ty(&b)).unwrap_or(Ty::Other("?".into()))
+                }
                 _ => Ty::Other("?".into()),
             };
             let f = lower_arg(cx, &args[0], out);
@@ -587,33 +823,57 @@ fn lower_adaptor(
         },
         "enumerate" => {
             if cx.lambda_depth > 0 {
-                return cx.unsupported(m.syntax(), "enumerate() on a non-list iterator inside a closure");
+                return cx.unsupported(
+                    m.syntax(),
+                    "enumerate() on a non-list iterator inside a closure",
+                );
             }
             cx.import("java.util.concurrent.atomic.AtomicInteger");
             let idx = cx.fresh("index");
-            out.push(Stmt::new(line, StmtKind::Local {
-                ty: "AtomicInteger".into(),
-                name: idx.clone(),
-                init: Some(Expr::New { ty: "AtomicInteger".into(), args: vec![] }),
-            }));
+            out.push(Stmt::new(
+                line,
+                StmtKind::Local {
+                    ty: "AtomicInteger".into(),
+                    name: idx.clone(),
+                    init: Some(Expr::New {
+                        ty: "AtomicInteger".into(),
+                        args: vec![],
+                    }),
+                },
+            ));
             let x = cx.fresh("x");
-            call("map", vec![Expr::raw(format!("{x} -> Map.entry({idx}.getAndIncrement(), {x})"))])
+            call(
+                "map",
+                vec![Expr::raw(format!(
+                    "{x} -> Map.entry({idx}.getAndIncrement(), {x})"
+                ))],
+            )
         }
         "zip" => lower_zip(cx, m, &args[0], src, &item, line, out),
-        "rev" => Expr::call(Expr::call(call("toList", vec![]), "reversed", vec![]), "stream", vec![]),
+        "rev" => Expr::call(
+            Expr::call(call("toList", vec![]), "reversed", vec![]),
+            "stream",
+            vec![],
+        ),
         "skip" => call("skip", vec![lower_arg(cx, &args[0], out)]),
         "take" => call("limit", vec![lower_arg(cx, &args[0], out)]),
         "step_by" => {
             let k = lower_arg(cx, &args[0], out);
             if cx.lambda_depth > 0 {
-                return cx.unsupported(m.syntax(), "step_by() on a non-range iterator inside a closure");
+                return cx.unsupported(
+                    m.syntax(),
+                    "step_by() on a non-range iterator inside a closure",
+                );
             }
             let tmp = cx.fresh("stepped");
-            out.push(Stmt::new(line, StmtKind::Local {
-                ty: format!("List<{}>", item.boxed()),
-                name: tmp.clone(),
-                init: Some(call("toList", vec![])),
-            }));
+            out.push(Stmt::new(
+                line,
+                StmtKind::Local {
+                    ty: format!("List<{}>", item.boxed()),
+                    name: tmp.clone(),
+                    init: Some(call("toList", vec![])),
+                },
+            ));
             let i = cx.fresh("i");
             Expr::raw(format!(
                 "IntStream.iterate(0, {i} -> {i} < {tmp}.size(), {i} -> {i} + {}).mapToObj({tmp}::get)",
@@ -623,7 +883,11 @@ fn lower_adaptor(
         "chain" => {
             let other_ty = cx.ty(&args[0]);
             let other = lower_arg(cx, &args[0], out);
-            Expr::call(Expr::raw("Stream"), "concat", vec![src, into_stream(other, &other_ty)])
+            Expr::call(
+                Expr::raw("Stream"),
+                "concat",
+                vec![src, into_stream(other, &other_ty)],
+            )
         }
         "copied" | "cloned" | "into_iter" | "iter" | "by_ref" | "peekable" | "fuse" => src,
         "count" => Expr::Cast("int".into(), Box::new(call("count", vec![]))),
@@ -634,7 +898,12 @@ fn lower_adaptor(
             } else {
                 // Rust's max returns the last of equal maxima; Java's returns the first.
                 let (a, b) = (cx.fresh("a"), cx.fresh("b"));
-                call("reduce", vec![Expr::raw(format!("({a}, {b}) -> {b}.compareTo({a}) >= 0 ? {b} : {a}"))])
+                call(
+                    "reduce",
+                    vec![Expr::raw(format!(
+                        "({a}, {b}) -> {b}.compareTo({a}) >= 0 ? {b} : {a}"
+                    ))],
+                )
             }
         }
         "min_by_key" | "max_by_key" => {
@@ -644,7 +913,12 @@ fn lower_adaptor(
                 call("min", vec![Expr::raw(cmp)])
             } else {
                 let (a, b) = (cx.fresh("a"), cx.fresh("b"));
-                call("reduce", vec![Expr::raw(format!("({a}, {b}) -> ({cmp}).compare({b}, {a}) >= 0 ? {b} : {a}"))])
+                call(
+                    "reduce",
+                    vec![Expr::raw(format!(
+                        "({a}, {b}) -> ({cmp}).compare({b}, {a}) >= 0 ? {b} : {a}"
+                    ))],
+                )
             }
         }
         "min_by" | "max_by" => {
@@ -652,9 +926,17 @@ fn lower_adaptor(
             if name == "min_by" {
                 call("min", vec![f])
             } else {
-                let cmp = render(&Expr::Cast(format!("Comparator<{}>", item.boxed()), Box::new(f)));
+                let cmp = render(&Expr::Cast(
+                    format!("Comparator<{}>", item.boxed()),
+                    Box::new(f),
+                ));
                 let (a, b) = (cx.fresh("a"), cx.fresh("b"));
-                call("reduce", vec![Expr::raw(format!("({a}, {b}) -> ({cmp}).compare({b}, {a}) >= 0 ? {b} : {a}"))])
+                call(
+                    "reduce",
+                    vec![Expr::raw(format!(
+                        "({a}, {b}) -> ({cmp}).compare({b}, {a}) >= 0 ? {b} : {a}"
+                    ))],
+                )
             }
         }
         "fold" => {
@@ -663,25 +945,48 @@ fn lower_adaptor(
             let f = lower_arg(cx, &args[1], out);
             let (a, b) = (cx.fresh("a"), cx.fresh("b"));
             // The combiner is never called on a sequential stream.
-            call("reduce", vec![init, f, Expr::raw(format!("({a}, {b}) -> {a}"))])
+            call(
+                "reduce",
+                vec![init, f, Expr::raw(format!("({a}, {b}) -> {a}"))],
+            )
         }
-        "find" => Expr::call(call("filter", vec![lower_arg(cx, &args[0], out)]), "findFirst", vec![]),
+        "find" => Expr::call(
+            call("filter", vec![lower_arg(cx, &args[0], out)]),
+            "findFirst",
+            vec![],
+        ),
         "find_map" => {
             let f = lower_arg(cx, &args[0], out);
-            let mapped = Expr::call(call("map", vec![f]), "flatMap", vec![Expr::raw("Optional::stream")]);
+            let mapped = Expr::call(
+                call("map", vec![f]),
+                "flatMap",
+                vec![Expr::raw("Optional::stream")],
+            );
             Expr::call(mapped, "findFirst", vec![])
         }
         "position" => {
             let f = lower_arg(cx, &args[0], out);
-            let idx = Expr::call(Expr::call(call("map", vec![f]), "toList", vec![]), "indexOf", vec![Expr::raw("true")]);
+            let idx = Expr::call(
+                Expr::call(call("map", vec![f]), "toList", vec![]),
+                "indexOf",
+                vec![Expr::raw("true")],
+            );
             let i = cx.fresh("i");
-            Expr::call(Expr::call(Expr::raw("Optional"), "of", vec![idx]), "filter", vec![Expr::raw(format!("{i} -> {i} >= 0"))])
+            Expr::call(
+                Expr::call(Expr::raw("Optional"), "of", vec![idx]),
+                "filter",
+                vec![Expr::raw(format!("{i} -> {i} >= 0"))],
+            )
         }
         "last" => {
             let (a, b) = (cx.fresh("a"), cx.fresh("b"));
             call("reduce", vec![Expr::raw(format!("({a}, {b}) -> {b}"))])
         }
-        "nth" => Expr::call(call("skip", vec![lower_arg(cx, &args[0], out)]), "findFirst", vec![]),
+        "nth" => Expr::call(
+            call("skip", vec![lower_arg(cx, &args[0], out)]),
+            "findFirst",
+            vec![],
+        ),
         // `next()` on a temporary iterator: its first element.
         "next" => call("findFirst", vec![]),
         "collect" => lower_collect(cx, m, src, &item, ret_ty, line, out),
@@ -689,18 +994,34 @@ fn lower_adaptor(
     }
 }
 
-fn lower_sum_product(cx: &mut Cx, m: &ast::MethodCallExpr, product: bool, src: Expr, ret_ty: &Ty) -> Expr {
+fn lower_sum_product(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    product: bool,
+    src: Expr,
+    ret_ty: &Ty,
+) -> Expr {
     let call = |name: &str, args: Vec<Expr>| Expr::call(src.clone(), name, args);
     match ret_ty.strip_refs() {
         Ty::Int(i) if !product => {
             let to = if i.is_long() { "mapToLong" } else { "mapToInt" };
             let x = cx.fresh("x");
-            Expr::call(call(to, vec![Expr::raw(format!("{x} -> {x}"))]), "sum", vec![])
+            Expr::call(
+                call(to, vec![Expr::raw(format!("{x} -> {x}"))]),
+                "sum",
+                vec![],
+            )
         }
         Ty::Int(i) => {
             let one = if i.is_long() { "1L" } else { "1" };
             let (a, b) = (cx.fresh("a"), cx.fresh("b"));
-            call("reduce", vec![Expr::raw(one), Expr::raw(format!("({a}, {b}) -> {a} * {b}"))])
+            call(
+                "reduce",
+                vec![
+                    Expr::raw(one),
+                    Expr::raw(format!("({a}, {b}) -> {a} * {b}")),
+                ],
+            )
         }
         // Plain left fold: DoubleStream.sum() uses compensated summation and can differ.
         Ty::F64 if !product => call("reduce", vec![Expr::raw("0.0"), Expr::raw("Double::sum")]),
@@ -708,7 +1029,13 @@ fn lower_sum_product(cx: &mut Cx, m: &ast::MethodCallExpr, product: bool, src: E
         t @ (Ty::F64 | Ty::F32) => {
             let one = if *t == Ty::F32 { "1.0f" } else { "1.0" };
             let (a, b) = (cx.fresh("a"), cx.fresh("b"));
-            call("reduce", vec![Expr::raw(one), Expr::raw(format!("({a}, {b}) -> {a} * {b}"))])
+            call(
+                "reduce",
+                vec![
+                    Expr::raw(one),
+                    Expr::raw(format!("({a}, {b}) -> {a} * {b}")),
+                ],
+            )
         }
         _ => cx.unsupported(m.syntax(), "sum/product of this type"),
     }
@@ -739,14 +1066,23 @@ fn into_stream(v: Expr, ty: &Ty) -> Expr {
 // (e.g. `Comparator.comparing`).
 fn typed_lambda(cx: &mut Cx, a: &ast::Expr, param: &Ty, out: &mut Vec<Stmt>) -> Expr {
     match lower_arg(cx, a, out) {
-        Expr::Lambda { params, body } if params.len() == 1 => {
-            Expr::Lambda { params: vec![format!("{} {}", param.boxed(), params[0])], body }
-        }
+        Expr::Lambda { params, body } if params.len() == 1 => Expr::Lambda {
+            params: vec![format!("{} {}", param.boxed(), params[0])],
+            body,
+        },
         other => other,
     }
 }
 
-fn lower_zip(cx: &mut Cx, m: &ast::MethodCallExpr, other_ast: &ast::Expr, src: Expr, item: &Ty, line: u32, out: &mut Vec<Stmt>) -> Expr {
+fn lower_zip(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    other_ast: &ast::Expr,
+    src: Expr,
+    item: &Ty,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) -> Expr {
     use ast::RangeItem;
     let other_ty = cx.ty(other_ast);
     // `.zip(a..)`: pair each element with a counter.
@@ -756,16 +1092,31 @@ fn lower_zip(cx: &mut Cx, m: &ast::MethodCallExpr, other_ast: &ast::Expr, src: E
         if cx.lambda_depth > 0 {
             return cx.unsupported(m.syntax(), "zip with an open range inside a closure");
         }
-        let start = r.start().map(|s| expr::lower_expr(cx, &s, out)).unwrap_or(Expr::raw("0"));
+        let start = r
+            .start()
+            .map(|s| expr::lower_expr(cx, &s, out))
+            .unwrap_or(Expr::raw("0"));
         cx.import("java.util.concurrent.atomic.AtomicInteger");
         let idx = cx.fresh("index");
-        out.push(Stmt::new(line, StmtKind::Local {
-            ty: "AtomicInteger".into(),
-            name: idx.clone(),
-            init: Some(Expr::New { ty: "AtomicInteger".into(), args: vec![start] }),
-        }));
+        out.push(Stmt::new(
+            line,
+            StmtKind::Local {
+                ty: "AtomicInteger".into(),
+                name: idx.clone(),
+                init: Some(Expr::New {
+                    ty: "AtomicInteger".into(),
+                    args: vec![start],
+                }),
+            },
+        ));
         let x = cx.fresh("x");
-        return Expr::call(src, "map", vec![Expr::raw(format!("{x} -> Map.entry({x}, {idx}.getAndIncrement())"))]);
+        return Expr::call(
+            src,
+            "map",
+            vec![Expr::raw(format!(
+                "{x} -> Map.entry({x}, {idx}.getAndIncrement())"
+            ))],
+        );
     }
     if cx.lambda_depth > 0 {
         return cx.unsupported(m.syntax(), "zip inside a closure");
@@ -777,23 +1128,37 @@ fn lower_zip(cx: &mut Cx, m: &ast::MethodCallExpr, other_ast: &ast::Expr, src: E
         _ => Ty::Other("?".into()),
     };
     let (a, b) = (cx.fresh("zip_a"), cx.fresh("zip_b"));
-    out.push(Stmt::new(line, StmtKind::Local {
-        ty: format!("List<{}>", item.boxed()),
-        name: a.clone(),
-        init: Some(Expr::call(src, "toList", vec![])),
-    }));
-    out.push(Stmt::new(line, StmtKind::Local {
-        ty: format!("List<{}>", other_item.boxed()),
-        name: b.clone(),
-        init: Some(Expr::call(other_stream, "toList", vec![])),
-    }));
+    out.push(Stmt::new(
+        line,
+        StmtKind::Local {
+            ty: format!("List<{}>", item.boxed()),
+            name: a.clone(),
+            init: Some(Expr::call(src, "toList", vec![])),
+        },
+    ));
+    out.push(Stmt::new(
+        line,
+        StmtKind::Local {
+            ty: format!("List<{}>", other_item.boxed()),
+            name: b.clone(),
+            init: Some(Expr::call(other_stream, "toList", vec![])),
+        },
+    ));
     let i = cx.fresh("i");
     Expr::raw(format!(
         "IntStream.range(0, Math.min({a}.size(), {b}.size())).mapToObj({i} -> Map.entry({a}.get({i}), {b}.get({i})))"
     ))
 }
 
-fn lower_collect(cx: &mut Cx, m: &ast::MethodCallExpr, src: Expr, item: &Ty, target: &Ty, line: u32, out: &mut Vec<Stmt>) -> Expr {
+fn lower_collect(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    src: Expr,
+    item: &Ty,
+    target: &Ty,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) -> Expr {
     let collect = |c: String| Expr::call(src.clone(), "collect", vec![Expr::raw(c)]);
     match target.strip_refs() {
         Ty::Vec(_) => {
@@ -818,15 +1183,22 @@ fn lower_collect(cx: &mut Cx, m: &ast::MethodCallExpr, src: Expr, item: &Ty, tar
                 if *ordered { "TreeMap" } else { "HashMap" }
             ))
         }
-        Ty::Set { ordered, .. } => collect(format!("Collectors.toCollection({}::new)", if *ordered { "TreeSet" } else { "HashSet" })),
+        Ty::Set { ordered, .. } => collect(format!(
+            "Collectors.toCollection({}::new)",
+            if *ordered { "TreeSet" } else { "HashSet" }
+        )),
         Ty::Deque(_) => collect("Collectors.toCollection(ArrayDeque::new)".into()),
-        Ty::Heap(_) => collect("Collectors.toCollection(() -> new PriorityQueue<>(Comparator.reverseOrder()))".into()),
+        Ty::Heap(_) => collect(
+            "Collectors.toCollection(() -> new PriorityQueue<>(Comparator.reverseOrder()))".into(),
+        ),
         Ty::Result(ok, err) if matches!(ok.strip_refs(), Ty::Vec(_)) => {
             if cx.lambda_depth > 0 {
                 return cx.unsupported(m.syntax(), "collect into Result inside a closure");
             }
             cx.needs_result = true;
-            let Ty::Vec(t) = ok.strip_refs() else { unreachable!() };
+            let Ty::Vec(t) = ok.strip_refs() else {
+                unreachable!()
+            };
             let (tb, eb) = (t.boxed(), err.boxed());
             let (list, res, it) = (cx.fresh("items"), cx.fresh("collected"), cx.fresh("r"));
             out.push(Stmt::new(line, StmtKind::Raw(format!(
@@ -841,7 +1213,9 @@ fn lower_collect(cx: &mut Cx, m: &ast::MethodCallExpr, src: Expr, item: &Ty, tar
             if cx.lambda_depth > 0 {
                 return cx.unsupported(m.syntax(), "collect into Option inside a closure");
             }
-            let Ty::Vec(t) = inner.strip_refs() else { unreachable!() };
+            let Ty::Vec(t) = inner.strip_refs() else {
+                unreachable!()
+            };
             let tb = t.boxed();
             let (list, res, it) = (cx.fresh("items"), cx.fresh("collected"), cx.fresh("o"));
             out.push(Stmt::new(line, StmtKind::Raw(format!(
@@ -858,29 +1232,55 @@ fn lower_collect(cx: &mut Cx, m: &ast::MethodCallExpr, src: Expr, item: &Ty, tar
 
 // `let xs: Vec<_> = ....collect();` without `mut`: an unmodifiable `toList()` is fine.
 fn collected_into_immutable_let(m: &ast::MethodCallExpr) -> bool {
-    let Some(parent) = m.syntax().parent() else { return false };
-    let Some(l) = ast::LetStmt::cast(parent) else { return false };
+    let Some(parent) = m.syntax().parent() else {
+        return false;
+    };
+    let Some(l) = ast::LetStmt::cast(parent) else {
+        return false;
+    };
     matches!(l.pat(), Some(ast::Pat::IdentPat(ip)) if ip.mut_token().is_none())
 }
 
 // Methods on an iterator materialized as `ListIterator` (`items` is the backing list).
-fn lower_pulled(cx: &mut Cx, m: &ast::MethodCallExpr, name: &str, recv_ast: &ast::Expr, items: &str, recv_ty: &Ty, out: &mut Vec<Stmt>) -> Expr {
+fn lower_pulled(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    name: &str,
+    recv_ast: &ast::Expr,
+    items: &str,
+    recv_ty: &Ty,
+    out: &mut Vec<Stmt>,
+) -> Expr {
     let it = render(&expr::lower_expr(cx, recv_ast, out));
     let item = item_of(recv_ty);
     let peeked = format!("{items}.get({it}.nextIndex())");
     let args = arg_exprs(m);
     match name {
-        "next" => Expr::raw(format!("({it}.hasNext() ? Optional.of({it}.next()) : Optional.empty())")),
-        "peek" => Expr::raw(format!("({it}.hasNext() ? Optional.of({peeked}) : Optional.empty())")),
+        "next" => Expr::raw(format!(
+            "({it}.hasNext() ? Optional.of({it}.next()) : Optional.empty())"
+        )),
+        "peek" => Expr::raw(format!(
+            "({it}.hasNext() ? Optional.of({peeked}) : Optional.empty())"
+        )),
         "next_if_eq" => {
             let x = render(&lower_arg(cx, &args[0], out));
-            Expr::raw(format!("({it}.hasNext() && {peeked}.equals({x}) ? Optional.of({it}.next()) : Optional.empty())"))
+            Expr::raw(format!(
+                "({it}.hasNext() && {peeked}.equals({x}) ? Optional.of({it}.next()) : Optional.empty())"
+            ))
         }
         "next_if" => {
             let f = lower_arg(cx, &args[0], out);
-            let p = render(&Expr::Cast(format!("Predicate<{}>", item.boxed()), Box::new(f)));
-            Expr::raw(format!("({it}.hasNext() && ({p}).test({peeked}) ? Optional.of({it}.next()) : Optional.empty())"))
+            let p = render(&Expr::Cast(
+                format!("Predicate<{}>", item.boxed()),
+                Box::new(f),
+            ));
+            Expr::raw(format!(
+                "({it}.hasNext() && ({p}).test({peeked}) ? Optional.of({it}.next()) : Optional.empty())"
+            ))
         }
-        _ => cx.unsupported(m.syntax(), &format!("`{name}` on an iterator that is also pulled with next()")),
+        _ => cx.unsupported(
+            m.syntax(),
+            &format!("`{name}` on an iterator that is also pulled with next()"),
+        ),
     }
 }
