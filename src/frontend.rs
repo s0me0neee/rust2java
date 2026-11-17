@@ -135,7 +135,7 @@ pub fn convert(sema: &Semantics<'_, RootDatabase>, from: Module, ty: &ra_ap_hir:
     }
     if ty.is_reference() {
         let inner = ty.as_reference().map(|(t, _)| convert(sema, from, &t)).unwrap_or(Ty::Other("&?".into()));
-        if inner == Ty::Str {
+        if inner == Ty::Str && !ty.is_mutable_reference() {
             return Ty::Str;
         }
         return Ty::Ref { mutable: ty.is_mutable_reference(), inner: Box::new(inner) };
@@ -209,13 +209,15 @@ pub fn convert(sema: &Semantics<'_, RootDatabase>, from: Module, ty: &ra_ap_hir:
             }
         }
     }
-    if let Some(item) = ty.clone().iterator_item(db) {
-        return Ty::Iter(Box::new(convert(sema, from, &item)));
-    }
     if let Some(c) = ty.as_callable(db) {
         let params = c.params().iter().map(|p| convert(sema, from, p.ty())).collect();
         let ret = convert(sema, from, &c.return_type());
         return Ty::Fn { params, ret: Box::new(ret) };
+    }
+    if ty.clone().impls_iterator(db)
+        && let Some(item) = ty.clone().iterator_item(db)
+    {
+        return Ty::Iter(Box::new(convert(sema, from, &item)));
     }
     Ty::Other(ty.display(db, from.krate(db).to_display_target(db)).to_string())
 }

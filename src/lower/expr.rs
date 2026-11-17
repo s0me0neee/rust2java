@@ -19,6 +19,13 @@ pub fn lower_expr(cx: &mut Cx, e: &ast::Expr, out: &mut Vec<Stmt>) -> Expr {
         ast::Expr::BinExpr(b) => lower_bin(cx, b, out),
         ast::Expr::PrefixExpr(p) => lower_prefix(cx, p, out),
         ast::Expr::RefExpr(r) => match r.expr() {
+            // `&mut cell` passes the array itself so the callee can write through it.
+            Some(inner) if r.mut_token().is_some() && cx.cell_path(&inner).is_some() => {
+                Expr::name(cx.cell_path(&inner).unwrap())
+            }
+            Some(inner) if r.mut_token().is_some() && super::is_cell_value_ty(&cx.ty(&inner)) => {
+                cx.unsupported(r.syntax(), "`&mut` to a field/element of immutable Java type")
+            }
             Some(inner) => lower_expr(cx, &inner, out),
             None => Expr::raw("null"),
         },
@@ -229,8 +236,8 @@ pub fn lower_path_expr(cx: &mut Cx, p: &ast::PathExpr) -> Expr {
     }
     match cx.sema.resolve_path(&path) {
         Some(PathResolution::Local(local)) => {
-            let name = local.name(cx.db).as_str().to_string();
-            Expr::name(cx.lookup(&name))
+            let name = cx.lookup(local.name(cx.db).as_str());
+            if cx.cells.contains(&local) { Expr::raw(format!("{name}[0]")) } else { Expr::name(name) }
         }
         Some(PathResolution::Def(def)) => items::lower_def_path(cx, &path, def),
         Some(PathResolution::SelfType(_)) => Expr::raw(cx.class_name.clone()),
@@ -558,6 +565,12 @@ pub fn lower_closure(cx: &mut Cx, c: &ast::ClosureExpr) -> Expr {
 // Argument expressions of a call, coerced to the callee's parameter types when known.
 pub fn lower_args(cx: &mut Cx, args: impl Iterator<Item = ast::Expr>, out: &mut Vec<Stmt>) -> Vec<Expr> {
     args.map(|a| {
+        // Re-passing a `&mut` cell parameter (`bump(n)` inside `fn f(n: &mut i32)`) passes the array.
+        if matches!(cx.ty(&a), Ty::Ref { mutable: true, .. })
+            && let Some(cell) = cx.cell_path(&a)
+        {
+            return Expr::name(cell);
+        }
         let want = cx.adjusted_ty(&a);
         lower_expr_as(cx, &a, &want, out)
     })

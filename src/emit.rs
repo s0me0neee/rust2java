@@ -174,7 +174,7 @@ impl Printer {
         match &s.kind {
             StmtKind::Local { ty, name, init } => match init {
                 Some(e) => {
-                    let e = self.expr_str(e, 1);
+                    let e = self.expr_str(e, 0);
                     self.word(&format!("{ty} {name} = {e};"));
                 }
                 None => self.word(&format!("{ty} {name};")),
@@ -278,7 +278,7 @@ impl Printer {
             comments: BTreeMap::new(),
         };
         sub.expr(e, min_prec);
-        self.line = sub.line;
+        // Newlines inside the rendered text are counted again when the caller pushes it.
         sub.out
     }
 

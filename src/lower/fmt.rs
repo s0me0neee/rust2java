@@ -172,12 +172,18 @@ fn captured(cx: &mut Cx, node: &SyntaxNode, name: &str) -> (Expr, Ty) {
                 && n.as_str() == name
                 && let ScopeDef::Local(l) = def
             {
-                found = Some(l.ty(cx.db));
+                found = Some((l.ty(cx.db), cx.cells.contains(&l)));
             }
         });
     }
-    let ty = found.map(|t| cx.convert(&t)).unwrap_or(Ty::Other("?".into()));
-    (Expr::name(cx.lookup(name)), ty)
+    let java = cx.lookup(name);
+    match found {
+        Some((t, is_cell)) => {
+            let e = if is_cell { Expr::raw(format!("{java}[0]")) } else { Expr::name(java) };
+            (e, cx.convert(&t))
+        }
+        None => (Expr::name(java), Ty::Other("?".into())),
+    }
 }
 
 fn format_one(cx: &mut Cx, node: &SyntaxNode, v: Expr, ty: &Ty, spec: &str) -> Expr {

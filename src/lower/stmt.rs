@@ -72,6 +72,10 @@ pub fn lower_let(cx: &mut Cx, l: &ast::LetStmt, out: &mut Vec<Stmt>) {
         return;
     }
     let rust_name = ip.name().map(|n| n.text().to_string()).unwrap_or_else(|| "_".into());
+    if cx.binding_needs_cell(ip, &ty) {
+        lower_cell_let(cx, l, ip, &rust_name, &ty, out);
+        return;
+    }
     let jty = decl_type(&ty);
     match l.initializer() {
         None => {
@@ -89,6 +93,31 @@ pub fn lower_let(cx: &mut Cx, l: &ast::LetStmt, out: &mut Vec<Stmt>) {
             let e = expr::lower_expr_as(cx, &init, &ty, out);
             let name = cx.declare(&rust_name);
             out.push(Stmt::new(line, StmtKind::Local { ty: jty, name, init: Some(e) }));
+        }
+    }
+}
+
+// `let mut n = 0;` that is borrowed `&mut` or mutated in a closure: `int[] n = {0};`, used as `n[0]`.
+fn lower_cell_let(cx: &mut Cx, l: &ast::LetStmt, ip: &ast::IdentPat, rust_name: &str, ty: &Ty, out: &mut Vec<Stmt>) {
+    let line = cx.line(l.syntax());
+    let elem = ty.strip_refs().java();
+    let arr = format!("{elem}[]");
+    match l.initializer() {
+        Some(init) if !is_control_flow(&init) => {
+            let e = expr::lower_expr_as(cx, &init, ty, out);
+            let name = cx.declare(rust_name);
+            cx.mark_cell(ip);
+            let init = Expr::raw(format!("{{{}}}", render(&e)));
+            out.push(Stmt::new(line, StmtKind::Local { ty: arr, name, init: Some(init) }));
+        }
+        init => {
+            let name = cx.declare(rust_name);
+            cx.mark_cell(ip);
+            let alloc = Expr::raw(format!("new {elem}[1]"));
+            out.push(Stmt::new(line, StmtKind::Local { ty: arr, name: name.clone(), init: Some(alloc) }));
+            if let Some(init) = init {
+                lower_to_dest(cx, &init, &Dest::Assign(format!("{name}[0]")), out);
+            }
         }
     }
 }

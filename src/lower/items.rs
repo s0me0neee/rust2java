@@ -110,6 +110,9 @@ pub fn lower_fn(cx: &mut Cx, f: &ast::Fn, modifiers: &str) -> Method {
                 Some(ast::Pat::IdentPat(ip)) if ip.pat().is_none() => {
                     let n = ip.name().map(|n| n.text().to_string()).unwrap_or_else(|| "_".into());
                     params.push(format!("{jty} {}", cx.declare(&n)));
+                    if is_cell_param(&ty) {
+                        cx.mark_cell(&ip);
+                    }
                 }
                 Some(other) => {
                     let tmp = cx.fresh("arg");
@@ -138,7 +141,15 @@ pub fn lower_fn(cx: &mut Cx, f: &ast::Fn, modifiers: &str) -> Method {
 
 pub fn param_type(cx: &mut Cx, ty: &Ty) -> String {
     let _ = cx;
+    if is_cell_param(ty) {
+        return format!("{}[]", ty.strip_refs().java());
+    }
     stmt::decl_type_explicit(ty)
+}
+
+// `&mut i32` / `&mut String` parameters are passed as one-element arrays.
+fn is_cell_param(ty: &Ty) -> bool {
+    matches!(ty, Ty::Ref { mutable: true, .. }) && super::is_cell_value_ty(ty)
 }
 
 // `<T extends Comparable<T>> ` for generic fns (empty when not generic).

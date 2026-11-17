@@ -26,16 +26,26 @@ pub fn lower_for(cx: &mut Cx, f: &ast::ForExpr, out: &mut Vec<Stmt>) {
     let kind = match &iterable {
         ast::Expr::RangeExpr(r) if simple_ident(&p).is_some() => {
             let (start, end, inclusive) = range_bounds(cx, r, out);
-            let var = cx.declare(&simple_ident(&p).unwrap());
+            let rust_name = simple_ident(&p).unwrap();
+            // Lambdas can't capture a mutating loop counter: count with a temp, rebind per iteration.
+            let captured = matches!(&p, ast::Pat::IdentPat(ip) if cx.binding_captured(ip));
+            let counter = if captured { cx.fresh(&rust_name) } else { cx.declare(&rust_name) };
             let ty = cx.pat_ty(&p);
             let jt = ty.java();
             let cmp = if inclusive { "<=" } else { "<" };
             let header = format!(
-                "{jt} {var} = {}; {var} {cmp} {}; {var}++",
+                "{jt} {counter} = {}; {counter} {cmp} {}; {counter}++",
                 crate::emit::render_expr(&start),
                 crate::emit::render_expr(&end)
             );
-            let body = f.loop_body().map(|b| stmt::lower_block(cx, &b, &Dest::Discard)).unwrap_or_default();
+            let rebind = captured.then(|| {
+                let var = cx.declare(&rust_name);
+                Stmt::new(line, StmtKind::Local { ty: jt.clone(), name: var, init: Some(Expr::name(counter.clone())) })
+            });
+            let mut body = f.loop_body().map(|b| stmt::lower_block(cx, &b, &Dest::Discard)).unwrap_or_default();
+            if let Some(r) = rebind {
+                body.stmts.insert(0, r);
+            }
             Some((header, body))
         }
         _ => None,
