@@ -1,4 +1,4 @@
-// Local enum/struct patterns; needs worker 1's item lowering.
+// Enum and struct patterns: record patterns, guards, or-patterns of unit variants.
 enum Shape {
     Circle(f64),
     Rect { w: f64, h: f64 },
