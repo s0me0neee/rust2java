@@ -38,6 +38,8 @@ pub fn lower_std_method(cx: &mut Cx, m: &ast::MethodCallExpr, recv_ty: &Ty, key:
         (Ty::Vec(_), "push") => Expr::call(recv, "add", args),
         (Ty::Str, "len") => Expr::call(recv, "length", vec![]),
         (_, "clone") if recv_ty.is_primitive() || recv_ty.is_str() => recv,
+        (Ty::Adt { .. }, "clone") => Expr::call(recv, "clone", vec![]),
+        (Ty::Adt { .. }, "to_string") => Expr::call(recv, "toString", vec![]),
         (t, "to_string") if t.is_str() => recv,
         (t, "to_string") if t.is_primitive() => Expr::call(Expr::raw("String"), "valueOf", vec![recv]),
         _ => cx.unsupported(m.syntax(), &format!("std method `{key}` on {recv_ty:?}")),

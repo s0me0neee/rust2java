@@ -12,6 +12,8 @@ pub struct Printer {
     at_line_start: bool,
     comments: BTreeMap<u32, Vec<String>>,
     pub report: LineReport,
+    // Collapse everything onto one line (for code moved out of its place).
+    flat: bool,
 }
 
 // Statements printed, and (rust_line, java_line) for those that couldn't keep their line.
@@ -56,6 +58,13 @@ pub fn print_file(
 pub fn render_expr(e: &Expr) -> String {
     let mut p = Printer::default();
     p.expr(e, 0);
+    p.out
+}
+
+// Renders a whole member on one line, for code that must move out of its Rust line.
+pub fn render_member_flat(m: &Member) -> String {
+    let mut p = Printer { at_line_start: true, flat: true, ..Default::default() };
+    p.member(m);
     p.out
 }
 
@@ -128,6 +137,9 @@ impl Printer {
     }
 
     pub fn goto(&mut self, line: u32) {
+        if self.flat {
+            return;
+        }
         while self.line < line {
             self.newline();
         }
@@ -288,7 +300,7 @@ impl Printer {
 
     // Renders an expression; nested blocks (lambdas, switch expressions) advance lines as needed.
     fn expr_str(&mut self, e: &Expr, min_prec: u8) -> String {
-        let mut sub = Printer { line: self.line, indent: self.indent, ..Default::default() };
+        let mut sub = Printer { line: self.line, indent: self.indent, flat: self.flat, ..Default::default() };
         sub.expr(e, min_prec);
         // Newlines inside the rendered text are counted again when the caller pushes it.
         sub.out

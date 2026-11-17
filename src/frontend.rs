@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use ra_ap_hir::{Adt, Crate, HirDisplay, Module, Semantics};
+use ra_ap_hir::{Adt, Crate, HirDisplay, Module, ModuleSource, Semantics};
 use ra_ap_ide_db::RootDatabase;
 use ra_ap_ide_db::base_db::{EditionedFileId, LangCrateOrigin};
 use ra_ap_load_cargo::{LoadCargoConfig, ProcMacroServerChoice, load_workspace_at};
@@ -82,6 +82,10 @@ impl Project {
                 .replace('-', "_");
             for module in krate.modules(db) {
                 let Some(file_id) = module.definition_source_file_id(db).file_id() else { continue };
+                // Inline `mod x { .. }` shares the parent file; it is lowered as a nested class.
+                if !matches!(module.definition_source(db).value, ModuleSource::SourceFile(_)) {
+                    continue;
+                }
                 let path = self.vfs.file_path(file_id.file_id(db)).to_string();
                 let is_root = module.is_crate_root(db);
                 let class_name = if is_root {
@@ -115,11 +119,60 @@ pub fn pascal_case(s: &str) -> String {
         .collect()
 }
 
-pub fn module_class_name(db: &RootDatabase, module: Module) -> String {
+// Fully qualified Java class path of a module, e.g. `Main`, `Geometry`, `Geometry.Inner`.
+pub fn module_java_path(db: &RootDatabase, module: Module) -> String {
     if module.is_crate_root(db) {
-        "Main".into()
+        return "Main".into();
+    }
+    let name = pascal_case(module.name(db).map(|n| n.as_str().to_string()).unwrap_or_default().as_str());
+    if matches!(module.definition_source(db).value, ModuleSource::SourceFile(_)) {
+        name
     } else {
-        pascal_case(module.name(db).map(|n| n.as_str().to_string()).unwrap_or_default().as_str())
+        match module.parent(db) {
+            Some(parent) => format!("{}.{}", module_java_path(db, parent), name),
+            None => name,
+        }
+    }
+}
+
+// First module whose definition is a whole file.
+pub fn top_module(db: &RootDatabase, mut module: Module) -> Module {
+    while !matches!(module.definition_source(db).value, ModuleSource::SourceFile(_)) {
+        match module.parent(db) {
+            Some(p) => module = p,
+            None => break,
+        }
+    }
+    module
+}
+
+#[allow(dead_code)]
+pub fn module_class_name(db: &RootDatabase, module: Module) -> String {
+    module_java_path(db, module)
+}
+
+// Module class name as seen from `from`: relative inside one file, qualified across files.
+pub fn module_class_from(db: &RootDatabase, from: Module, module: Module) -> String {
+    if from == module {
+        return module_java_path(db, module);
+    }
+    if top_module(db, module) == from {
+        let full = module_java_path(db, module);
+        let top = module_java_path(db, from);
+        if let Some(rel) = full.strip_prefix(&format!("{top}.")) {
+            return rel.to_string();
+        }
+    }
+    module_java_path(db, module)
+}
+
+// Java name of a trait as seen from module `from`.
+pub fn trait_java_name(db: &RootDatabase, from: Module, tr: ra_ap_hir::Trait) -> String {
+    let name = tr.name(db).as_str().to_string();
+    if tr.module(db) == from {
+        name
+    } else {
+        format!("{}.{}", module_class_from(db, from, tr.module(db)), name)
     }
 }
 
@@ -173,6 +226,13 @@ pub fn convert(sema: &Semantics<'_, RootDatabase>, from: Module, ty: &ra_ap_hir:
     if let Some(p) = ty.as_type_param(db) {
         return Ty::Param(p.name(db).as_str().to_string());
     }
+    // `dyn Trait` / `impl Trait` of a crate trait become its interface; std traits (Fn*, Iterator)
+    // fall through to the callable / iterator mappings below.
+    if let Some(tr) = ty.as_dyn_trait().or_else(|| ty.as_impl_traits(db).and_then(|mut it| it.next()))
+        && tr.module(db).krate(db).origin(db).is_local()
+    {
+        return Ty::Adt { name: tr.name(db).as_str().to_string(), java: trait_java_name(db, from, tr), args: vec![] };
+    }
     let args: Vec<Ty> = ty.type_arguments().map(|t| convert(sema, from, &t)).collect();
     let arg = |i: usize| Box::new(args.get(i).cloned().unwrap_or(Ty::Other("?".into())));
     if let Some(adt) = ty.as_adt() {
@@ -180,7 +240,7 @@ pub fn convert(sema: &Semantics<'_, RootDatabase>, from: Module, ty: &ra_ap_hir:
         let krate = module.krate(db);
         let name = adt.name(db).as_str().to_string();
         if krate.origin(db).is_local() {
-            let java = if module == from { name.clone() } else { format!("{}.{}", module_class_name(sema.db, module), name) };
+            let java = if module == from { name.clone() } else { format!("{}.{}", module_class_from(sema.db, from, module), name) };
             let args = match adt {
                 Adt::Struct(_) | Adt::Enum(_) | Adt::Union(_) => args.clone(),
             };

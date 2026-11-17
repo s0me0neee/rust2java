@@ -31,7 +31,12 @@ pub fn try_match_expr(cx: &mut Cx, m: &ast::MatchExpr, out: &mut Vec<Stmt>) -> O
 }
 
 pub fn lower_try(cx: &mut Cx, t: &ast::TryExpr, out: &mut Vec<Stmt>) -> Expr {
-    let _ = out;
+    // `write!(f, ...)?` writes into the StringBuilder; there is no Result at runtime.
+    if cx.in_display
+        && let Some(inner) = t.expr()
+    {
+        return expr::lower_expr(cx, &inner, out);
+    }
     cx.unsupported(t.syntax(), "`?` operator")
 }
 

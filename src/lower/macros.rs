@@ -18,6 +18,24 @@ pub fn is_diverging(m: &ast::MacroExpr) -> bool {
         .is_some_and(|mc| matches!(macro_name(&mc).as_str(), "panic" | "unreachable" | "todo" | "unimplemented"))
 }
 
+// Text of the first comma-separated macro argument (the write target).
+fn first_macro_arg(mc: &ast::MacroCall) -> String {
+    let text = mc.token_tree().map(|t| t.syntax().text().to_string()).unwrap_or_default();
+    let inner = text.trim().trim_start_matches(['(', '[', '{']).to_string();
+    let mut depth = 0i32;
+    let mut out = String::new();
+    for c in inner.chars() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => break,
+            _ => {}
+        }
+        out.push(c);
+    }
+    out.trim().to_string()
+}
+
 pub fn lower_macro_expr(cx: &mut Cx, m: &ast::MacroExpr, out: &mut Vec<Stmt>) -> Expr {
     let Some(mc) = m.macro_call() else { return cx.unsupported(m.syntax(), "macro") };
     let name = macro_name(&mc);
@@ -42,6 +60,14 @@ pub fn lower_macro_expr(cx: &mut Cx, m: &ast::MacroExpr, out: &mut Vec<Stmt>) ->
             Some(fa) => fmt::lower_format(cx, &fa, out),
             None => cx.unsupported(mc.syntax(), "format! arguments"),
         },
+        "write" | "writeln" => {
+            let Some(fa) = fmt::format_args_of(cx, &mc) else {
+                return cx.unsupported(mc.syntax(), "write! arguments");
+            };
+            let dest = first_macro_arg(&mc);
+            let text = fmt::lower_format(cx, &fa, out);
+            Expr::call(Expr::raw(dest), "append", vec![text])
+        }
         "panic" | "unreachable" | "todo" | "unimplemented" => {
             let default = match name.as_str() {
                 "unreachable" => "internal error: entered unreachable code",

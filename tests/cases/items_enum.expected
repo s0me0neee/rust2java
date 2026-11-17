@@ -1,0 +1,7 @@
+5 0 6 East
+Point
+Circle(1.5)
+Rect { w: 2.0, h: 3.0 }
+Circle(4.0)
+true false
+Rect { w: 0.5, h: 1.0 }
