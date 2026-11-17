@@ -4,16 +4,30 @@ use crate::jir::*;
 
 // Line-aware printer: every node is placed on its Rust line; when Java runs long, output
 // continues on the current line instead of shifting later lines.
+#[derive(Default)]
 pub struct Printer {
     out: String,
     line: u32,
     indent: usize,
     at_line_start: bool,
     comments: BTreeMap<u32, Vec<String>>,
+    pub report: LineReport,
 }
 
-pub fn print_file(file: &JavaFile, comments: BTreeMap<u32, Vec<String>>, trailer: &str, last_line: u32) -> String {
-    let mut p = Printer { out: String::new(), line: 1, indent: 0, at_line_start: true, comments };
+// Statements printed, and (rust_line, java_line) for those that couldn't keep their line.
+#[derive(Default, Debug)]
+pub struct LineReport {
+    pub stmts: u32,
+    pub drift: Vec<(u32, u32)>,
+}
+
+pub fn print_file(
+    file: &JavaFile,
+    comments: BTreeMap<u32, Vec<String>>,
+    trailer: &str,
+    last_line: u32,
+) -> (String, LineReport) {
+    let mut p = Printer { line: 1, at_line_start: true, comments, ..Default::default() };
     p.word(&format!("package {};", file.package));
     for imp in &file.imports {
         p.word(&format!("import {imp};"));
@@ -35,12 +49,12 @@ pub fn print_file(file: &JavaFile, comments: BTreeMap<u32, Vec<String>>, trailer
     p.word("}");
     p.flush_comments_through(u32::MAX);
     p.out.push('\n');
-    p.out
+    (p.out, p.report)
 }
 
 // Renders a standalone expression (for building raw statement text).
 pub fn render_expr(e: &Expr) -> String {
-    let mut p = Printer { out: String::new(), line: 0, indent: 0, at_line_start: false, comments: BTreeMap::new() };
+    let mut p = Printer::default();
     p.expr(e, 0);
     p.out
 }
@@ -171,6 +185,10 @@ impl Printer {
 
     pub fn stmt(&mut self, s: &Stmt) {
         self.goto(s.line);
+        self.report.stmts += 1;
+        if self.line != s.line {
+            self.report.drift.push((s.line, self.line));
+        }
         match &s.kind {
             StmtKind::Local { ty, name, init } => match init {
                 Some(e) => {
@@ -270,13 +288,7 @@ impl Printer {
 
     // Renders an expression; nested blocks (lambdas, switch expressions) advance lines as needed.
     fn expr_str(&mut self, e: &Expr, min_prec: u8) -> String {
-        let mut sub = Printer {
-            out: String::new(),
-            line: self.line,
-            indent: self.indent,
-            at_line_start: false,
-            comments: BTreeMap::new(),
-        };
+        let mut sub = Printer { line: self.line, indent: self.indent, ..Default::default() };
         sub.expr(e, min_prec);
         // Newlines inside the rendered text are counted again when the caller pushes it.
         sub.out

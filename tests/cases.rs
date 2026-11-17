@@ -80,6 +80,7 @@ fn differential() {
     let (_, _, diag) = run_with_stdin(&mut cmd, &None);
 
     let mut failures = Vec::new();
+    let (mut total_stmts, mut total_drift, mut drift_notes) = (0u64, 0u64, Vec::new());
     for case in &cases {
         let (want, want_code) = expected(case, work.path());
         let case_diags: Vec<&str> =
@@ -90,9 +91,19 @@ fn differential() {
         }
         let pkg_dir = out_dir.join("src").join(&case.name);
         let classes = work.path().join("classes").join(&case.name);
-        let sources: Vec<PathBuf> = std::fs::read_dir(&pkg_dir)
+        let files: Vec<PathBuf> = std::fs::read_dir(&pkg_dir)
             .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
             .unwrap_or_default();
+        let sources: Vec<&PathBuf> = files.iter().filter(|p| p.extension().is_some_and(|e| e == "java")).collect();
+        for f in files.iter().filter(|p| p.to_string_lossy().ends_with(".lines.json")) {
+            let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(f).unwrap()).unwrap();
+            let drift = v["drift"].as_array().map(|a| a.len()).unwrap_or(0) as u64;
+            total_stmts += v["stmts"].as_u64().unwrap_or(0);
+            total_drift += drift;
+            if drift > 0 {
+                drift_notes.push(format!("  {}: {} drifted {:?}", case.name, drift, v["drift"]));
+            }
+        }
         if sources.is_empty() {
             failures.push(format!("{}: no Java output\n{diag}", case.name));
             continue;
@@ -115,6 +126,11 @@ fn differential() {
     }
     let passed = cases.len() - failures.len();
     eprintln!("\n{passed}/{} cases passed", cases.len());
+    let exact = if total_stmts == 0 { 100.0 } else { 100.0 * (total_stmts - total_drift) as f64 / total_stmts as f64 };
+    eprintln!("line match: {exact:.1}% of {total_stmts} statements on their Rust line");
+    for n in &drift_notes {
+        eprintln!("{n}");
+    }
     if !failures.is_empty() {
         panic!("\n{}\n", failures.join("\n\n"));
     }
