@@ -217,6 +217,23 @@ pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
         Ty::F32 | Ty::F64 => Expr::call(Expr::raw("String"), "valueOf", vec![v]),
         Ty::Vec(inner) if inner.is_primitive() && !inner.is_float() && **inner != Ty::Char => v,
         Ty::Adt { .. } => Expr::call(v, "debug", vec![]),
+        Ty::Vec(inner) | Ty::Deque(inner) => {
+            let x = cx.fresh("x");
+            let inner_dbg = debug(cx, Expr::name(x.clone()), inner);
+            let mapped = Expr::call(
+                Expr::call(v, "stream", vec![]),
+                "map",
+                vec![Expr::Lambda { params: vec![x], body: crate::jir::LambdaBody::Expr(Box::new(inner_dbg)) }],
+            );
+            Expr::call(mapped, "collect", vec![Expr::raw("Collectors.joining(\", \", \"[\", \"]\")")])
+        }
+        Ty::Option(inner) => {
+            let x = cx.fresh("x");
+            let inner_dbg = debug(cx, Expr::name(x.clone()), inner);
+            let some = Expr::bin(Expr::bin(Expr::str_lit("Some("), "+", inner_dbg), "+", Expr::str_lit(")"));
+            let mapped = Expr::call(v, "map", vec![Expr::Lambda { params: vec![x], body: crate::jir::LambdaBody::Expr(Box::new(some)) }]);
+            Expr::call(mapped, "orElse", vec![Expr::str_lit("None")])
+        }
         _ => {
             let _ = cx;
             v

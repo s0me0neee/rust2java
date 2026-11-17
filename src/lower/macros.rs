@@ -55,6 +55,26 @@ pub fn lower_macro_expr(cx: &mut Cx, m: &ast::MacroExpr, out: &mut Vec<Stmt>) ->
             };
             Expr::New { ty: "RuntimeException".into(), args: vec![msg] }
         }
+        "vec" => {
+            // The expansion holds typed element expressions: `[a, b]` or `from_elem(x, n)`.
+            let Some(exp) = cx.sema.expand_macro_call(&mc) else {
+                return cx.unsupported(mc.syntax(), "vec! expansion");
+            };
+            let from_elem = exp.value.descendants().filter_map(ast::CallExpr::cast).find(|c| {
+                c.expr().is_some_and(|f| f.syntax().text().to_string().contains("from_elem"))
+            });
+            if let Some(c) = from_elem {
+                use ra_ap_syntax::ast::HasArgList;
+                let args: Vec<ast::Expr> = c.arg_list().map(|a| a.args().collect()).unwrap_or_default();
+                if args.len() == 2 {
+                    return super::std_map::lower_repeat(cx, mc.syntax(), &args[0], &args[1], out);
+                }
+            }
+            match exp.value.descendants().find_map(ast::ArrayExpr::cast) {
+                Some(a) => super::std_map::lower_array_expr(cx, &a, out),
+                None => Expr::New { ty: "ArrayList<>".into(), args: vec![] },
+            }
+        }
         _ => cx.unsupported(mc.syntax(), &format!("macro `{name}!`")),
     }
 }

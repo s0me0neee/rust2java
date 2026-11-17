@@ -162,7 +162,13 @@ fn lower_simple_if(cx: &mut Cx, i: &ast::IfExpr, out: &mut Vec<Stmt>) -> Expr {
         ast::ElseBranch::Block(b) => lower_expr(cx, &simple_block_tail(&b).unwrap(), out),
         ast::ElseBranch::IfExpr(ei) => lower_simple_if(cx, &ei, out),
     };
-    Expr::Ternary(Box::new(c), Box::new(a), Box::new(b))
+    // javac types a bare `Optional.empty()` branch as Optional<Object>; give it a witness.
+    let ty = cx.ty(&ast::Expr::IfExpr(i.clone()));
+    let witness = |e: Expr| match (&e, ty.strip_refs()) {
+        (Expr::Raw(s), Ty::Option(t)) if s == "Optional.empty()" => Expr::raw(format!("Optional.<{}>empty()", t.boxed())),
+        _ => e,
+    };
+    Expr::Ternary(Box::new(c), Box::new(witness(a)), Box::new(witness(b)))
 }
 
 fn lower_literal(cx: &mut Cx, l: &ast::Literal, e: &ast::Expr) -> Expr {
@@ -236,6 +242,9 @@ pub fn lower_path_expr(cx: &mut Cx, p: &ast::PathExpr) -> Expr {
     }
     match cx.sema.resolve_path(&path) {
         Some(PathResolution::Local(local)) => {
+            if let Some((list, idx)) = cx.elem_aliases.get(&local) {
+                return Expr::call(Expr::name(list.clone()), "get", vec![Expr::name(idx.clone())]);
+            }
             let name = cx.lookup(local.name(cx.db).as_str());
             if cx.cells.contains(&local) { Expr::raw(format!("{name}[0]")) } else { Expr::name(name) }
         }
@@ -383,6 +392,22 @@ pub fn place_assign(cx: &mut Cx, lhs: &ast::Expr, sym: &'static str, r: Expr, ou
             };
             Expr::call(b, setter, vec![i, value])
         }
+        ast::Expr::PrefixExpr(p)
+            if p.op_kind() == Some(ast::UnaryOp::Deref)
+                && let Some(local) = p.expr().and_then(|i| cx.local_of_path(&i))
+                && let Some((list, idx)) = cx.elem_aliases.get(&local).cloned() =>
+        {
+            // `*x op= r` where `x` aliases `list[idx]`.
+            let (list, idx) = (Expr::name(list), Expr::name(idx));
+            let value = if sym == "=" {
+                r
+            } else {
+                let elem_ty = cx.ty(lhs);
+                let cur = Expr::call(list.clone(), "get", vec![idx.clone()]);
+                narrow_if_needed(Expr::bin(cur, static_op(sym.trim_end_matches('=')), r), &elem_ty)
+            };
+            Expr::call(list, "set", vec![idx, value])
+        }
         ast::Expr::PrefixExpr(p) if p.op_kind() == Some(ast::UnaryOp::Deref) => {
             let inner = p.expr().unwrap();
             let place = lower_expr(cx, &inner, out);
@@ -505,12 +530,26 @@ fn lower_cast(cx: &mut Cx, c: &ast::CastExpr, out: &mut Vec<Stmt>) -> Expr {
 }
 
 pub fn lower_closure(cx: &mut Cx, c: &ast::ClosureExpr) -> Expr {
+    cx.lambda_depth += 1;
+    let e = lower_closure_inner(cx, c);
+    cx.lambda_depth -= 1;
+    e
+}
+
+fn strip_ref_pats(p: ast::Pat) -> ast::Pat {
+    match &p {
+        ast::Pat::RefPat(r) => r.pat().map(strip_ref_pats).unwrap_or(p),
+        _ => p,
+    }
+}
+
+fn lower_closure_inner(cx: &mut Cx, c: &ast::ClosureExpr) -> Expr {
     cx.push_scope();
     let mut params = Vec::new();
     let mut prelude = Vec::new();
     if let Some(pl) = c.param_list() {
         for p in pl.params() {
-            match p.pat() {
+            match p.pat().map(strip_ref_pats) {
                 Some(ast::Pat::IdentPat(ip)) if ip.pat().is_none() => {
                     let n = ip.name().map(|n| n.text().to_string()).unwrap_or_else(|| "_".into());
                     params.push(cx.declare(&n));

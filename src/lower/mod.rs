@@ -52,6 +52,12 @@ pub struct Cx<'a, 'db> {
     pub switch_depth: u32,
     // Locals stored in one-element arrays (`int[] n = {0}`): `&mut` targets and closure-mutated vars.
     pub cells: HashSet<ra_ap_hir::Local<'db>>,
+    // >0 while lowering a closure body: statements hoisted to `out` would run only once, outside it.
+    pub lambda_depth: u32,
+    // Iterator locals pulled with `next()`/`peek()`: Java `ListIterator` + the backing list's name.
+    pub pulled_iters: HashMap<ra_ap_hir::Local<'db>, String>,
+    // `for x in v.iter_mut()` over immutable values: `x` stands for `list.get(idx)`.
+    pub elem_aliases: HashMap<ra_ap_hir::Local<'db>, (String, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -100,6 +106,9 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         loops: Vec::new(),
         switch_depth: 0,
         cells: HashSet::new(),
+        lambda_depth: 0,
+        pulled_iters: HashMap::new(),
+        elem_aliases: HashMap::new(),
     };
     let comments = collect_comments(&cx, file.syntax());
     let last_line = text.trim_end().lines().count().max(1) as u32;
@@ -222,6 +231,16 @@ impl<'a, 'db> Cx<'a, 'db> {
         self.method_names.clear();
         self.tmp_counter = 0;
         self.cells.clear();
+        self.pulled_iters.clear();
+        self.elem_aliases.clear();
+    }
+
+    pub fn local_of_path(&self, e: &ast::Expr) -> Option<ra_ap_hir::Local<'db>> {
+        let ast::Expr::PathExpr(pe) = strip_parens(e) else { return None };
+        match self.sema.resolve_path(&pe.path()?) {
+            Some(ra_ap_hir::PathResolution::Local(l)) => Some(l),
+            _ => None,
+        }
     }
 
     // --- cells (`&mut` to Java-immutable values) --------------------------------------------
@@ -235,7 +254,7 @@ impl<'a, 'db> Cx<'a, 'db> {
         let Some(local) = self.sema.to_def(ip) else { return false };
         let Some(scope) = ip.syntax().ancestors().find(|n| ast::Fn::can_cast(n.kind())) else { return false };
         let is_mut = ip.mut_token().is_some();
-        for pe in scope.descendants().filter_map(ast::PathExpr::cast) {
+        for pe in self.expanded_descendants(&scope).into_iter().filter_map(ast::PathExpr::cast) {
             let Some(path) = pe.path() else { continue };
             if !matches!(self.sema.resolve_path(&path), Some(ra_ap_hir::PathResolution::Local(l)) if l == local) {
                 continue;
@@ -262,14 +281,32 @@ impl<'a, 'db> Cx<'a, 'db> {
     pub fn binding_captured(&self, ip: &ast::IdentPat) -> bool {
         let Some(local) = self.sema.to_def(ip) else { return false };
         let Some(scope) = ip.syntax().ancestors().find(|n| ast::Fn::can_cast(n.kind())) else { return false };
-        scope.descendants().filter_map(ast::ClosureExpr::cast).any(|c| {
+        self.expanded_descendants(&scope).into_iter().filter_map(ast::ClosureExpr::cast).any(|c| {
             !c.syntax().text_range().contains_range(ip.syntax().text_range())
-                && c.syntax().descendants().filter_map(ast::PathExpr::cast).any(|pe| {
+                && self.expanded_descendants(c.syntax()).into_iter().filter_map(ast::PathExpr::cast).any(|pe| {
                     pe.path().is_some_and(|path| {
                         matches!(self.sema.resolve_path(&path), Some(ra_ap_hir::PathResolution::Local(l)) if l == local)
                     })
                 })
         })
+    }
+
+    // All nodes under `root`, including the expansions of macro calls (whose arguments are only
+    // token trees in the original file).
+    pub fn expanded_descendants(&self, root: &SyntaxNode) -> Vec<SyntaxNode> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.clone()];
+        while let Some(n) = stack.pop() {
+            for d in n.descendants() {
+                if let Some(mc) = ast::MacroCall::cast(d.clone())
+                    && let Some(exp) = self.sema.expand_macro_call(&mc)
+                {
+                    stack.push(exp.value);
+                }
+                out.push(d);
+            }
+        }
+        out
     }
 
     pub fn mark_cell(&mut self, ip: &ast::IdentPat) {
@@ -336,6 +373,13 @@ impl<'a, 'db> Cx<'a, 'db> {
 
     pub fn import(&mut self, imp: &str) {
         self.imports.insert(imp.to_string());
+    }
+}
+
+pub fn strip_parens(e: &ast::Expr) -> ast::Expr {
+    match e {
+        ast::Expr::ParenExpr(p) => p.expr().map(|i| strip_parens(&i)).unwrap_or_else(|| e.clone()),
+        _ => e.clone(),
     }
 }
 

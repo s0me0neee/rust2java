@@ -72,6 +72,9 @@ pub fn lower_let(cx: &mut Cx, l: &ast::LetStmt, out: &mut Vec<Stmt>) {
         return;
     }
     let rust_name = ip.name().map(|n| n.text().to_string()).unwrap_or_else(|| "_".into());
+    if matches!(ty, Ty::Iter(_)) && super::iter::lower_iter_let(cx, l, ip, &rust_name, &ty, out) {
+        return;
+    }
     if cx.binding_needs_cell(ip, &ty) {
         lower_cell_let(cx, l, ip, &rust_name, &ty, out);
         return;

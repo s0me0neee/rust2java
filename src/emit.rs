@@ -348,7 +348,7 @@ impl Printer {
             }
             Expr::Lambda { params, body } => {
                 match params.len() {
-                    1 => self.out.push_str(&params[0]),
+                    1 if !params[0].contains(' ') => self.out.push_str(&params[0]),
                     _ => self.out.push_str(&format!("({})", params.join(", "))),
                 }
                 self.out.push_str(" -> ");
@@ -386,7 +386,7 @@ impl Printer {
             if i > 0 {
                 self.out.push_str(", ");
             }
-            self.expr(a, 1);
+            self.expr(a, 0);
         }
         self.out.push(')');
     }

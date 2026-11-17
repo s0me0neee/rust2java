@@ -49,6 +49,8 @@ rust-analyzer source for API lookup: `~/.cargo/registry/src/*/ra_ap_hir-0.0.358/
   Run `UPDATE_EXPECTED=1 CASE=<yourprefix> cargo test --test cases` once to record rustc's output
   (`NAME.expected`, `NAME.exit`), then `CASE=<yourprefix> cargo test --test cases` while iterating.
   Commit the `.expected`/`.exit` files. Before finishing, run the **whole** suite (`cargo test --test cases`).
+- Cases that depend on another workstream: name them `<prefix>_needs_<area>_<topic>.rs`; the harness
+  skips them unless `NEEDS=1` is set.
 - Inspect generated Java and check that statements stay on their Rust line numbers.
 
 ## Ownership (to keep merges clean)

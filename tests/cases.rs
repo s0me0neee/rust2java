@@ -25,6 +25,8 @@ fn cases() -> Vec<Case> {
             Case { name, stdin: stdin.exists().then_some(stdin), src }
         })
         .filter(|c| filter.as_ref().is_none_or(|f| c.name.contains(f.as_str())))
+        // `*_needs_<area>` cases wait on another workstream; NEEDS=1 runs them too.
+        .filter(|c| !c.name.contains("_needs_") || std::env::var("NEEDS").is_ok())
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
