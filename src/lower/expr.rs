@@ -628,6 +628,12 @@ fn lower_index(cx: &mut Cx, i: &ast::IndexExpr, out: &mut Vec<Stmt>) -> Expr {
         let b = lower_expr(cx, &base, out);
         return std_map::lower_slice_range(cx, b, &bt, r, out);
     }
+    if !matches!(
+        bt.strip_refs(),
+        Ty::Vec(_) | Ty::Deque(_) | Ty::Map { .. } | Ty::Str
+    ) {
+        return cx.unsupported(i.syntax(), "indexing a user type (`impl Index`)");
+    }
     let b = lower_expr(cx, &base, out);
     let ix = lower_expr(cx, &index, out);
     match bt.strip_refs() {

@@ -1,0 +1,21 @@
+V2 { x: 1.5, y: 2.5 }
+V2 { x: 1.0, y: 3.0 }
+V2 { x: -1.0, y: -2.0 }
+V2 { x: 1.5, y: 2.5 } true
+V2 { x: 0.0, y: 0.0 }
+[Card { rank: 1, suit: 's' }, Card { rank: 3, suit: 'c' }, Card { rank: 3, suit: 'h' }]
+1s
+Some(Card { rank: 3, suit: 'h' })
+true
+Some(1)
+c
+Config { name: "x", level: 0, verbose: false }
+212
+32
+[Low, Mid, High] true
+Greater
+1
+1s 3c 3h
+5
+["b", "a"]
+true

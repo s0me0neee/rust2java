@@ -35,11 +35,28 @@ this brief wins.
 | `src/lower/items.rs` | items + the enum/struct representation contract (see comment block there) |
 | `src/lower/pat.rs` | patterns, match, if-let, `?` |
 | `src/lower/fmt.rs`, `macros.rs` | format strings and std macros |
-| `src/lower/std_map.rs` | std functions/methods/paths → Java std |
+| `src/lower/std_map/mod.rs` | std dispatch: `lower_std_fn_call` / `lower_std_method` / `lower_std_path` / `lower_std_ctor`, shared helpers (`wrap_ok`, `consumed_by`, `clone_expr`, `default_value`, `optional`, …) |
+| `src/lower/std_map/{text,num,option,coll,io,mem,ptr}.rs` | one std area each; every file has a `fn_call` and a `method` **hook** that the dispatcher tries first |
 | `src/lower/iter.rs` | `for` loops, ranges, iterator chains → streams |
 
 rust-analyzer source for API lookup: `~/.cargo/registry/src/*/ra_ap_hir-0.0.358/src/` (`semantics.rs`, `lib.rs`),
 `ra_ap_syntax-0.0.358/src/ast/generated/nodes.rs`. `Semantics` is `cx.sema`, the db is `cx.db`.
+
+## Std hooks (how to add std support without touching shared code)
+
+`std_map/mod.rs` calls every area's `fn_call(cx, c, key, ret, out)` before its own match and every
+area's `method(cx, m, recv_ty, key, out)` before lowering the receiver. Add new std functions/methods
+in **your area's hook** (return `None` without lowering anything when the key isn't yours). Keys come
+from `calls::std_fn_key` (e.g. `Rc::new`, `str::split_once`, `RefCell::borrow`); print it when unsure.
+Existing per-type functions (`lower_str_method`, `lower_vec_method`, …) live in the area files too —
+extend those directly. Shared helpers are in `mod.rs` (reachable through `use super::*`).
+
+## Probes
+
+`tasks/probes/*.rs` are realistic programs exercising each area, with rustc's output in `.expected`.
+Run one with `./target/debug/rust2java tasks/probes/str.rs -o /tmp/p --run`. Turn the lines your area
+owns into real test cases under your prefix; leave other areas' lines out (or put them in a
+`<prefix>_needs_<area>_*.rs` case).
 
 ## Workflow
 
@@ -51,7 +68,9 @@ rust-analyzer source for API lookup: `~/.cargo/registry/src/*/ra_ap_hir-0.0.358/
   Commit the `.expected`/`.exit` files. Before finishing, run the **whole** suite (`cargo test --test cases`).
 - Cases that depend on another workstream: name them `<prefix>_needs_<area>_<topic>.rs`; the harness
   skips them unless `NEEDS=1` is set.
-- Inspect generated Java and check that statements stay on their Rust line numbers.
+- Inspect generated Java and check that statements stay on their Rust line numbers, and that it reads
+  like hand-written Java (no needless temps, `String.valueOf` wrappers or casts).
+- Run `cargo fmt` before every commit (the project is rustfmt-clean).
 
 ## Ownership (to keep merges clean)
 
