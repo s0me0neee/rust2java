@@ -37,6 +37,8 @@ pub struct Cx<'a, 'db> {
     pub diags: Vec<Diag>,
     // Lexical scopes of the current method: Rust name -> Java name.
     scopes: Vec<HashMap<String, String>>,
+    // Temporary name aliases: Rust name -> already-rendered Java text (pattern bindings in guards).
+    aliases: Vec<HashMap<String, String>>,
     // Java names declared anywhere in the current method (Java forbids shadowing locals).
     method_names: HashSet<String>,
     tmp_counter: u32,
@@ -90,6 +92,7 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         imports: BTreeSet::new(),
         diags: Vec::new(),
         scopes: Vec::new(),
+        aliases: Vec::new(),
         method_names: HashSet::new(),
         tmp_counter: 0,
         ret_ty: None,
@@ -245,6 +248,11 @@ impl<'a, 'db> Cx<'a, 'db> {
     }
 
     pub fn lookup(&self, rust: &str) -> String {
+        for a in self.aliases.iter().rev() {
+            if let Some(n) = a.get(rust) {
+                return n.clone();
+            }
+        }
         for s in self.scopes.iter().rev() {
             if let Some(n) = s.get(rust) {
                 return n.clone();
@@ -262,6 +270,21 @@ impl<'a, 'db> Cx<'a, 'db> {
                 self.method_names.insert(name.clone());
                 return name;
             }
+        }
+    }
+
+    // Aliases for the duration of one condition (e.g. a pattern binding's value expression).
+    pub fn push_alias(&mut self) {
+        self.aliases.push(HashMap::new());
+    }
+
+    pub fn pop_alias(&mut self) {
+        self.aliases.pop();
+    }
+
+    pub fn bind_alias(&mut self, rust: &str, java: String) {
+        if let Some(a) = self.aliases.last_mut() {
+            a.insert(rust.to_string(), java);
         }
     }
 

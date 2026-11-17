@@ -5,6 +5,12 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 
 public sealed interface Result<T, E> permits Ok, Err {
+    default String debug() {
+        return switch (this) {
+            case Ok<T, E>(var v) -> "Ok(" + v + ")";
+            case Err<T, E>(var e) -> "Err(" + e + ")";
+        };
+    }
     default boolean is_ok() { return this instanceof Ok; }
     default boolean is_err() { return this instanceof Err; }
     default T unwrap() {

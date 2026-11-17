@@ -1,0 +1,15 @@
+one
+ok 7
+huge 500
+error -3 is not positive
+ok 5
+error -3 is not positive
+tail 9
+both ok
+both failed neg -1
+sum 10
+iflet ok 2
+big small non-positive error
+pick 5
+pick 1
+letelse ok 3
