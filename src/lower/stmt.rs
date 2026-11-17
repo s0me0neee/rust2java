@@ -107,6 +107,7 @@ pub fn is_control_flow(e: &ast::Expr) -> bool {
         ast::Expr::IfExpr(i) => !expr::is_simple_if(i),
         ast::Expr::MatchExpr(_) | ast::Expr::LoopExpr(_) | ast::Expr::WhileExpr(_) | ast::Expr::ForExpr(_) => true,
         ast::Expr::BlockExpr(b) => b.stmt_list().is_some_and(|l| l.statements().next().is_some()) || b.label().is_some(),
+        ast::Expr::MacroExpr(m) => macros::is_diverging(m),
         _ => false,
     }
 }
@@ -164,9 +165,8 @@ pub fn lower_to_dest(cx: &mut Cx, e: &ast::Expr, dest: &Dest, out: &mut Vec<Stmt
             out.push(Stmt::new(line, StmtKind::Continue(label)));
         }
         ast::Expr::MacroExpr(m) if macros::is_diverging(m) => {
-            let e = expr::lower_expr(cx, e, out);
+            let e = macros::lower_macro_expr(cx, m, out);
             out.push(Stmt::new(line, StmtKind::Throw(e)));
-            let _ = m;
         }
         _ => {
             let ty = cx.ty(e);

@@ -1,0 +1,32 @@
+fn main() {
+    use std::fmt::Write;
+    let values = vec![1, 2, 3];
+    let repeated = vec![7; 3];
+    println!("{:?} {:?}", values, repeated);
+    assert!(true);
+    assert_eq!(1, 1);
+    assert_ne!(1, 2);
+    debug_assert!(false);
+    debug_assert_eq!(1, 2);
+    let n = dbg!(12);
+    println!("{}", n);
+    println!("{}", matches!(n, 12));
+    let mut text = String::new();
+    let _ = write!(&mut text, "{}", 5);
+    let _ = writeln!(&mut text, " {}", 6);
+    let _ = writeln!(&mut text);
+    writeln!(&mut text, "{}", 7).unwrap();
+    print!("{}", text);
+    let empty: Vec<i32> = vec![];
+    println!("{:?}", empty);
+    let some = Some(3);
+    let none: Option<i32> = None;
+    println!("{} {}", matches!(some, Some(_)), matches!(none, None));
+    println!("{} {}", matches!(some, Some(3)), matches!(some, Some(4)));
+    let result: Result<i32, &str> = Ok(3);
+    println!("{} {}", matches!(result, Ok(3)), matches!(result, Err(_)));
+    let built = format!("{}-{:03}", "x", 4);
+    println!("{}", built);
+    eprint!("stderr");
+    eprintln!(" {}", 3);
+}
