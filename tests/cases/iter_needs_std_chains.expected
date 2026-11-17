@@ -1,0 +1,16 @@
+["APPLE", "KIWI", "BANANA"]
+["apple", "banana", "bob", "fig", "kiwi"] 4
+12
+apple-bob-kiwi-banana-fig
+abkbf
+banana bob
+3
+1x 2y 3z 
+[4, 8, 15, 16]
+[1, 2, 3]
+[1, 2, 7, 8]
+[10, 30, 40] ["map 1", "map 2", "map 3", "map 4"]
+[3, 5, 7]
+[2, 2, 1]
+0.6000000000000001
+3

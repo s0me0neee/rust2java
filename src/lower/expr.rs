@@ -31,6 +31,7 @@ pub fn lower_expr(cx: &mut Cx, e: &ast::Expr, out: &mut Vec<Stmt>) -> Expr {
         },
         ast::Expr::CallExpr(c) => calls::lower_call(cx, c, out),
         ast::Expr::MethodCallExpr(m) => calls::lower_method_call(cx, m, out),
+        ast::Expr::MacroExpr(m) if macros::is_diverging(m) => cx.unsupported(m.syntax(), "diverging macro in expression"),
         ast::Expr::MacroExpr(m) => macros::lower_macro_expr(cx, m, out),
         ast::Expr::FieldExpr(f) => lower_field(cx, f, out),
         ast::Expr::IndexExpr(i) => lower_index(cx, i, out),

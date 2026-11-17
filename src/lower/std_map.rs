@@ -37,6 +37,7 @@ pub fn lower_std_method(cx: &mut Cx, m: &ast::MethodCallExpr, recv_ty: &Ty, key:
         (Ty::Vec(_), "len") => Expr::call(recv, "size", vec![]),
         (Ty::Vec(_), "push") => Expr::call(recv, "add", args),
         (Ty::Str, "len") => Expr::call(recv, "length", vec![]),
+        (Ty::Result(_, _), "unwrap") => Expr::call(recv, "unwrap", args),
         (_, "clone") if recv_ty.is_primitive() || recv_ty.is_str() => recv,
         (Ty::Adt { .. }, "clone") => Expr::call(recv, "clone", vec![]),
         (Ty::Adt { .. }, "to_string") => Expr::call(recv, "toString", vec![]),
@@ -86,7 +87,9 @@ pub fn lower_array_expr(cx: &mut Cx, a: &ast::ArrayExpr, out: &mut Vec<Stmt>) ->
     if items.is_empty() {
         return Expr::New { ty: "ArrayList<>".into(), args: vec![] };
     }
-    let list = Expr::call(Expr::raw("List"), "of", items);
+    // `()` elements are `null` in Java, which `List.of` rejects.
+    let factory = if exprs.iter().any(|e| cx.ty(e).is_unit()) { ("Arrays", "asList") } else { ("List", "of") };
+    let list = Expr::call(Expr::raw(factory.0), factory.1, items);
     Expr::New { ty: "ArrayList<>".into(), args: vec![list] }
 }
 
