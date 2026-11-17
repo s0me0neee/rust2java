@@ -5,6 +5,9 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 
 public sealed interface Result<T, E> permits Ok, Err {
+    default String debug() {
+        return this instanceof Ok<?, ?>(var v) ? "Ok(" + v + ")" : "Err(" + ((Err<?, ?>) this).error() + ")";
+    }
     default boolean is_ok() { return this instanceof Ok; }
     default boolean is_err() { return this instanceof Err; }
     default T unwrap() {

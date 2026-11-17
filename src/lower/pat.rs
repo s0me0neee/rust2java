@@ -10,11 +10,59 @@ use crate::ty::Ty;
 // Lowers an `if`/`while` condition. Bindings introduced by `let` patterns are pushed to `binds`
 // (to be placed at the start of the body); statements needed before the test go to `out`.
 pub fn lower_condition(cx: &mut Cx, cond: &ast::Expr, out: &mut Vec<Stmt>, binds: &mut Vec<Stmt>) -> Expr {
+    if let ast::Expr::LetExpr(l) = cond {
+        return lower_let_condition(cx, l, out, binds);
+    }
     if expr::contains_let(cond) {
         let _ = binds;
-        return cx.unsupported(cond.syntax(), "if-let / while-let / let chains");
+        return cx.unsupported(cond.syntax(), "let chains");
     }
     expr::lower_expr(cx, cond, out)
+}
+
+// `if let Some(x) = e` / `while let Some(&x) = e`: bind a temporary, test it, destructure in `binds`.
+fn lower_let_condition(cx: &mut Cx, l: &ast::LetExpr, out: &mut Vec<Stmt>, binds: &mut Vec<Stmt>) -> Expr {
+    let (Some(p), Some(src)) = (l.pat(), l.expr()) else {
+        return cx.unsupported(l.syntax(), "let condition without pattern/value");
+    };
+    let ty = cx.ty(&src);
+    if !matches!(ty.strip_refs(), Ty::Option(_)) {
+        return cx.unsupported(l.syntax(), "`if let` on a non-Option value");
+    }
+    let line = cx.line(l.syntax());
+    let e = expr::lower_expr(cx, &src, out);
+    let tmp = cx.fresh("opt");
+    out.push(Stmt::new(line, StmtKind::Local { ty: ty.java(), name: tmp.clone(), init: Some(e) }));
+    match option_pat_kind(&p) {
+        Some(("Some", Some(inner))) => {
+            bind_pattern(cx, &inner, Expr::raw(format!("{tmp}.get()")), binds);
+            Expr::call(Expr::name(tmp), "isPresent", vec![])
+        }
+        Some(("Some", None)) => Expr::call(Expr::name(tmp), "isPresent", vec![]),
+        Some(("None", _)) => Expr::call(Expr::name(tmp), "isEmpty", vec![]),
+        _ => cx.unsupported(p.syntax(), "`if let` pattern"),
+    }
+}
+
+fn option_pat_kind(p: &ast::Pat) -> Option<(&'static str, Option<ast::Pat>)> {
+    match p {
+        ast::Pat::TupleStructPat(ts) => {
+            let name = ts.path()?.segment()?.name_ref()?.text().to_string();
+            let inner = ts.fields().next();
+            match name.as_str() {
+                "Some" => Some(("Some", inner)),
+                _ => None,
+            }
+        }
+        ast::Pat::PathPat(pp) => {
+            let name = pp.path()?.segment()?.name_ref()?.text().to_string();
+            match name.as_str() {
+                "None" => Some(("None", None)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 pub fn lower_match_stmt(cx: &mut Cx, m: &ast::MatchExpr, dest: &Dest, out: &mut Vec<Stmt>) {

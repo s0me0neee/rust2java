@@ -216,7 +216,7 @@ pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
         Ty::Char => Expr::bin(Expr::bin(Expr::str_lit("'"), "+", v), "+", Expr::str_lit("'")),
         Ty::F32 | Ty::F64 => Expr::call(Expr::raw("String"), "valueOf", vec![v]),
         Ty::Vec(inner) if inner.is_primitive() && !inner.is_float() && **inner != Ty::Char => v,
-        Ty::Adt { .. } => Expr::call(v, "debug", vec![]),
+        Ty::Adt { .. } | Ty::Result(..) => Expr::call(v, "debug", vec![]),
         Ty::Vec(inner) | Ty::Deque(inner) => {
             let x = cx.fresh("x");
             let inner_dbg = debug(cx, Expr::name(x.clone()), inner);

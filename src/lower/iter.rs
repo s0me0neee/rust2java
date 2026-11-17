@@ -365,6 +365,12 @@ pub fn lower_iter_method(cx: &mut Cx, m: &ast::MethodCallExpr, recv_ty: &Ty, key
     {
         return Some(lower_pulled(cx, m, &name, &recv_ast, &items, recv_ty, out));
     }
+    // Set algebra streams: std_map builds the stream from the two sets.
+    if matches!(recv_ty.strip_refs(), Ty::Set { .. })
+        && matches!(name.as_str(), "union" | "intersection" | "difference" | "symmetric_difference")
+    {
+        return None;
+    }
     if !matches!(recv_ty.strip_refs(), Ty::Iter(_)) {
         if let (Ty::Vec(t), "join" | "concat") = (recv_ty.strip_refs(), name.as_str())
             && t.is_str()
@@ -444,6 +450,10 @@ fn lower_source(cx: &mut Cx, m: &ast::MethodCallExpr, name: &str, recv_ty: &Ty, 
             Expr::raw(format!("IntStream.range(0, {ss}.length()).mapToObj({i} -> Map.entry({i}, {ss}.charAt({i})))"))
         }
         (Ty::Str, "lines") => Expr::call(recv, "lines", vec![]),
+        (Ty::Other(t), "lines") if t.contains("Stdin") => {
+            super::std_map::need_stdin(cx);
+            Expr::call(Expr::raw("STDIN"), "lines", vec![])
+        }
         (Ty::Str, "split_whitespace" | "split_ascii_whitespace") => {
             let w = cx.fresh("w");
             let parts = Expr::call(Expr::call(recv, "strip", vec![]), "split", vec![Expr::str_lit("\\s+")]);

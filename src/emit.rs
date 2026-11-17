@@ -334,7 +334,8 @@ impl Printer {
             }
             Expr::Unary(op, x) => {
                 self.out.push_str(op);
-                self.expr(x, 13);
+                // 14 forces parens around nested unary (`- -1`, not `--1`).
+                self.expr(x, 14);
             }
             Expr::Binary(l, op, r) => {
                 let bp = binop_prec(op);
