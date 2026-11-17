@@ -1,0 +1,4 @@
+Info { name: "x", initial: 'y', ratio: 1.5, flags: [], maybe: Some(3), pair: (1, "a") }
+Info { name: "x", initial: 'y', ratio: 1.5, flags: [true, false], maybe: None, pair: (1, "a") }
+Bag { items: [Info { name: "x", initial: 'y', ratio: 1.5, flags: [true, false], maybe: None, pair: (1, "a") }] }
+Empty Marker

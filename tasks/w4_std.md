@@ -7,6 +7,13 @@ Read `tasks/COMMON.md` and `DESIGN.md` (§6, §6.1, §6.2, §9.2, §11.1, §12) 
 Iterator-producing / iterator-consuming methods (`iter`, `chars`, `split`, `lines`, `map`, `collect`, …)
 belong to worker 5 (`iter.rs` is consulted before `std_map`), so don't implement those.
 
+## Already done (by the lead; extend, don't redo)
+
+- Array literals `[a, b]`, `[x; n]` (`lower_array_expr`, `lower_repeat`), `vec!`.
+- Everything iterator-shaped, incl. `join`/`concat` on `Vec<String>` (iter.rs).
+- Blocked test cases waiting for you: `tests/cases/iter_needs_std_*.rs` (run with `NEEDS=1`); rename them
+  to drop `_needs_std` once they pass.
+
 ## Scope
 
 1. **Std function calls** (`lower_std_fn_call`, keys like `Vec::new`, `String::with_capacity`,

@@ -38,6 +38,8 @@ pub fn lower_std_method(cx: &mut Cx, m: &ast::MethodCallExpr, recv_ty: &Ty, key:
         (Ty::Vec(_), "push") => Expr::call(recv, "add", args),
         (Ty::Str, "len") => Expr::call(recv, "length", vec![]),
         (_, "clone") if recv_ty.is_primitive() || recv_ty.is_str() => recv,
+        (Ty::Adt { .. }, "clone") => Expr::call(recv, "clone", vec![]),
+        (Ty::Adt { .. }, "to_string") => Expr::call(recv, "toString", vec![]),
         (t, "to_string") if t.is_str() => recv,
         (t, "to_string") if t.is_primitive() => Expr::call(Expr::raw("String"), "valueOf", vec![recv]),
         _ => cx.unsupported(m.syntax(), &format!("std method `{key}` on {recv_ty:?}")),
@@ -74,10 +76,44 @@ pub fn lower_std_ctor(cx: &mut Cx, c: &ast::CallExpr, path: &ast::Path, args: &[
     }
 }
 
-// `[a, b, c]` and `[x; n]`.
+// `[a, b, c]` -> mutable list; `[x; n]` -> n independent copies when `x` is a mutable object.
 pub fn lower_array_expr(cx: &mut Cx, a: &ast::ArrayExpr, out: &mut Vec<Stmt>) -> Expr {
-    let _ = out;
-    cx.unsupported(a.syntax(), "array expression")
+    let exprs: Vec<ast::Expr> = a.exprs().collect();
+    if a.semicolon_token().is_some() && exprs.len() == 2 {
+        return lower_repeat(cx, a.syntax(), &exprs[0], &exprs[1], out);
+    }
+    let items: Vec<Expr> = exprs.iter().map(|e| expr::lower_expr(cx, e, out)).collect();
+    if items.is_empty() {
+        return Expr::New { ty: "ArrayList<>".into(), args: vec![] };
+    }
+    let list = Expr::call(Expr::raw("List"), "of", items);
+    Expr::New { ty: "ArrayList<>".into(), args: vec![list] }
+}
+
+// `[x; n]` / `vec![x; n]`.
+pub fn lower_repeat(cx: &mut Cx, node: &ra_ap_syntax::SyntaxNode, elem: &ast::Expr, count: &ast::Expr, out: &mut Vec<Stmt>) -> Expr {
+    {
+        let exprs = [elem.clone(), count.clone()];
+        let elem_ty = cx.ty(&exprs[0]);
+        let n = expr::lower_expr(cx, &exprs[1], out);
+        if crate::lower::is_cell_value_ty(&elem_ty) || matches!(elem_ty.strip_refs(), Ty::Option(_)) {
+            let x = expr::lower_expr(cx, &exprs[0], out);
+            let copies = Expr::call(Expr::raw("Collections"), "nCopies", vec![n, x]);
+            return Expr::New { ty: "ArrayList<>".into(), args: vec![copies] };
+        }
+        // Re-evaluate the element expression per slot: Rust clones it n times.
+        let mut inner = Vec::new();
+        cx.lambda_depth += 1;
+        let x = expr::lower_expr(cx, &exprs[0], &mut inner);
+        cx.lambda_depth -= 1;
+        if !inner.is_empty() {
+            return cx.unsupported(node, "repeat-array element needing statements");
+        }
+        let i = cx.fresh("i");
+        let range = Expr::call(Expr::raw("IntStream"), "range", vec![Expr::raw("0"), n]);
+        let mapped = Expr::call(range, "mapToObj", vec![Expr::Lambda { params: vec![i], body: crate::jir::LambdaBody::Expr(Box::new(x)) }]);
+        Expr::call(mapped, "collect", vec![Expr::raw("Collectors.toCollection(ArrayList::new)")])
+    }
 }
 
 // `&v[a..b]`, `&s[a..]`.

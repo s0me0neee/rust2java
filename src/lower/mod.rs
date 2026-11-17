@@ -32,6 +32,12 @@ pub struct Cx<'a, 'db> {
     pub db: &'db RootDatabase,
     pub module: Module,
     pub class_name: String,
+    // Java name of `Self` while lowering an impl/trait body (defaults to the module class).
+    pub self_ty_java: String,
+    // What `self` means in the body being lowered (`this`, or a parameter of a static method).
+    pub self_name: String,
+    // Inside an `impl Display` body: `?` on `write!` is dropped.
+    pub in_display: bool,
     line_starts: Vec<u32>,
     pub imports: BTreeSet<String>,
     pub diags: Vec<Diag>,
@@ -52,6 +58,14 @@ pub struct Cx<'a, 'db> {
     pub loops: Vec<LoopFrame>,
     // Number of enclosing Java switch statements (affects unlabeled `break`).
     pub switch_depth: u32,
+    // Locals stored in one-element arrays (`int[] n = {0}`): `&mut` targets and closure-mutated vars.
+    pub cells: HashSet<ra_ap_hir::Local<'db>>,
+    // >0 while lowering a closure body: statements hoisted to `out` would run only once, outside it.
+    pub lambda_depth: u32,
+    // Iterator locals pulled with `next()`/`peek()`: Java `ListIterator` + the backing list's name.
+    pub pulled_iters: HashMap<ra_ap_hir::Local<'db>, String>,
+    // `for x in v.iter_mut()` over immutable values: `x` stands for `list.get(idx)`.
+    pub elem_aliases: HashMap<ra_ap_hir::Local<'db>, (String, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -63,6 +77,15 @@ pub struct LoopFrame {
     pub switch_depth: u32,
     // Labeled block rather than a loop (unlabeled `break` skips it).
     pub is_block: bool,
+}
+
+// Method-scoped state, saved while lowering a nested item (a local `fn`).
+pub struct MethodState {
+    scopes: Vec<HashMap<String, String>>,
+    method_names: HashSet<String>,
+    ret_ty: Option<Ty>,
+    loops: Vec<LoopFrame>,
+    switch_depth: u32,
 }
 
 pub struct Lowered {
@@ -88,6 +111,9 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         db: sema.db,
         module: unit.module,
         class_name: unit.class_name.clone(),
+        self_ty_java: unit.class_name.clone(),
+        self_name: "this".into(),
+        in_display: false,
         line_starts,
         imports: BTreeSet::new(),
         diags: Vec::new(),
@@ -100,6 +126,10 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         needs_result: false,
         loops: Vec::new(),
         switch_depth: 0,
+        cells: HashSet::new(),
+        lambda_depth: 0,
+        pulled_iters: HashMap::new(),
+        elem_aliases: HashMap::new(),
     };
     let comments = collect_comments(&cx, file.syntax());
     let last_line = text.trim_end().lines().count().max(1) as u32;
@@ -221,6 +251,118 @@ impl<'a, 'db> Cx<'a, 'db> {
         self.scopes = vec![HashMap::new()];
         self.method_names.clear();
         self.tmp_counter = 0;
+        self.cells.clear();
+        self.pulled_iters.clear();
+        self.elem_aliases.clear();
+    }
+
+    pub fn local_of_path(&self, e: &ast::Expr) -> Option<ra_ap_hir::Local<'db>> {
+        let ast::Expr::PathExpr(pe) = strip_parens(e) else { return None };
+        match self.sema.resolve_path(&pe.path()?) {
+            Some(ra_ap_hir::PathResolution::Local(l)) => Some(l),
+            _ => None,
+        }
+    }
+
+    // --- cells (`&mut` to Java-immutable values) --------------------------------------------
+
+    // Whether a `let` binding must live in a one-element array: its value type is immutable in
+    // Java and it is either borrowed `&mut` or (being `mut`) captured by a closure.
+    pub fn binding_needs_cell(&self, ip: &ast::IdentPat, ty: &Ty) -> bool {
+        if !is_cell_value_ty(ty) {
+            return false;
+        }
+        let Some(local) = self.sema.to_def(ip) else { return false };
+        let Some(scope) = ip.syntax().ancestors().find(|n| ast::Fn::can_cast(n.kind())) else { return false };
+        let is_mut = ip.mut_token().is_some();
+        for pe in self.expanded_descendants(&scope).into_iter().filter_map(ast::PathExpr::cast) {
+            let Some(path) = pe.path() else { continue };
+            if !matches!(self.sema.resolve_path(&path), Some(ra_ap_hir::PathResolution::Local(l)) if l == local) {
+                continue;
+            }
+            let borrowed_mut = pe
+                .syntax()
+                .parent()
+                .and_then(ast::RefExpr::cast)
+                .is_some_and(|r| r.mut_token().is_some());
+            let in_closure = pe
+                .syntax()
+                .ancestors()
+                .take_while(|n| *n != scope)
+                .filter_map(ast::ClosureExpr::cast)
+                .any(|c| !c.syntax().text_range().contains_range(ip.syntax().text_range()));
+            if borrowed_mut || (is_mut && in_closure) {
+                return true;
+            }
+        }
+        false
+    }
+
+    // Whether any closure (not containing the binding itself) refers to this binding.
+    pub fn binding_captured(&self, ip: &ast::IdentPat) -> bool {
+        let Some(local) = self.sema.to_def(ip) else { return false };
+        let Some(scope) = ip.syntax().ancestors().find(|n| ast::Fn::can_cast(n.kind())) else { return false };
+        self.expanded_descendants(&scope).into_iter().filter_map(ast::ClosureExpr::cast).any(|c| {
+            !c.syntax().text_range().contains_range(ip.syntax().text_range())
+                && self.expanded_descendants(c.syntax()).into_iter().filter_map(ast::PathExpr::cast).any(|pe| {
+                    pe.path().is_some_and(|path| {
+                        matches!(self.sema.resolve_path(&path), Some(ra_ap_hir::PathResolution::Local(l)) if l == local)
+                    })
+                })
+        })
+    }
+
+    // All nodes under `root`, including the expansions of macro calls (whose arguments are only
+    // token trees in the original file).
+    pub fn expanded_descendants(&self, root: &SyntaxNode) -> Vec<SyntaxNode> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.clone()];
+        while let Some(n) = stack.pop() {
+            for d in n.descendants() {
+                if let Some(mc) = ast::MacroCall::cast(d.clone())
+                    && let Some(exp) = self.sema.expand_macro_call(&mc)
+                {
+                    stack.push(exp.value);
+                }
+                out.push(d);
+            }
+        }
+        out
+    }
+
+    pub fn mark_cell(&mut self, ip: &ast::IdentPat) {
+        if let Some(local) = self.sema.to_def(ip) {
+            self.cells.insert(local);
+        }
+    }
+
+    // Java name of the cell array if `e` is a path to a cell local.
+    pub fn cell_path(&self, e: &ast::Expr) -> Option<String> {
+        let ast::Expr::PathExpr(pe) = e else { return None };
+        match self.sema.resolve_path(&pe.path()?) {
+            Some(ra_ap_hir::PathResolution::Local(l)) if self.cells.contains(&l) => {
+                Some(self.lookup(l.name(self.db).as_str()))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn save_method_state(&mut self) -> MethodState {
+        MethodState {
+            scopes: std::mem::take(&mut self.scopes),
+            method_names: std::mem::take(&mut self.method_names),
+            ret_ty: self.ret_ty.take(),
+            loops: std::mem::take(&mut self.loops),
+            switch_depth: std::mem::replace(&mut self.switch_depth, 0),
+        }
+    }
+
+    pub fn restore_method_state(&mut self, saved: MethodState) {
+        self.scopes = saved.scopes;
+        self.method_names = saved.method_names;
+        self.ret_ty = saved.ret_ty;
+        self.loops = saved.loops;
+        self.switch_depth = saved.switch_depth;
     }
 
     pub fn push_scope(&mut self) {
@@ -291,6 +433,18 @@ impl<'a, 'db> Cx<'a, 'db> {
     pub fn import(&mut self, imp: &str) {
         self.imports.insert(imp.to_string());
     }
+}
+
+pub fn strip_parens(e: &ast::Expr) -> ast::Expr {
+    match e {
+        ast::Expr::ParenExpr(p) => p.expr().map(|i| strip_parens(&i)).unwrap_or_else(|| e.clone()),
+        _ => e.clone(),
+    }
+}
+
+// Types whose Java representation is immutable, so `&mut` needs a cell.
+pub fn is_cell_value_ty(ty: &Ty) -> bool {
+    matches!(ty.strip_refs(), Ty::Bool | Ty::Char | Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Str)
 }
 
 const JAVA_KEYWORDS: &[&str] = &[

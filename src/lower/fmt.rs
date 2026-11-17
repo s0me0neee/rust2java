@@ -172,12 +172,18 @@ fn captured(cx: &mut Cx, node: &SyntaxNode, name: &str) -> (Expr, Ty) {
                 && n.as_str() == name
                 && let ScopeDef::Local(l) = def
             {
-                found = Some(l.ty(cx.db));
+                found = Some((l.ty(cx.db), cx.cells.contains(&l)));
             }
         });
     }
-    let ty = found.map(|t| cx.convert(&t)).unwrap_or(Ty::Other("?".into()));
-    (Expr::name(cx.lookup(name)), ty)
+    let java = cx.lookup(name);
+    match found {
+        Some((t, is_cell)) => {
+            let e = if is_cell { Expr::raw(format!("{java}[0]")) } else { Expr::name(java) };
+            (e, cx.convert(&t))
+        }
+        None => (Expr::name(java), Ty::Other("?".into())),
+    }
 }
 
 fn format_one(cx: &mut Cx, node: &SyntaxNode, v: Expr, ty: &Ty, spec: &str) -> Expr {
@@ -211,6 +217,23 @@ pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
         Ty::F32 | Ty::F64 => Expr::call(Expr::raw("String"), "valueOf", vec![v]),
         Ty::Vec(inner) if inner.is_primitive() && !inner.is_float() && **inner != Ty::Char => v,
         Ty::Adt { .. } => Expr::call(v, "debug", vec![]),
+        Ty::Vec(inner) | Ty::Deque(inner) => {
+            let x = cx.fresh("x");
+            let inner_dbg = debug(cx, Expr::name(x.clone()), inner);
+            let mapped = Expr::call(
+                Expr::call(v, "stream", vec![]),
+                "map",
+                vec![Expr::Lambda { params: vec![x], body: crate::jir::LambdaBody::Expr(Box::new(inner_dbg)) }],
+            );
+            Expr::call(mapped, "collect", vec![Expr::raw("Collectors.joining(\", \", \"[\", \"]\")")])
+        }
+        Ty::Option(inner) => {
+            let x = cx.fresh("x");
+            let inner_dbg = debug(cx, Expr::name(x.clone()), inner);
+            let some = Expr::bin(Expr::bin(Expr::str_lit("Some("), "+", inner_dbg), "+", Expr::str_lit(")"));
+            let mapped = Expr::call(v, "map", vec![Expr::Lambda { params: vec![x], body: crate::jir::LambdaBody::Expr(Box::new(some)) }]);
+            Expr::call(mapped, "orElse", vec![Expr::str_lit("None")])
+        }
         _ => {
             let _ = cx;
             v

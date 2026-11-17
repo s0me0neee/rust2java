@@ -4,7 +4,7 @@ use ra_ap_hir::{AsAssocItem, AssocItemContainer, Function, ModuleDef, PathResolu
 use ra_ap_syntax::{AstNode, ast};
 
 use super::{Cx, escape_keyword, expr, items, iter, std_map};
-use crate::frontend::module_class_name;
+use crate::frontend::module_class_from;
 use crate::jir::{Expr, Stmt};
 use crate::ty::{Ty, fn_call_method};
 
@@ -83,6 +83,11 @@ fn lower_fn_call(cx: &mut Cx, c: &ast::CallExpr, f: Function, path: &ast::Path, 
     let name = escape_keyword(f.name(db).as_str());
     let mut args = expr::call_args(cx, c, out);
     if let Some(assoc) = f.as_assoc_item(db) {
+        if let AssocItemContainer::Impl(imp) = assoc.container(db)
+            && let Some(e) = items::lower_foreign_static_call(cx, imp, &name, args.clone())
+        {
+            return e;
+        }
         if f.self_param(db).is_some() {
             // UFCS `Type::method(x, ...)` -> `x.method(...)`.
             if args.is_empty() {
@@ -97,16 +102,20 @@ fn lower_fn_call(cx: &mut Cx, c: &ast::CallExpr, f: Function, path: &ast::Path, 
                 Expr::call(Expr::raw(owner), name, args)
             }
             AssocItemContainer::Trait(_) => {
+                if let Some(e) = items::lower_trait_static_call(cx, path, f, args.clone()) {
+                    return e;
+                }
                 let qualifier = path.qualifier().map(|q| q.syntax().text().to_string()).unwrap_or_default();
                 cx.unsupported(c.syntax(), &format!("trait static call `{qualifier}::{name}`"))
             }
         };
     }
     let module = f.module(db);
-    if module == cx.module {
+    // Block-local items have no module name; they live in the enclosing class.
+    if module == cx.module || module.name(db).is_none() {
         Expr::static_call(name, args)
     } else {
-        Expr::call(Expr::raw(module_class_name(db, module)), name, args)
+        Expr::call(Expr::raw(module_class_from(db, cx.module, module)), name, args)
     }
 }
 

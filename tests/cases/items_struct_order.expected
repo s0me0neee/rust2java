@@ -1,0 +1,12 @@
+base
+tick 3
+tick 1
+tick 2
+Log { a: 1, b: 2, c: 3 }
+tick 20
+Log { a: 1, b: 20, c: 3 }
+tick 30
+base
+Log { a: 1, b: 30, c: 3 }
+Pair(4, 5) Pair(5, 4)
+Pair(6, 7)

@@ -4,6 +4,11 @@ Read `tasks/COMMON.md` and `DESIGN.md` (§10, §10.1, §15) first.
 
 **You own:** `src/lower/fmt.rs`, `src/lower/macros.rs`. Test prefix: `fmt_`.
 
+## Already done (by the lead; extend, don't redo)
+
+- `vec![a, b]` / `vec![x; n]` (macros.rs, via `std_map::lower_array_expr` / `lower_repeat`).
+- `{:?}` of `Option` and `Vec`/`VecDeque` (stream joining), floats, strings, chars, user types (`.debug()`).
+
 ## Scope
 
 1. **Format spec** (§10): width, fill, alignment (`<`, `>`, `^`), sign `+`, `#`, `0`-padding, precision,

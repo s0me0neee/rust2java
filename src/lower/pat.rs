@@ -366,7 +366,20 @@ fn lower_switch_stmt(cx: &mut Cx, scrut: &ast::Expr, arms: &[ast::MatchArm], des
         jarms.push(Arm { line: aline, label, body });
     }
     cx.switch_depth -= 1;
+    // javac does not treat an all-constant enum switch as exhaustive: it needs a way out.
+    let needs_escape = matches!(dest, Dest::Assign(_))
+        || matches!(dest, Dest::Return) && cx.ret_ty.as_ref().is_some_and(|t| !t.is_unit());
+    let constants_only = jarms.iter().all(|a| a.label != "default" && !a.label.contains('('));
+    let escape = (needs_escape && constants_only).then(|| {
+        Stmt::new(line, StmtKind::Throw(Expr::New {
+            ty: "IllegalStateException".into(),
+            args: vec![Expr::str_lit("unreachable")],
+        }))
+    });
     out.push(Stmt::new(line, StmtKind::Switch { scrut: value, arms: jarms }));
+    if let Some(e) = escape {
+        out.push(e);
+    }
 }
 
 // Single irrefutable arm: bindings, then the body.
@@ -674,18 +687,13 @@ fn variant_label(cx: &mut Cx, v: ra_ap_hir::EnumVariant, pats: &[FieldPat], decl
     Some(format!("{ctor}({})", comps.join(", ")))
 }
 
-// One component of a tuple/record pattern, plus the name a shorthand field binds.
+// One component of a tuple/record pattern (`S { x }` is the binder itself).
 #[derive(Clone, Default)]
 struct FieldPat {
     pat: Option<ast::Pat>,
-    bind: Option<String>,
 }
 
 fn component_text(cx: &mut Cx, fp: &FieldPat, declare: bool) -> Option<String> {
-    if let Some(name) = &fp.bind {
-        let java = if declare { cx.declare(name) } else { "x".to_string() };
-        return Some(format!("var {java}"));
-    }
     match &fp.pat {
         None | Some(ast::Pat::WildcardPat(_)) | Some(ast::Pat::RestPat(_)) => {
             let name = if declare { cx.fresh("unused") } else { "unused".to_string() };
@@ -696,8 +704,8 @@ fn component_text(cx: &mut Cx, fp: &FieldPat, declare: bool) -> Option<String> {
             Some(format!("var {name}"))
         }
         Some(ast::Pat::IdentPat(_)) => None,
-        Some(ast::Pat::ParenPat(x)) => component_text(cx, &FieldPat { pat: x.pat(), bind: None }, declare),
-        Some(ast::Pat::RefPat(x)) => component_text(cx, &FieldPat { pat: x.pat(), bind: None }, declare),
+        Some(ast::Pat::ParenPat(x)) => component_text(cx, &FieldPat { pat: x.pat() }, declare),
+        Some(ast::Pat::RefPat(x)) => component_text(cx, &FieldPat { pat: x.pat() }, declare),
         Some(nested) => nested_component_text(cx, nested, declare),
     }
 }
@@ -757,12 +765,16 @@ fn record_pats(cx: &Cx, rp: &ast::RecordPat, fields: &[ra_ap_hir::Field]) -> Vec
     let mut out: Vec<FieldPat> = vec![FieldPat::default(); fields.len()];
     let Some(list) = rp.record_pat_field_list() else { return out };
     for f in list.fields() {
-        let Some(name) = f.name_ref().map(|n| n.text().to_string()) else { continue };
-        let Some(i) = fields.iter().position(|d| d.name(cx.db).as_str() == name) else { continue };
-        out[i] = match f.pat() {
-            Some(sub) => FieldPat { pat: Some(sub), bind: None },
-            None => FieldPat { pat: None, bind: Some(name) },
+        // `S { x }` has no name reference: the binder pattern names the field.
+        let name = match f.name_ref() {
+            Some(n) => n.text().to_string(),
+            None => match f.pat() {
+                Some(ast::Pat::IdentPat(ip)) => ident_name(&ip),
+                _ => continue,
+            },
         };
+        let Some(i) = fields.iter().position(|d| d.name(cx.db).as_str() == name) else { continue };
+        out[i] = FieldPat { pat: f.pat() };
     }
     out
 }
@@ -970,20 +982,20 @@ fn record_pat(cx: &mut Cx, p: &ast::Pat, rp: &ast::RecordPat, value: Expr, mode:
             let mut conds = Vec::new();
             let Some(list) = rp.record_pat_field_list() else { return conds };
             for f in list.fields() {
-                let name = f.name_ref().map(|n| n.text().to_string()).unwrap_or_default();
+                // `S { x }` has no name reference: the binder pattern names the field.
+                let name = match f.name_ref() {
+                    Some(n) => n.text().to_string(),
+                    None => match f.pat() {
+                        Some(ast::Pat::IdentPat(ip)) => ident_name(&ip),
+                        _ => continue,
+                    },
+                };
                 let Some(i) = decl.iter().position(|d| d.name(cx.db).as_str() == name) else { continue };
                 let Some(jname) = names.get(i) else { continue };
-                let ty = field_ty(cx, &f).unwrap_or_else(|| cx.convert(&decl[i].ty(cx.db)));
+                let Some(sub) = f.pat() else { continue };
+                let _ = field_ty(cx, &f).unwrap_or_else(|| cx.convert(&decl[i].ty(cx.db)));
                 let field = struct_field(&value, &owner, jname, mode);
-                match f.pat() {
-                    Some(sub) => conds.extend(lower_pat(cx, &sub, field, mode, out)),
-                    // `S { x }` binds the field to `x`.
-                    None if mode != Mode::Test => {
-                        let java = cx.declare(&name);
-                        out.binds.push(Bind { line: cx.line(f.syntax()), rust: name, java, value: field, ty, extracted: true });
-                    }
-                    None => {}
-                }
+                conds.extend(lower_pat(cx, &sub, field, mode, out));
             }
             conds
         }
@@ -1029,28 +1041,16 @@ fn variant_pat(cx: &mut Cx, p: &ast::Pat, v: ra_ap_hir::EnumVariant, pats: &[Fie
     let mut conds = vec![Expr::InstanceOf(Box::new(value.clone()), ctor.clone())];
     for (i, fp) in pats.iter().enumerate() {
         let Some(name) = names.get(i) else { continue };
+        let _ = &decl;
         let ty = match &fp.pat {
             Some(sub) => cx.pat_ty(sub),
-            None => decl.get(i).map(|f| cx.convert(&f.ty(cx.db))).unwrap_or(Ty::Other("?".into())),
+            None => Ty::Other("?".into()),
         };
+        let Some(sub) = &fp.pat else { continue };
         let raw = Expr::call(Expr::Cast(ctor.clone(), Box::new(value.clone())), name.clone(), vec![]);
-        if let Some(sub) = &fp.pat {
-            // The accessor runs on a raw record, so restore the component type for nested tests.
-            let v = Expr::Cast(ty.boxed(), Box::new(raw));
-            conds.extend(lower_pat(cx, sub, v, mode, out));
-        } else if let Some(bind) = &fp.bind
-            && mode != Mode::Test
-        {
-            let java = cx.declare(bind);
-            out.binds.push(Bind {
-                line: cx.line(p.syntax()),
-                rust: bind.clone(),
-                java,
-                value: Expr::Cast(ty.boxed(), Box::new(raw)),
-                ty,
-                extracted: true,
-            });
-        }
+        // The accessor runs on a raw record, so restore the component type for nested tests.
+        let v = Expr::Cast(ty.boxed(), Box::new(raw));
+        conds.extend(lower_pat(cx, sub, v, mode, out));
     }
     conds
 }
@@ -1258,6 +1258,12 @@ fn is_struct(cx: &Cx, path: &ast::Path) -> bool {
 // --- `?` ------------------------------------------------------------------------------------
 
 pub fn lower_try(cx: &mut Cx, t: &ast::TryExpr, out: &mut Vec<Stmt>) -> Expr {
+    // `write!(f, ...)?` writes into the StringBuilder; there is no Result at runtime.
+    if cx.in_display
+        && let Some(inner) = t.expr()
+    {
+        return expr::lower_expr(cx, &inner, out);
+    }
     let line = cx.line(t.syntax());
     let Some(inner) = t.expr() else {
         return cx.unsupported(t.syntax(), "`?` without an operand");

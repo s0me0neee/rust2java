@@ -19,6 +19,13 @@ pub fn lower_expr(cx: &mut Cx, e: &ast::Expr, out: &mut Vec<Stmt>) -> Expr {
         ast::Expr::BinExpr(b) => lower_bin(cx, b, out),
         ast::Expr::PrefixExpr(p) => lower_prefix(cx, p, out),
         ast::Expr::RefExpr(r) => match r.expr() {
+            // `&mut cell` passes the array itself so the callee can write through it.
+            Some(inner) if r.mut_token().is_some() && cx.cell_path(&inner).is_some() => {
+                Expr::name(cx.cell_path(&inner).unwrap())
+            }
+            Some(inner) if r.mut_token().is_some() && super::is_cell_value_ty(&cx.ty(&inner)) => {
+                cx.unsupported(r.syntax(), "`&mut` to a field/element of immutable Java type")
+            }
             Some(inner) => lower_expr(cx, &inner, out),
             None => Expr::raw("null"),
         },
@@ -155,7 +162,13 @@ fn lower_simple_if(cx: &mut Cx, i: &ast::IfExpr, out: &mut Vec<Stmt>) -> Expr {
         ast::ElseBranch::Block(b) => lower_expr(cx, &simple_block_tail(&b).unwrap(), out),
         ast::ElseBranch::IfExpr(ei) => lower_simple_if(cx, &ei, out),
     };
-    Expr::Ternary(Box::new(c), Box::new(a), Box::new(b))
+    // javac types a bare `Optional.empty()` branch as Optional<Object>; give it a witness.
+    let ty = cx.ty(&ast::Expr::IfExpr(i.clone()));
+    let witness = |e: Expr| match (&e, ty.strip_refs()) {
+        (Expr::Raw(s), Ty::Option(t)) if s == "Optional.empty()" => Expr::raw(format!("Optional.<{}>empty()", t.boxed())),
+        _ => e,
+    };
+    Expr::Ternary(Box::new(c), Box::new(witness(a)), Box::new(witness(b)))
 }
 
 fn lower_literal(cx: &mut Cx, l: &ast::Literal, e: &ast::Expr) -> Expr {
@@ -231,15 +244,18 @@ pub fn lower_path_expr(cx: &mut Cx, p: &ast::PathExpr) -> Expr {
     let Some(path) = p.path() else { return Expr::raw("null") };
     let text = path.syntax().text().to_string();
     if text == "self" {
-        return Expr::raw("this");
+        return Expr::raw(cx.self_name.clone());
     }
     match cx.sema.resolve_path(&path) {
         Some(PathResolution::Local(local)) => {
-            let name = local.name(cx.db).as_str().to_string();
-            Expr::name(cx.lookup(&name))
+            if let Some((list, idx)) = cx.elem_aliases.get(&local) {
+                return Expr::call(Expr::name(list.clone()), "get", vec![Expr::name(idx.clone())]);
+            }
+            let name = cx.lookup(local.name(cx.db).as_str());
+            if cx.cells.contains(&local) { Expr::raw(format!("{name}[0]")) } else { Expr::name(name) }
         }
         Some(PathResolution::Def(def)) => items::lower_def_path(cx, &path, def),
-        Some(PathResolution::SelfType(_)) => Expr::raw(cx.class_name.clone()),
+        Some(PathResolution::SelfType(_)) => Expr::raw(cx.self_ty_java.clone()),
         _ => cx.unsupported(p.syntax(), &format!("path `{text}`")),
     }
 }
@@ -382,6 +398,22 @@ pub fn place_assign(cx: &mut Cx, lhs: &ast::Expr, sym: &'static str, r: Expr, ou
             };
             Expr::call(b, setter, vec![i, value])
         }
+        ast::Expr::PrefixExpr(p)
+            if p.op_kind() == Some(ast::UnaryOp::Deref)
+                && let Some(local) = p.expr().and_then(|i| cx.local_of_path(&i))
+                && let Some((list, idx)) = cx.elem_aliases.get(&local).cloned() =>
+        {
+            // `*x op= r` where `x` aliases `list[idx]`.
+            let (list, idx) = (Expr::name(list), Expr::name(idx));
+            let value = if sym == "=" {
+                r
+            } else {
+                let elem_ty = cx.ty(lhs);
+                let cur = Expr::call(list.clone(), "get", vec![idx.clone()]);
+                narrow_if_needed(Expr::bin(cur, static_op(sym.trim_end_matches('=')), r), &elem_ty)
+            };
+            Expr::call(list, "set", vec![idx, value])
+        }
         ast::Expr::PrefixExpr(p) if p.op_kind() == Some(ast::UnaryOp::Deref) => {
             let inner = p.expr().unwrap();
             let place = lower_expr(cx, &inner, out);
@@ -429,7 +461,18 @@ fn lower_prefix(cx: &mut Cx, p: &ast::PrefixExpr, out: &mut Vec<Stmt>) -> Expr {
                 Expr::Unary("~", Box::new(v))
             }
         }
-        Some(ast::UnaryOp::Deref) => super::calls::deref_place(cx, &inner, v),
+        Some(ast::UnaryOp::Deref) => {
+            // Cells (`n[0]`) and iter_mut aliases (`v.get(i)`) were resolved when lowering `inner`.
+            let resolved = cx.cell_path(&inner).is_some()
+                || cx.local_of_path(&inner).is_some_and(|l| cx.elem_aliases.contains_key(&l));
+            if let Ty::Ref { mutable: true, inner: t } = &ty
+                && (t.is_primitive() || t.is_str())
+                && !resolved
+            {
+                return cx.unsupported(p.syntax(), "deref of a `&mut` primitive/String (cell)");
+            }
+            super::calls::deref_place(cx, &inner, v)
+        }
         None => cx.unsupported(p.syntax(), "prefix operator"),
     }
 }
@@ -446,7 +489,8 @@ fn lower_field(cx: &mut Cx, f: &ast::FieldExpr, out: &mut Vec<Stmt>) -> Expr {
         return Expr::Field(Box::new(b), format!("_{i}"));
     }
     let name = f.name_ref().map(|n| n.text().to_string()).unwrap_or_default();
-    Expr::Field(Box::new(b), super::escape_keyword(&name))
+    let name = if !name.is_empty() && name.chars().all(|c| c.is_ascii_digit()) { format!("_{name}") } else { super::escape_keyword(&name) };
+    Expr::Field(Box::new(b), name)
 }
 
 pub fn tuple_field(b: Expr, i: usize, arity: usize) -> Expr {
@@ -497,19 +541,34 @@ fn lower_cast(cx: &mut Cx, c: &ast::CastExpr, out: &mut Vec<Stmt>) -> Expr {
     }
     match (&from, &to) {
         (Ty::Bool, Ty::Int(_)) => Expr::Ternary(Box::new(v), Box::new(Expr::raw("1")), Box::new(Expr::raw("0"))),
-        (Ty::Adt { .. }, Ty::Int(_)) => Expr::call(v, "ordinal", vec![]),
+        // Plain enums carry their Rust discriminant in a `value` field.
+        (Ty::Adt { .. }, Ty::Int(_)) => Expr::Field(Box::new(v), "value".into()),
         // Widening int->long/double is implicit in Java but explicit casts read closer to Rust.
         _ => Expr::Cast(to.java(), Box::new(v)),
     }
 }
 
 pub fn lower_closure(cx: &mut Cx, c: &ast::ClosureExpr) -> Expr {
+    cx.lambda_depth += 1;
+    let e = lower_closure_inner(cx, c);
+    cx.lambda_depth -= 1;
+    e
+}
+
+fn strip_ref_pats(p: ast::Pat) -> ast::Pat {
+    match &p {
+        ast::Pat::RefPat(r) => r.pat().map(strip_ref_pats).unwrap_or(p),
+        _ => p,
+    }
+}
+
+fn lower_closure_inner(cx: &mut Cx, c: &ast::ClosureExpr) -> Expr {
     cx.push_scope();
     let mut params = Vec::new();
     let mut prelude = Vec::new();
     if let Some(pl) = c.param_list() {
         for p in pl.params() {
-            match p.pat() {
+            match p.pat().map(strip_ref_pats) {
                 Some(ast::Pat::IdentPat(ip)) if ip.pat().is_none() => {
                     let n = ip.name().map(|n| n.text().to_string()).unwrap_or_else(|| "_".into());
                     params.push(cx.declare(&n));
@@ -564,6 +623,12 @@ pub fn lower_closure(cx: &mut Cx, c: &ast::ClosureExpr) -> Expr {
 // Argument expressions of a call, coerced to the callee's parameter types when known.
 pub fn lower_args(cx: &mut Cx, args: impl Iterator<Item = ast::Expr>, out: &mut Vec<Stmt>) -> Vec<Expr> {
     args.map(|a| {
+        // Re-passing a `&mut` cell parameter (`bump(n)` inside `fn f(n: &mut i32)`) passes the array.
+        if matches!(cx.ty(&a), Ty::Ref { mutable: true, .. })
+            && let Some(cell) = cx.cell_path(&a)
+        {
+            return Expr::name(cell);
+        }
         let want = cx.adjusted_ty(&a);
         lower_expr_as(cx, &a, &want, out)
     })

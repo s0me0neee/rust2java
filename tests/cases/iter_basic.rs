@@ -1,0 +1,32 @@
+fn main() {
+    let v = vec![3, 1, 4, 1, 5, 9, 2, 6];
+    let doubled: Vec<i32> = v.iter().map(|x| x * 2).collect();
+    println!("{:?}", doubled);
+    let evens: Vec<i32> = v.iter().filter(|&&x| x % 2 == 0).cloned().collect();
+    println!("{:?}", evens);
+    let total: i32 = v.iter().sum();
+    let product: i64 = v.iter().map(|&x| x as i64).product();
+    let big = v.iter().filter(|x| **x > 3).count();
+    println!("{total} {product} {big}");
+    println!("{:?} {:?}", v.iter().max(), v.iter().min());
+    println!("{}", v.iter().any(|&x| x == 9));
+    println!("{}", v.iter().all(|&x| x > 0));
+    println!("{:?}", v.iter().position(|&x| x == 5));
+    println!("{:?}", v.iter().find(|&&x| x > 4));
+    let s = v.iter().fold(0, |acc, x| acc + x);
+    println!("{s}");
+    let firsts: Vec<i32> = v.iter().take(3).copied().collect();
+    let rest: Vec<i32> = v.iter().skip(5).copied().collect();
+    println!("{:?} {:?}", firsts, rest);
+    let squares: Vec<i32> = (1..=5).map(|i| i * i).collect();
+    println!("{:?}", squares);
+    let odd_sum: i32 = (0..20).step_by(3).sum();
+    println!("{odd_sum}");
+    let back: Vec<i32> = (0..5).rev().collect();
+    println!("{:?}", back);
+    let sorted = vec![1, 1, 2, 3, 4, 5, 6, 9];
+    println!("{:?}", sorted.iter().rev().take(2).collect::<Vec<_>>());
+    let last = v.iter().last();
+    let third = v.iter().nth(2);
+    println!("{:?} {:?}", last, third);
+}
