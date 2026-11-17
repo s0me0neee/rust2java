@@ -1035,7 +1035,8 @@ fn variant_pat(cx: &mut Cx, p: &ast::Pat, v: ra_ap_hir::EnumVariant, pats: &[Fie
         };
         let raw = Expr::call(Expr::Cast(ctor.clone(), Box::new(value.clone())), name.clone(), vec![]);
         if let Some(sub) = &fp.pat {
-            let v = if mode == Mode::Test { raw } else { Expr::Cast(ty.boxed(), Box::new(raw)) };
+            // The accessor runs on a raw record, so restore the component type for nested tests.
+            let v = Expr::Cast(ty.boxed(), Box::new(raw));
             conds.extend(lower_pat(cx, sub, v, mode, out));
         } else if let Some(bind) = &fp.bind
             && mode != Mode::Test
