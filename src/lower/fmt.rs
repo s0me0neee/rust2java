@@ -39,18 +39,21 @@ enum Piece {
     Arg { pos: ArgRef, spec: String },
 }
 
+#[derive(Clone)]
 enum ArgRef {
     Next,
     Index(usize),
     Name(String),
 }
 
+#[derive(Clone)]
 enum Count {
     Fixed(String),
     Argument(ArgRef),
     Star,
 }
 
+#[derive(Clone)]
 struct Spec {
     fill: char,
     align: Option<char>,
@@ -203,9 +206,17 @@ fn lower_format_impl(cx: &mut Cx, fa: &ast::FormatArgsExpr, out: &mut Vec<Stmt>,
             pieces.pop();
         }
     }
-    // Positional and named arguments, lowered once each in source order.
-    let mut positional: Vec<(Expr, Ty)> = Vec::new();
-    let mut named: Vec<(String, Expr, Ty)> = Vec::new();
+    let mut specs = Vec::new();
+    for p in &pieces {
+        if let Piece::Arg { spec, .. } = p {
+            let Some(parsed) = parse_spec(spec) else {
+                return cx.unsupported(fa.syntax(), &format!("format spec `{{:{spec}}}`"));
+            };
+            specs.push(parsed);
+        }
+    }
+    // Arguments in source order; each keeps the statements its own lowering hoisted.
+    let mut args: Vec<(Option<String>, Expr, Ty, Vec<Stmt>)> = Vec::new();
     for a in fa.args() {
         let Some(e) = a.expr() else { continue };
         let ty = if matches!(&e, ast::Expr::MacroExpr(m) if m.macro_call().is_some_and(|mc| matches!(super::macros::macro_name(&mc).as_str(), "format_args" | "format_args_nl"))) {
@@ -213,38 +224,267 @@ fn lower_format_impl(cx: &mut Cx, fa: &ast::FormatArgsExpr, out: &mut Vec<Stmt>,
         } else {
             cx.ty(&e)
         };
-        let v = expr::lower_expr(cx, &e, out);
-        let tmp = cx.fresh("fmt_arg");
-        out.push(Stmt::new(cx.line(fa.syntax()), StmtKind::Local {
-            ty: if matches!(ty.strip_refs(), Ty::Unit) { "Void".into() } else { super::stmt::decl_type(&ty) },
-            name: tmp.clone(), init: Some(v),
-        }));
-        let v = Expr::name(tmp);
-        match a.name() {
-            Some(n) => named.push((n.text().to_string(), v, ty)),
+        let mut pre = Vec::new();
+        let v = expr::lower_expr(cx, &e, &mut pre);
+        args.push((a.name().map(|n| n.text().to_string()), v, ty, pre));
+    }
+    let temps = args_needing_temps(&pieces, &specs, &args);
+    let mut positional: Vec<(Expr, Ty)> = Vec::new();
+    let mut named: Vec<(String, Expr, Ty)> = Vec::new();
+    for ((name, v, ty, pre), temp) in args.into_iter().zip(temps) {
+        out.extend(pre);
+        let v = if temp {
+            let tmp = cx.fresh("fmt_arg");
+            out.push(Stmt::new(cx.line(fa.syntax()), StmtKind::Local {
+                ty: if matches!(ty.strip_refs(), Ty::Unit) { "Void".into() } else { super::stmt::decl_type(&ty) },
+                name: tmp.clone(), init: Some(v),
+            }));
+            Expr::name(tmp)
+        } else {
+            v
+        };
+        match name {
+            Some(n) => named.push((n, v, ty)),
             None => positional.push((v, ty)),
         }
     }
+    if let Some(e) = lower_printf(cx, fa.syntax(), &pieces, &specs, &positional, &named, out) {
+        return e;
+    }
     let mut next = 0;
-    let mut parts: Vec<Expr> = Vec::new();
+    let mut parts: Vec<(Expr, bool)> = Vec::new();
+    let mut specs = specs.into_iter();
     for p in pieces {
         match p {
-            Piece::Lit(s) => parts.push(Expr::str_lit(&s)),
-            Piece::Arg { pos, spec } => {
-                let Some(parsed) = parse_spec(&spec) else {
-                    return cx.unsupported(fa.syntax(), &format!("format spec `{{:{spec}}}`"));
-                };
+            Piece::Lit(s) => parts.push((Expr::str_lit(&s), true)),
+            Piece::Arg { pos, .. } => {
+                let parsed = specs.next().expect("spec parsed above");
                 let precision = parsed.precision.as_ref().map(|c| count_expr(cx, fa.syntax(), c, &positional, &named, &mut next));
                 let width = parsed.width.as_ref().map(|c| count_expr(cx, fa.syntax(), c, &positional, &named, &mut next));
                 let (v, ty) = resolve_arg(cx, fa.syntax(), &pos, &positional, &named, &mut next);
                 let precision = precision.map(|p| hoist_count(cx, fa.syntax(), p, out));
                 let width = width.map(|w| hoist_count(cx, fa.syntax(), w, out));
+                let is_string = !plain_display(&parsed, &ty, &v);
                 let counts = Counts { width, precision };
-                parts.push(format_one(cx, fa.syntax(), v, &ty, &parsed, &counts, out));
+                let text = if is_string || parsed.kind != "?" { format_one(cx, fa.syntax(), v, &ty, &parsed, &counts, out) } else { v };
+                parts.push((text, is_string));
             }
         }
     }
-    concat(parts)
+    concat_typed(parts)
+}
+
+fn has_flags(spec: &Spec) -> bool {
+    spec.width.is_some() || spec.precision.is_some() || spec.plus || spec.zero || spec.alternate
+        || !matches!(spec.kind.as_str(), "" | "?")
+}
+
+// Java conversion for one flagged piece when `String.format` reproduces Rust exactly, as format
+// segments (literal text or a dynamic count) and whether the argument is the value itself
+// (`%d`/`%x`/`%f`) rather than its Rust text (`%s`).
+fn printf_conv(spec: &Spec, ty: &Ty, width: Option<Expr>, precision: Option<Expr>) -> Option<(Vec<Expr>, bool)> {
+    if spec.fill != ' ' || spec.align == Some('^') {
+        return None;
+    }
+    let t = ty.strip_refs();
+    let has_prec = precision.is_some();
+    // Debug of str/char ignores width, like Rust's.
+    if spec.kind == "?" && matches!(t, Ty::Str | Ty::Char) && !has_prec && !spec.plus && !spec.zero {
+        return Some((vec![Expr::str_lit("%s")], false));
+    }
+    let numeric = matches!(t, Ty::Int(_) | Ty::F32 | Ty::F64);
+    let text_ok = !spec.plus && !spec.zero;
+    let (conv, value) = match (spec.kind.as_str(), t) {
+        ("" | "?", Ty::Int(_)) if !has_prec => ("d", true),
+        ("x", Ty::Int(_)) if !spec.plus => ("x", true),
+        ("X" | "o", Ty::Int(_)) if !spec.plus && !spec.alternate => (if spec.kind == "X" { "X" } else { "o" }, true),
+        ("X" | "o" | "b", Ty::Int(_)) if text_ok => ("s", false),
+        ("" | "?", Ty::F32 | Ty::F64) if has_prec => ("f", true),
+        ("" | "?", Ty::F32 | Ty::F64) if text_ok => ("s", false),
+        // Rust pads non-numerics with spaces even under `0`.
+        ("", Ty::Str) if !spec.plus => ("s", false),
+        ("", Ty::Char) | ("" | "?", Ty::Bool) if !has_prec && !spec.plus => ("s", false),
+        _ => return None,
+    };
+    let mut flags = String::from("%");
+    let zero = spec.zero && value;
+    if width.is_some() && !zero && (spec.align == Some('<') || (spec.align.is_none() && !numeric)) {
+        flags.push('-');
+    }
+    if spec.plus { flags.push('+'); }
+    if spec.alternate && value { flags.push('#'); }
+    if zero { flags.push('0'); }
+    let mut segs = vec![Expr::str_lit(&flags)];
+    segs.extend(width);
+    if let Some(p) = precision {
+        segs.push(Expr::str_lit("."));
+        segs.push(p);
+    }
+    segs.push(Expr::str_lit(conv));
+    Some((segs, value))
+}
+
+// Templates with width/precision/sign/radix flags become one `String.format` when every piece
+// maps onto a Java conversion; returns None (nothing emitted) otherwise.
+fn lower_printf(
+    cx: &mut Cx, node: &SyntaxNode, pieces: &[Piece], specs: &[Spec], positional: &[(Expr, Ty)],
+    named: &[(String, Expr, Ty)], out: &mut Vec<Stmt>,
+) -> Option<Expr> {
+    if !specs.iter().any(has_flags) {
+        return None;
+    }
+    let mut next = 0;
+    let mut resolved = Vec::new();
+    let mut spec_iter = specs.iter();
+    for p in pieces {
+        let Piece::Arg { pos, .. } = p else { continue };
+        let spec = spec_iter.next()?;
+        let precision = spec.precision.as_ref().map(|c| count_expr(cx, node, c, positional, named, &mut next));
+        let width = spec.width.as_ref().map(|c| count_expr(cx, node, c, positional, named, &mut next));
+        let (v, ty) = resolve_arg(cx, node, pos, positional, named, &mut next);
+        if matches!(ty.strip_refs(), Ty::Other(_)) || (spec.kind == "?" && !debug_supported(&ty)) {
+            return None;
+        }
+        let conv = if has_flags(spec) {
+            printf_conv(spec, &ty, width, precision)?
+        } else {
+            let int = matches!(ty.strip_refs(), Ty::Int(_));
+            (vec![Expr::str_lit(if int { "%d" } else { "%s" })], int)
+        };
+        resolved.push((spec, v, ty, conv));
+    }
+    // Format text: adjacent literals merge; dynamic counts splice in with `+`.
+    let mut format: Vec<Expr> = Vec::new();
+    let mut text = String::new();
+    let mut args = Vec::new();
+    let mut float = false;
+    let mut resolved = resolved.into_iter();
+    for p in pieces {
+        match p {
+            Piece::Lit(s) => {
+                let quoted = crate::emit::render_expr(&Expr::str_lit(&s.replace('%', "%%")));
+                text.push_str(&quoted[1..quoted.len() - 1]);
+            }
+            Piece::Arg { .. } => {
+                let (spec, v, ty, (segs, value)) = resolved.next()?;
+                for seg in segs {
+                    match seg {
+                        Expr::Raw(r) if r.starts_with('"') => text.push_str(&r[1..r.len() - 1]),
+                        Expr::Raw(r) if r.chars().all(|c| c.is_ascii_digit()) => text.push_str(&r),
+                        e => {
+                            format.push(Expr::raw(format!("\"{text}\"")));
+                            text.clear();
+                            format.push(e);
+                        }
+                    }
+                }
+                float |= value && text.ends_with('f');
+                let arg = if plain_display(spec, &ty, &v) {
+                    v
+                } else if !value {
+                    let plain = Spec { width: None, precision: None, plus: false, zero: false, ..spec.clone() };
+                    format_one(cx, node, v, &ty, &plain, &Counts { width: None, precision: None }, out)
+                } else if let Ty::Int(i) = ty.strip_refs()
+                    && matches!(spec.kind.as_str(), "x" | "X" | "o")
+                    && matches!(i, crate::ty::Int::I8 | crate::ty::Int::I16 | crate::ty::Int::U16)
+                {
+                    let mask = if *i == crate::ty::Int::I8 { "255" } else { "65535" };
+                    Expr::bin(v, "&", Expr::raw(mask))
+                } else {
+                    v
+                };
+                args.push(arg);
+            }
+        }
+    }
+    format.push(Expr::raw(format!("\"{text}\"")));
+    let format = format.into_iter().filter(|e| !is_empty_string(e)).reduce(|a, b| Expr::bin(a, "+", b))?;
+    let mut call_args = Vec::new();
+    if float {
+        call_args.push(Expr::raw("Locale.ROOT"));
+    }
+    call_args.push(format);
+    call_args.extend(args);
+    Some(Expr::call(Expr::raw("String"), "format", call_args))
+}
+
+// Pieces whose Java expression is the value itself (not a String) inside the concatenation.
+fn plain_display(spec: &Spec, ty: &Ty, v: &Expr) -> bool {
+    if spec.kind == "?" {
+        return !has_flags(spec) && debug_is_to_string(ty) && !is_target_typed(v);
+    }
+    spec.kind.is_empty() && spec.width.is_none() && spec.precision.is_none() && !spec.plus
+        && !ty.is_str() && !ty.is_float()
+}
+
+// `stream.collect(...)` infers its type from the call site, which breaks overloads like println.
+pub fn is_target_typed(e: &Expr) -> bool {
+    matches!(e, Expr::Call { name, .. } if name == "collect")
+}
+
+// Java's `toString` already prints Rust's Debug text for these (`[1, 2, 3]`, `true`).
+fn debug_is_to_string(ty: &Ty) -> bool {
+    match ty.strip_refs() {
+        Ty::Int(_) | Ty::Bool => true,
+        Ty::Vec(t) | Ty::Deque(t) => debug_is_to_string(t),
+        _ => false,
+    }
+}
+
+// Rust evaluates every argument once, in order, before formatting. An argument can be inlined
+// into the concatenation when that is indistinguishable: pure places always, other expressions
+// when used once, not duplicated by the formatter, and not overtaken by a later hoisted argument.
+fn args_needing_temps(pieces: &[Piece], specs: &[Spec], args: &[(Option<String>, Expr, Ty, Vec<Stmt>)]) -> Vec<bool> {
+    let n = args.len();
+    let positional = args.iter().filter(|a| a.0.is_none()).count();
+    let index = |r: &ArgRef, next: &mut usize| -> Option<usize> {
+        match r {
+            ArgRef::Next => { *next += 1; Some(*next - 1) }
+            ArgRef::Index(i) => Some(*i),
+            ArgRef::Name(name) => args.iter().skip(positional).position(|a| a.0.as_deref() == Some(name)).map(|i| i + positional),
+        }
+    };
+    let mut uses = vec![0usize; n];
+    let mut temp = vec![false; n];
+    let mut order = Vec::new();
+    let mut next = 0;
+    let mut specs = specs.iter();
+    for p in pieces {
+        let Piece::Arg { pos, .. } = p else { continue };
+        let spec = specs.next().expect("one spec per argument piece");
+        for c in [&spec.precision, &spec.width].into_iter().flatten() {
+            let r = match c { Count::Fixed(_) => None, Count::Argument(a) => index(a, &mut next), Count::Star => index(&ArgRef::Next, &mut next) };
+            if let Some(i) = r.filter(|&i| i < n) { temp[i] = true; }
+        }
+        let Some(i) = index(pos, &mut next).filter(|&i| i < n) else { continue };
+        uses[i] += 1;
+        order.push(i);
+        let duplicated = spec.kind == "?" && matches!(args[i].2.strip_refs(), Ty::F32 | Ty::F64 | Ty::Tuple(_));
+        if duplicated { temp[i] = true; }
+    }
+    let pure: Vec<bool> = args.iter().map(|a| is_pure(&a.1)).collect();
+    for i in 0..n {
+        if uses[i] != 1 { temp[i] = true; }
+    }
+    let inline_order: Vec<usize> = order.into_iter().filter(|&i| !pure[i] && !temp[i]).collect();
+    if inline_order.windows(2).any(|w| w[0] >= w[1]) {
+        temp.iter_mut().zip(&pure).for_each(|(t, p)| *t |= !p);
+    }
+    // Anything hoisted for a later argument runs before an inlined earlier one.
+    if let Some(barrier) = (0..n).rev().find(|&j| (temp[j] && !pure[j]) || !args[j].3.is_empty()) {
+        for i in 0..barrier { temp[i] |= !pure[i]; }
+    }
+    temp.iter().zip(&pure).map(|(t, p)| *t && !p).collect()
+}
+
+fn is_pure(e: &Expr) -> bool {
+    match e {
+        Expr::Name(_) => true,
+        Expr::Field(base, _) => is_pure(base),
+        Expr::Unary("-", inner) => is_pure(inner),
+        Expr::Raw(s) => s.starts_with('"') || s.starts_with('\'') || s.chars().all(|c| c.is_alphanumeric() || "_.[]$".contains(c)),
+        _ => false,
+    }
 }
 
 fn hoist_count(cx: &mut Cx, node: &SyntaxNode, value: Expr, out: &mut Vec<Stmt>) -> Expr {
@@ -369,8 +609,7 @@ fn format_one(
             let fmt = Expr::bin(Expr::bin(Expr::str_lit("%."), "+", p), "+", Expr::str_lit("f"));
             Expr::call(Expr::raw("String"), "format", vec![Expr::raw("Locale.ROOT"), fmt, v])
         } else if ty.is_str() {
-            let s = Expr::call(Expr::raw("String"), "valueOf", vec![v]);
-            let tmp = hoist_string(cx, node, s, out);
+            let tmp = hoist_string(cx, node, v, out);
             let len = Expr::call(tmp.clone(), "codePointCount", vec![Expr::raw("0"), Expr::call(tmp.clone(), "length", vec![])]);
             let count = Expr::call(Expr::raw("Math"), "min", vec![p, len]);
             let end = Expr::call(tmp.clone(), "offsetByCodePoints", vec![Expr::raw("0"), count]);
@@ -381,7 +620,13 @@ fn format_one(
     } else {
         display(cx, v, ty)
     };
-    text = Expr::call(Expr::raw("String"), "valueOf", vec![text]);
+    if spec.plus || width.is_some() {
+        if spec.kind.is_empty() && counts.precision.is_none() && !ty.is_str() && !ty.is_float() {
+            text = Expr::call(Expr::raw("String"), "valueOf", vec![text]);
+        }
+    } else {
+        return text;
+    }
     if spec.plus && numeric {
         let tmp = hoist_string(cx, node, text, out);
         let negative = Expr::call(tmp.clone(), "startsWith", vec![Expr::str_lit("-")]);
@@ -596,6 +841,11 @@ fn debug_float(cx: &mut Cx, v: Expr) -> Expr {
     )
 }
 
+// Debug text as the right operand of a String `+`, where Java's own toString suffices.
+fn debug_operand(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
+    if debug_is_to_string(ty) { v } else { debug(cx, v, ty) }
+}
+
 // `{:?}`: Rust Debug as a Java expression.
 pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
     match ty.strip_refs() {
@@ -607,8 +857,8 @@ pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
         Ty::Set { t, .. } => debug_sequence(cx, v, t, "{", "}"),
         Ty::Map { k, v: value, .. } => {
             let name = cx.fresh("fmt_entry");
-            let key = debug(cx, Expr::call(Expr::name(&name), "getKey", vec![]), k);
-            let val = debug(cx, Expr::call(Expr::name(&name), "getValue", vec![]), value);
+            let key = debug_operand(cx, Expr::call(Expr::name(&name), "getKey", vec![]), k);
+            let val = debug_operand(cx, Expr::call(Expr::name(&name), "getValue", vec![]), value);
             let entry = Expr::bin(Expr::bin(key, "+", Expr::str_lit(": ")), "+", val);
             let stream = Expr::call(Expr::call(v, "entrySet", vec![]), "stream", vec![]);
             let mapped = Expr::call(stream, "map", vec![lambda(name, entry)]);
@@ -617,15 +867,15 @@ pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
         }
         Ty::Option(inner) => {
             let name = cx.fresh("fmt_some");
-            let value = debug(cx, Expr::name(&name), inner);
+            let value = debug_operand(cx, Expr::name(&name), inner);
             let some = Expr::bin(Expr::bin(Expr::str_lit("Some("), "+", value), "+", Expr::str_lit(")"));
             Expr::call(Expr::call(v, "map", vec![lambda(name, some)]), "orElse", vec![Expr::str_lit("None")])
         }
         Ty::Result(ok, err) => {
             let ok_name = cx.fresh("fmt_ok");
             let err_name = cx.fresh("fmt_err");
-            let ok_value = debug(cx, Expr::name(&ok_name), ok);
-            let err_value = debug(cx, Expr::name(&err_name), err);
+            let ok_value = debug_operand(cx, Expr::name(&ok_name), ok);
+            let err_value = debug_operand(cx, Expr::name(&err_name), err);
             let wrap = |name: &str, value| Expr::bin(Expr::bin(Expr::str_lit(&format!("{name}(")), "+", value), "+", Expr::str_lit(")"));
             Expr::Switch { scrut: Box::new(v), arms: vec![
                 Arm { line: 1, label: format!("Ok<{}, {}>(var {ok_name})", ok.boxed(), err.boxed()), body: ArmBody::Expr(wrap("Ok", ok_value)) },
@@ -637,7 +887,7 @@ pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
             for (i, t) in ts.iter().enumerate() {
                 if i != 0 { parts.push(Expr::str_lit(", ")); }
                 let field = expr::tuple_field(v.clone(), i, ts.len());
-                parts.push(debug(cx, field, t));
+                parts.push(debug_operand(cx, field, t));
             }
             if ts.len() == 1 { parts.push(Expr::str_lit(",")); }
             parts.push(Expr::str_lit(")"));
@@ -650,20 +900,17 @@ pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
 
 // Joins pieces with `+`, making sure Java treats the chain as string concatenation.
 fn concat(parts: Vec<Expr>) -> Expr {
+    concat_typed(parts.into_iter().map(|p| { let s = is_string_lit(&p); (p, s) }).collect())
+}
+
+// `a + b + ...` is String concatenation once either of the first two operands is a String.
+fn concat_typed(parts: Vec<(Expr, bool)>) -> Expr {
     let mut it = parts.into_iter();
-    let Some(first) = it.next() else { return Expr::str_lit("") };
-    let rest: Vec<Expr> = it.collect();
-    let first = if rest.is_empty() || is_string_lit(&first) {
-        first
-    } else {
-        Expr::call(Expr::raw("String"), "valueOf", vec![first])
-    };
-    let mut acc = if rest.is_empty() && !is_string_lit(&first) {
-        Expr::call(Expr::raw("String"), "valueOf", vec![first])
-    } else {
-        first
-    };
-    for p in rest {
+    let Some((first, first_str)) = it.next() else { return Expr::str_lit("") };
+    let rest: Vec<(Expr, bool)> = it.collect();
+    let needs_string = !first_str && rest.first().is_none_or(|(_, s)| !s);
+    let mut acc = if needs_string { Expr::call(Expr::raw("String"), "valueOf", vec![first]) } else { first };
+    for (p, _) in rest {
         acc = Expr::bin(acc, "+", p);
     }
     acc

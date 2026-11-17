@@ -34,6 +34,11 @@ pub fn lower_macro_expr(cx: &mut Cx, m: &ast::MacroExpr, out: &mut Vec<Stmt>) ->
                     if newline && fmt::is_empty_string(&s) {
                         return Expr::call(Expr::raw(stream), method, vec![]);
                     }
+                    // print/println take any value, so a lone `String.valueOf(x)` is noise.
+                    let s = match s {
+                        Expr::Call { recv: Some(r), name, mut args } if matches!(r.as_ref(), Expr::Raw(c) if c == "String") && name == "valueOf" && args.len() == 1 && !fmt::is_target_typed(&args[0]) => args.remove(0),
+                        s => s,
+                    };
                     Expr::call(Expr::raw(stream), method, vec![s])
                 }
                 None if newline => Expr::call(Expr::raw(stream), "println", vec![]),
