@@ -174,12 +174,18 @@ fn lower_simple_if(cx: &mut Cx, i: &ast::IfExpr, out: &mut Vec<Stmt>) -> Expr {
 
 fn lower_literal(cx: &mut Cx, l: &ast::Literal, e: &ast::Expr) -> Expr {
     let ty = cx.ty(e);
+    literal_expr(cx, l, &ty)
+}
+
+// Java literal for a Rust literal of type `ty`; pattern lowering uses this for case labels too.
+pub fn literal_expr(cx: &mut Cx, l: &ast::Literal, ty: &Ty) -> Expr {
+    let node = l.syntax();
     match l.kind() {
         ast::LiteralKind::IntNumber(n) => {
             let digits = n.text().to_string();
             let (body, _) = split_suffix(&digits);
             let body = body.trim_end_matches('_').to_string();
-            match ty {
+            match *ty {
                 Ty::F32 => Expr::raw(format!("{body}.0f")),
                 Ty::F64 => Expr::raw(format!("{body}.0")),
                 Ty::Int(i) if i.is_long() => Expr::raw(format!("{body}L")),
@@ -193,7 +199,7 @@ fn lower_literal(cx: &mut Cx, l: &ast::Literal, e: &ast::Expr) -> Expr {
             if body.ends_with('.') {
                 body.push('0');
             }
-            if ty == Ty::F32 {
+            if *ty == Ty::F32 {
                 body.push('f');
             }
             Expr::raw(body)
@@ -201,19 +207,19 @@ fn lower_literal(cx: &mut Cx, l: &ast::Literal, e: &ast::Expr) -> Expr {
         ast::LiteralKind::Bool(b) => Expr::raw(if b { "true" } else { "false" }),
         ast::LiteralKind::Char(c) => match c.value() {
             Ok(ch) => Expr::raw(java_char_literal(ch)),
-            Err(_) => cx.unsupported(e.syntax(), "char literal"),
+            Err(_) => cx.unsupported(node, "char literal"),
         },
         ast::LiteralKind::Byte(b) => match b.value() {
             Ok(v) if v.is_ascii_graphic() || v == b' ' => Expr::raw(format!("(int) {}", java_char_literal(v as char))),
             Ok(v) => Expr::raw(v.to_string()),
-            Err(_) => cx.unsupported(e.syntax(), "byte literal"),
+            Err(_) => cx.unsupported(node, "byte literal"),
         },
         ast::LiteralKind::String(s) => match s.value() {
             Ok(v) => Expr::raw(java_string_literal(&v)),
-            Err(_) => cx.unsupported(e.syntax(), "string literal"),
+            Err(_) => cx.unsupported(node, "string literal"),
         },
         ast::LiteralKind::ByteString(_) | ast::LiteralKind::CString(_) => {
-            cx.unsupported(e.syntax(), "byte/C string literal")
+            cx.unsupported(node, "byte/C string literal")
         }
     }
 }

@@ -149,10 +149,3 @@ pub fn deref_place(cx: &mut Cx, inner: &ast::Expr, v: Expr) -> Expr {
     }
     v
 }
-
-pub fn fn_container_is_trait_impl(cx: &Cx, f: Function) -> bool {
-    match f.as_assoc_item(cx.db).map(|a| a.container(cx.db)) {
-        Some(AssocItemContainer::Impl(imp)) => imp.trait_(cx.db).is_some(),
-        _ => false,
-    }
-}

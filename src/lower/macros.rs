@@ -1,6 +1,6 @@
 // std macros: println!/print!/eprintln!/format!/panic!/assert!/vec!/... (translated from arguments).
 
-use ra_ap_syntax::{AstNode, ast, ast::HasArgList, ast::HasName};
+use ra_ap_syntax::{AstNode, ast, ast::HasArgList};
 
 use super::{Cx, expr, fmt};
 use crate::jir::{Block, Expr, LambdaBody, Stmt, StmtKind};
@@ -324,61 +324,10 @@ fn lower_matches(cx: &mut Cx, mc: &ast::MacroCall, out: &mut Vec<Stmt>) -> Expr 
     let Some(arm) = matched.match_arm_list().and_then(|l| l.arms().next()) else {
         return cx.unsupported(mc.syntax(), "matches! pattern");
     };
-    if arm.guard().is_some() { return cx.unsupported(mc.syntax(), "matches! guard"); }
     let Some(pattern) = arm.pat() else { return cx.unsupported(mc.syntax(), "matches! pattern") };
-    let ty = cx.ty(&value);
     let lowered = expr::lower_expr(cx, &value, out);
-    let name = cx.fresh("match_value");
-    out.push(Stmt::new(cx.line(mc.syntax()), StmtKind::Local {
-        ty: if matches!(ty.strip_refs(), Ty::Unit) { "Void".into() } else { super::stmt::decl_type(&ty) },
-        name: name.clone(), init: Some(lowered),
-    }));
-    match_pattern(cx, &pattern, Expr::name(name), &ty, out)
-}
-
-fn match_pattern(cx: &mut Cx, pat: &ast::Pat, value: Expr, ty: &Ty, out: &mut Vec<Stmt>) -> Expr {
-    match pat {
-        ast::Pat::WildcardPat(_) => Expr::raw("true"),
-        ast::Pat::LiteralPat(p) => {
-            let Some(lit) = p.literal() else { return cx.unsupported(pat.syntax(), "matches! literal") };
-            let literal = expr::lower_expr(cx, &ast::Expr::Literal(lit), out);
-            let literal = if p.minus_token().is_some() { Expr::Unary("-", Box::new(literal)) } else { literal };
-            if ty.is_primitive() { Expr::bin(value, "==", literal) } else { Expr::call(Expr::raw("Objects"), "equals", vec![value, literal]) }
-        }
-        ast::Pat::OrPat(p) => {
-            let mut parts = p.pats().map(|p| match_pattern(cx, &p, value.clone(), ty, out));
-            let first = parts.next().unwrap_or_else(|| Expr::raw("false"));
-            parts.fold(first, |a, b| Expr::bin(a, "||", b))
-        }
-        ast::Pat::PathPat(p) if p.path().is_some_and(|p| p.syntax().text() == "None") && matches!(ty.strip_refs(), Ty::Option(_)) => {
-            Expr::call(value, "isEmpty", vec![])
-        }
-        ast::Pat::IdentPat(p) if p.name().is_some_and(|n| n.text() == "None") && matches!(ty.strip_refs(), Ty::Option(_)) => {
-            Expr::call(value, "isEmpty", vec![])
-        }
-        ast::Pat::TupleStructPat(p) => {
-            let variant = p.path().map(|path| path.syntax().text().to_string()).unwrap_or_default();
-            let fields: Vec<_> = p.fields().collect();
-            if fields.len() != 1 {
-                return cx.unsupported(pat.syntax(), "matches! variant pattern");
-            }
-            match (variant.rsplit("::").next().unwrap_or(""), ty.strip_refs()) {
-                ("Some", Ty::Option(inner)) => {
-                    let present = Expr::call(value.clone(), "isPresent", vec![]);
-                    let item = Expr::call(value, "get", vec![]);
-                    let test = match_pattern(cx, &fields[0], item, inner, out);
-                    Expr::bin(present, "&&", test)
-                }
-                (variant @ ("Ok" | "Err"), Ty::Result(ok, err)) => {
-                    let test = Expr::InstanceOf(Box::new(value.clone()), format!("{variant}<?, ?>"));
-                    let cast = Expr::Cast(format!("{variant}<{}, {}>", ok.boxed(), err.boxed()), Box::new(value));
-                    let item = Expr::call(cast, if variant == "Ok" { "value" } else { "error" }, vec![]);
-                    let field_ty = if variant == "Ok" { ok } else { err };
-                    Expr::bin(test, "&&", match_pattern(cx, &fields[0], item, field_ty, out))
-                }
-                _ => cx.unsupported(pat.syntax(), "matches! variant (pattern lowering not available)"),
-            }
-        }
-        _ => cx.unsupported(pat.syntax(), "matches! pattern (pattern lowering not available)"),
+    match arm.guard() {
+        Some(g) => super::pat::guarded_pattern_test(cx, &pattern, &g, lowered, out),
+        None => super::pat::pattern_test(cx, &pattern, lowered, out),
     }
 }

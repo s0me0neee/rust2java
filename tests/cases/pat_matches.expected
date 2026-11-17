@@ -1,0 +1,12 @@
+true
+false
+true
+true
+false
+false
+true
+Circle(1.0) true false
+Rect { w: 2.0, h: 3.0 } false true
+Dot true false
+true
+1
