@@ -9,6 +9,16 @@ fn classify(n: i32) -> &'static str {
     }
 }
 
+const LIMIT: i32 = 5;
+
+fn over(n: i32) -> &'static str {
+    match n {
+        LIMIT => "at limit",
+        x if x > LIMIT => "over",
+        _ => "under",
+    }
+}
+
 fn label(n: i32) -> &'static str {
     match n {
         1 if n > 0 => "positive one",
@@ -33,6 +43,7 @@ fn main() {
         println!("{} {}", n, classify(n));
     }
     println!("{} {} {} {}", grade(95), grade(85), grade(75), grade(10));
+    println!("{} {} {}", over(5), over(9), over(1));
     for n in 0..5 {
         println!("label {} {}", n, label(n));
     }

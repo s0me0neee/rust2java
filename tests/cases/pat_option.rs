@@ -23,6 +23,17 @@ fn deepen(o: Option<Option<i32>>) -> i32 {
     }
 }
 
+fn pick(a: Option<i32>, b: Option<i32>) -> &'static str {
+    if let Some(x) = a {
+        if x > 10 { "big a" } else { "small a" }
+    } else if let Some(y) = b {
+        println!("b was {}", y);
+        "some b"
+    } else {
+        "neither"
+    }
+}
+
 fn main() {
     println!("{}", describe(Some(1)));
     println!("{}", describe(Some(42)));
@@ -33,6 +44,10 @@ fn main() {
     println!("{}", deepen(Some(Some(5))));
     println!("{}", deepen(Some(None)));
     println!("{}", deepen(None));
+    println!("{}", pick(Some(20), None));
+    println!("{}", pick(Some(2), None));
+    println!("{}", pick(None, Some(3)));
+    println!("{}", pick(None, None));
     let o = Some(9);
     if let Some(x) = o {
         println!("iflet {}", x);

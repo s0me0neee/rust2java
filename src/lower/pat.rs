@@ -290,7 +290,7 @@ pub fn lower_match_stmt(cx: &mut Cx, m: &ast::MatchExpr, dest: &Dest, out: &mut 
     if can_switch(cx, &arms, &scrut_ty) {
         lower_switch_stmt(cx, &scrut, &arms, &arm_dest, out, line);
     } else {
-        lower_chain(cx, &scrut, &arms, &arm_dest, out, line);
+        lower_chain(cx, &scrut, &arms, &arm_dest, out);
     }
 }
 
@@ -307,7 +307,6 @@ pub fn try_match_expr(cx: &mut Cx, m: &ast::MatchExpr, out: &mut Vec<Stmt>) -> O
     if arms.iter().any(|a| a.expr().is_some_and(|b| !arm_body_safe(&b))) {
         return None;
     }
-    let line = cx.line(m.syntax());
     let value = place(cx, &scrut, out);
     let mut jarms = Vec::new();
     for arm in &arms {
@@ -334,7 +333,6 @@ pub fn try_match_expr(cx: &mut Cx, m: &ast::MatchExpr, out: &mut Vec<Stmt>) -> O
         cx.pop_scope();
         jarms.push(Arm { line: aline, label, body });
     }
-    let _ = line;
     Some(Expr::Switch { scrut: Box::new(value), arms: jarms })
 }
 
@@ -411,8 +409,7 @@ fn lower_guard(cx: &mut Cx, g: &ast::MatchGuard, pre: &mut Vec<Stmt>, binds: &Pa
 }
 
 // If/else-if chain on a temporary: anything Java's switch cannot express.
-fn lower_chain(cx: &mut Cx, scrut: &ast::Expr, arms: &[ast::MatchArm], dest: &Dest, out: &mut Vec<Stmt>, line: u32) {
-    let _ = line;
+fn lower_chain(cx: &mut Cx, scrut: &ast::Expr, arms: &[ast::MatchArm], dest: &Dest, out: &mut Vec<Stmt>) {
     let end = arms
         .iter()
         .position(|a| a.guard().is_none() && a.pat().is_some_and(|p| is_total(cx, &p)))
@@ -809,7 +806,7 @@ fn lower_pat(cx: &mut Cx, p: &ast::Pat, value: Expr, mode: Mode, out: &mut PatLo
         ast::Pat::RefPat(x) => x.pat().map(|i| lower_pat(cx, &i, value, mode, out)).unwrap_or_default(),
         ast::Pat::IdentPat(ip) => {
             if let Some(def) = bind_pat_def(cx, ip) {
-                return def_pat(cx, p, def, value, mode);
+                return def_pat(cx, p, def, value);
             }
             if mode != Mode::Test {
                 let line = cx.line(p.syntax());
@@ -881,8 +878,8 @@ fn lower_pat(cx: &mut Cx, p: &ast::Pat, value: Expr, mode: Mode, out: &mut PatLo
         }
         ast::Pat::TupleStructPat(tp) => tuple_struct_pat(cx, p, tp, value, mode, out),
         ast::Pat::RecordPat(rp) => record_pat(cx, p, rp, value, mode, out),
-        ast::Pat::PathPat(pp) => path_pat(cx, p, pp, value, mode),
-        ast::Pat::SlicePat(sp) => slice_pat(cx, p, sp, value, out),
+        ast::Pat::PathPat(pp) => path_pat(cx, p, pp, value),
+        ast::Pat::SlicePat(sp) => slice_pat(cx, sp, value, out),
         _ => {
             cx.unsupported(p.syntax(), "pattern kind");
             Vec::new()
@@ -944,7 +941,7 @@ fn tuple_struct_pat(cx: &mut Cx, p: &ast::Pat, tp: &ast::TupleStructPat, value: 
             let mut conds = Vec::new();
             for (i, sub) in tp.fields().enumerate() {
                 let Some(name) = names.get(i) else { continue };
-                let v = struct_field(&value, &owner, name, &cx.pat_ty(&sub), mode);
+                let v = struct_field(&value, &owner, name, mode);
                 conds.extend(lower_pat(cx, &sub, v, mode, out));
             }
             conds
@@ -977,7 +974,7 @@ fn record_pat(cx: &mut Cx, p: &ast::Pat, rp: &ast::RecordPat, value: Expr, mode:
                 let Some(i) = decl.iter().position(|d| d.name(cx.db).as_str() == name) else { continue };
                 let Some(jname) = names.get(i) else { continue };
                 let ty = field_ty(cx, &f).unwrap_or_else(|| cx.convert(&decl[i].ty(cx.db)));
-                let field = struct_field(&value, &owner, jname, &ty, mode);
+                let field = struct_field(&value, &owner, jname, mode);
                 match f.pat() {
                     Some(sub) => conds.extend(lower_pat(cx, &sub, field, mode, out)),
                     // `S { x }` binds the field to `x`.
@@ -1070,22 +1067,21 @@ fn variant_field_names(cx: &Cx, v: ra_ap_hir::EnumVariant) -> Vec<String> {
     items::java_field_names(cx, &v.fields(cx.db))
 }
 
-fn struct_field(value: &Expr, owner: &str, name: &str, ty: &Ty, mode: Mode) -> Expr {
+fn struct_field(value: &Expr, owner: &str, name: &str, mode: Mode) -> Expr {
     if mode == Mode::Extract {
         Expr::Field(Box::new(Expr::Cast(owner.to_string(), Box::new(value.clone()))), name.to_string())
     } else {
-        let _ = ty;
         Expr::Field(Box::new(value.clone()), name.to_string())
     }
 }
 
-fn path_pat(cx: &mut Cx, p: &ast::Pat, pp: &ast::PathPat, value: Expr, mode: Mode) -> Vec<Expr> {
+fn path_pat(cx: &mut Cx, p: &ast::Pat, pp: &ast::PathPat, value: Expr) -> Vec<Expr> {
     let Some(path) = pp.path() else {
         cx.unsupported(p.syntax(), "path pattern without a path");
         return Vec::new();
     };
     match cx.sema.resolve_path(&path) {
-        Some(PathResolution::Def(def)) => def_pat(cx, p, def, value, mode),
+        Some(PathResolution::Def(def)) => def_pat(cx, p, def, value),
         _ => {
             cx.unsupported(p.syntax(), "path pattern");
             Vec::new()
@@ -1094,8 +1090,7 @@ fn path_pat(cx: &mut Cx, p: &ast::Pat, pp: &ast::PathPat, value: Expr, mode: Mod
 }
 
 // Pattern naming a const / unit variant / unit struct rather than binding a value.
-fn def_pat(cx: &mut Cx, p: &ast::Pat, def: ModuleDef, value: Expr, mode: Mode) -> Vec<Expr> {
-    let _ = mode;
+fn def_pat(cx: &mut Cx, p: &ast::Pat, def: ModuleDef, value: Expr) -> Vec<Expr> {
     let ty = cx.pat_ty(p);
     if let Ty::Option(_) = ty.strip_refs() {
         return vec![Expr::call(value, "isEmpty", vec![])];
@@ -1137,8 +1132,7 @@ fn bind_pat_def(cx: &Cx, ip: &ast::IdentPat) -> Option<ModuleDef> {
     cx.sema.resolve_bind_pat_to_const(ip)
 }
 
-fn slice_pat(cx: &mut Cx, p: &ast::Pat, sp: &ast::SlicePat, value: Expr, out: &mut PatLowering) -> Vec<Expr> {
-    let _ = p;
+fn slice_pat(cx: &mut Cx, sp: &ast::SlicePat, value: Expr, out: &mut PatLowering) -> Vec<Expr> {
     let pats: Vec<ast::Pat> = sp.pats().collect();
     let rest = pats.iter().position(|p| is_rest(p));
     let fixed = pats.iter().filter(|p| !is_rest(p)).count();
@@ -1176,7 +1170,7 @@ fn slice_pat(cx: &mut Cx, p: &ast::Pat, sp: &ast::SlicePat, value: Expr, out: &m
         let java = cx.declare(&rust);
         let ty = cx.pat_ty(&pats[r]);
         let start = Expr::raw(pats[..r].iter().filter(|p| !is_rest(p)).count().to_string());
-        let end = Expr::bin(size(), "-", Expr::raw(post.to_string()));
+        let end = if post == 0 { size() } else { Expr::bin(size(), "-", Expr::raw(post.to_string())) };
         out.binds.push(Bind {
             line,
             rust,

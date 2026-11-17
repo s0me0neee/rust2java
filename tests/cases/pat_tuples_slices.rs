@@ -28,6 +28,13 @@ fn kind(s: &[i32]) -> &'static str {
     }
 }
 
+fn split(s: &[i32]) -> (i32, i32) {
+    match s {
+        [first, rest @ ..] => (*first, rest.len() as i32),
+        [] => (0, 0),
+    }
+}
+
 fn head(s: &[i32]) -> i32 {
     match s {
         [x, ..] => *x,
@@ -55,6 +62,12 @@ fn main() {
     match nothing {
         ref v => println!("one element {}", v.len()),
     }
+    let (a, n) = split(&empty);
+    println!("split {} {}", a, n);
+    let mut only = Vec::new();
+    only.push(7);
+    let (a, n) = split(&only);
+    println!("split {} {}", a, n);
     let triple = (1, 2, 3);
     match triple {
         (x, _, z) => println!("first {} last {}", x, z),
