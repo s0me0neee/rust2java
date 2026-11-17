@@ -1,0 +1,24 @@
+true true 10
+10 0 7
+0 10
+Some(20) None
+Some(10) None
+Some(3) Some(10)
+Some(11)
+Err(0) Ok(10)
+11 0
+true true
+Some(4)
+30
+Some(1) None
+Some(2) Some(9)
+true true
+Ok(5) Err(7)
+Ok(6) Err(7) Some(5) None
+None Some(7)
+5 0
+14
+true true
+Ok(5) Err(8)
+Ok(10)
+5

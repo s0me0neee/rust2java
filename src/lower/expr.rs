@@ -352,6 +352,10 @@ fn narrow_if_needed(v: Expr, ty: &Ty) -> Expr {
 }
 
 fn lower_assign(cx: &mut Cx, lhs: &ast::Expr, rhs: &ast::Expr, op: Option<ast::ArithOp>, out: &mut Vec<Stmt>) -> Expr {
+    // `*m.entry(k).or_insert(v) += x` is a map update, not an assignment to a value.
+    if let Some(e) = std_map::lower_entry_assign(cx, lhs, op, rhs, out) {
+        return e;
+    }
     let lt = cx.ty(lhs);
     let r = lower_expr_as(cx, rhs, &lt, out);
     let sym: &'static str = match op {
