@@ -1,0 +1,60 @@
+// std macros: println!/print!/eprintln!/format!/panic!/assert!/vec!/... (translated from arguments).
+
+use ra_ap_syntax::{AstNode, ast};
+
+use super::{Cx, fmt};
+use crate::jir::{Expr, Stmt};
+
+pub fn macro_name(mc: &ast::MacroCall) -> String {
+    mc.path()
+        .and_then(|p| p.segment())
+        .and_then(|s| s.name_ref())
+        .map(|n| n.text().to_string())
+        .unwrap_or_default()
+}
+
+pub fn is_diverging(m: &ast::MacroExpr) -> bool {
+    m.macro_call()
+        .is_some_and(|mc| matches!(macro_name(&mc).as_str(), "panic" | "unreachable" | "todo" | "unimplemented"))
+}
+
+pub fn lower_macro_expr(cx: &mut Cx, m: &ast::MacroExpr, out: &mut Vec<Stmt>) -> Expr {
+    let Some(mc) = m.macro_call() else { return cx.unsupported(m.syntax(), "macro") };
+    let name = macro_name(&mc);
+    match name.as_str() {
+        "println" | "print" | "eprintln" | "eprint" => {
+            let stream = if name.starts_with('e') { "System.err" } else { "System.out" };
+            let newline = name.ends_with("ln");
+            match fmt::format_args_of(cx, &mc) {
+                Some(fa) => {
+                    let s = if newline { fmt::lower_format_ln(cx, &fa, out) } else { fmt::lower_format(cx, &fa, out) };
+                    let method = if newline { "println" } else { "print" };
+                    if newline && fmt::is_empty_string(&s) {
+                        return Expr::call(Expr::raw(stream), method, vec![]);
+                    }
+                    Expr::call(Expr::raw(stream), method, vec![s])
+                }
+                None if newline => Expr::call(Expr::raw(stream), "println", vec![]),
+                None => cx.unsupported(mc.syntax(), "print! without arguments"),
+            }
+        }
+        "format" => match fmt::format_args_of(cx, &mc) {
+            Some(fa) => fmt::lower_format(cx, &fa, out),
+            None => cx.unsupported(mc.syntax(), "format! arguments"),
+        },
+        "panic" | "unreachable" | "todo" | "unimplemented" => {
+            let default = match name.as_str() {
+                "unreachable" => "internal error: entered unreachable code",
+                "todo" => "not yet implemented",
+                "unimplemented" => "not implemented",
+                _ => "explicit panic",
+            };
+            let msg = match fmt::format_args_of(cx, &mc) {
+                Some(fa) => fmt::lower_format(cx, &fa, out),
+                None => Expr::str_lit(default),
+            };
+            Expr::New { ty: "RuntimeException".into(), args: vec![msg] }
+        }
+        _ => cx.unsupported(mc.syntax(), &format!("macro `{name}!`")),
+    }
+}
