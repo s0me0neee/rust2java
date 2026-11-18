@@ -134,6 +134,9 @@ fn lower_user_macro(cx: &mut Cx, mc: &ast::MacroCall, name: &str, out: &mut Vec<
     let Some(exp) = expansion else {
         return cx.unsupported(mc.syntax(), &format!("macro `{name}!`"));
     };
+    if let Some(call) = macro_method_call(cx, mc, name, &exp.value) {
+        return call;
+    }
     if let Some(e) = ast::Expr::cast(exp.value.clone()) {
         return expr::lower_expr(cx, &e, out);
     }
@@ -614,4 +617,146 @@ fn lower_matches(cx: &mut Cx, mc: &ast::MacroCall, out: &mut Vec<Stmt>) -> Expr 
         Some(g) => super::pat::guarded_pattern_test(cx, &pattern, &g, lowered, out),
         None => super::pat::pattern_test(cx, &pattern, lowered, out),
     }
+}
+
+// `name!()` whose arm takes no input: the expansion is the same for every call, so it becomes
+// one static method written on the macro's own lines, and each call is `name()`.
+fn macro_method_call(
+    cx: &mut Cx,
+    mc: &ast::MacroCall,
+    name: &str,
+    expansion: &ra_ap_syntax::SyntaxNode,
+) -> Option<Expr> {
+    use ra_ap_hir::HasSource;
+    if significant_tokens(mc.token_tree()?.syntax()).len() != 2 {
+        return None;
+    }
+    if let Some(java) = cx.macro_methods.get(name) {
+        return Some(Expr::static_call(java.clone(), vec![]));
+    }
+    let body = ast::Expr::cast(expansion.clone())?;
+    let src = cx.sema.resolve_macro_call(mc)?.source(cx.db)?;
+    if src.file_id.file_id() != Some(cx.sema.original_range(mc.syntax()).file_id) {
+        return None;
+    }
+    let Some(ast::Macro::MacroRules(rules)) = src.value.left() else {
+        return None;
+    };
+    let lines = arm_lines(cx, &rules, expansion)?;
+    let java = method_name_for(&rules, name);
+    let ret = cx.ty(&body);
+    let saved = cx.save_nested_state();
+    cx.enter_method();
+    cx.macro_lines = Some((expansion.ancestors().last()?, lines));
+    cx.ret_ty = Some(ret.clone());
+    let line = cx.line(body.syntax());
+    let block = match &body {
+        ast::Expr::BlockExpr(b) => super::stmt::lower_block(cx, b, &super::stmt::Dest::Return),
+        other => {
+            let mut stmts = Vec::new();
+            super::stmt::lower_to_dest(cx, other, &super::stmt::Dest::Return, &mut stmts);
+            Block {
+                stmts,
+                close_line: cx.end_line(other.syntax()),
+            }
+        }
+    };
+    cx.restore_nested_state(saved);
+    let ret_java = if ret.is_unit() {
+        "void".to_string()
+    } else {
+        ret.java()
+    };
+    cx.macro_method_defs.push(crate::jir::Method {
+        line,
+        header: format!("static {ret_java} {java}()"),
+        body: Some(block),
+    });
+    cx.macro_methods.insert(name.to_string(), java.clone());
+    Some(Expr::static_call(java, vec![]))
+}
+
+fn significant_tokens(node: &ra_ap_syntax::SyntaxNode) -> Vec<ra_ap_syntax::SyntaxToken> {
+    node.descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| !t.kind().is_trivia())
+        .collect()
+}
+
+// Finds the empty-matcher arm whose body is token-for-token the expansion, and maps each
+// expansion token offset to the definition line it was written on.
+fn arm_lines(
+    cx: &Cx,
+    rules: &ast::MacroRules,
+    expansion: &ra_ap_syntax::SyntaxNode,
+) -> Option<std::collections::HashMap<u32, u32>> {
+    use ra_ap_syntax::NodeOrToken;
+    let exp = significant_tokens(expansion);
+    let trees: Vec<ast::TokenTree> = rules
+        .token_tree()?
+        .syntax()
+        .children_with_tokens()
+        .filter_map(|e| match e {
+            NodeOrToken::Node(n) => ast::TokenTree::cast(n),
+            NodeOrToken::Token(_) => None,
+        })
+        .collect();
+    // Arms alternate matcher, body.
+    for pair in trees.chunks(2) {
+        let [matcher, body] = pair else { continue };
+        if significant_tokens(matcher.syntax()).len() != 2 {
+            continue;
+        }
+        let def = significant_tokens(body.syntax());
+        if def.len() < 2 {
+            continue;
+        }
+        if let Some(map) = align(cx, &def[1..def.len() - 1], &exp) {
+            return Some(map);
+        }
+    }
+    None
+}
+
+// Token trees split `::`/`->`/`==` into single-char puncts; the expansion joins them, so each
+// expansion token consumes definition tokens until their texts spell it.
+fn align(
+    cx: &Cx,
+    def: &[ra_ap_syntax::SyntaxToken],
+    exp: &[ra_ap_syntax::SyntaxToken],
+) -> Option<std::collections::HashMap<u32, u32>> {
+    let mut map = std::collections::HashMap::new();
+    let mut i = 0;
+    for e in exp {
+        let first = def.get(i)?;
+        let mut text = String::new();
+        while text.len() < e.text().len() {
+            text.push_str(def.get(i)?.text());
+            i += 1;
+        }
+        if text != e.text() {
+            return None;
+        }
+        map.insert(
+            u32::from(e.text_range().start()),
+            cx.line_of_offset(first.text_range().start().into()),
+        );
+    }
+    (i == def.len()).then_some(map)
+}
+
+// The macro's name, unless a function in the same file already uses it.
+fn method_name_for(rules: &ast::MacroRules, name: &str) -> String {
+    use ra_ap_syntax::ast::HasName;
+    let taken = rules.syntax().ancestors().last().is_some_and(|root| {
+        root.descendants()
+            .filter_map(ast::Fn::cast)
+            .any(|f| f.name().is_some_and(|n| n.text() == name))
+    });
+    let base = if taken {
+        format!("{name}_macro")
+    } else {
+        name.to_string()
+    };
+    crate::lower::escape_keyword(&base)
 }

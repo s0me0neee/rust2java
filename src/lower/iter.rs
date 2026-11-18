@@ -84,7 +84,8 @@ fn lower_for_kind(
     out: &mut Vec<Stmt>,
 ) -> ForStmt {
     // `for i in a..b` and `(a..b).rev()` / `.step_by(k)`: counted loops.
-    if let Some(name) = simple_ident(p)
+    let wildcard = matches!(p, ast::Pat::WildcardPat(_));
+    if let Some(name) = simple_ident(p).or_else(|| wildcard.then(|| "i".to_string()))
         && let Some((r, shape)) = range_loop_shape(iterable)
     {
         let (start, end, inclusive) = range_bounds(cx, &r, out);
@@ -96,7 +97,8 @@ fn lower_for_kind(
         let jt = ty.java();
         let captured = matches!(p, ast::Pat::IdentPat(ip) if cx.binding_captured(ip));
         // Lambdas can't capture a mutating loop counter: count with a temp, rebind per iteration.
-        let counter = if captured {
+        // `for _ in` gets a Java-only counter, so it can't capture a Rust `i` from outside.
+        let counter = if captured || wildcard {
             cx.fresh(&name)
         } else {
             cx.declare(&name)

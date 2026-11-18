@@ -74,6 +74,19 @@ pub fn lower_expr(cx: &mut Cx, e: &ast::Expr, out: &mut Vec<Stmt>) -> Expr {
             {
                 return lower_expr(cx, &tail, out);
             }
+            // `{ let s = f(); g(s) }` (typical of macro expansions): the lets become plain
+            // statements before this one, the tail is the value.
+            if let ast::Expr::BlockExpr(b) = e
+                && let Some((lets, tail)) = let_block(b)
+            {
+                cx.push_scope();
+                for l in &lets {
+                    stmt::lower_let(cx, l, out);
+                }
+                let v = lower_expr(cx, &tail, out);
+                cx.pop_scope();
+                return v;
+            }
             if let ast::Expr::MatchExpr(m) = e
                 && let Some(sw) = pat::try_match_expr(cx, m, out)
             {
@@ -127,6 +140,32 @@ pub fn hoist(cx: &mut Cx, e: &ast::Expr, out: &mut Vec<Stmt>) -> Expr {
     ));
     stmt::lower_to_dest(cx, e, &Dest::Assign(tmp.clone()), out);
     Expr::name(tmp)
+}
+
+// A plain block made only of `let name = value;` statements and a tail.
+fn let_block(b: &ast::BlockExpr) -> Option<(Vec<ast::LetStmt>, ast::Expr)> {
+    if b.label().is_some()
+        || b.unsafe_token().is_some()
+        || b.async_token().is_some()
+        || b.const_token().is_some()
+    {
+        return None;
+    }
+    let list = b.stmt_list()?;
+    let lets = list
+        .statements()
+        .map(|s| match s {
+            ast::Stmt::LetStmt(l)
+                if l.let_else().is_none()
+                    && l.initializer().is_some()
+                    && matches!(l.pat(), Some(ast::Pat::IdentPat(_))) =>
+            {
+                Some(l)
+            }
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some((lets, list.tail_expr()?))
 }
 
 fn simple_block_tail(b: &ast::BlockExpr) -> Option<ast::Expr> {

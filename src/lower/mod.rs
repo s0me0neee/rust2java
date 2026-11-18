@@ -71,6 +71,25 @@ pub struct Cx<'a, 'db> {
     pub elem_aliases: HashMap<ra_ap_hir::Local<'db>, (String, String, ElemAliasKind)>,
     // Local ADTs implementing Iterator/Deref, recorded for their use sites.
     pub local_traits: HashMap<String, traits::TraitImpls>,
+    // macro_rules! arms lowered as static methods: macro name -> Java method name.
+    pub macro_methods: HashMap<String, String>,
+    // Those methods, placed among the class members by line when the file is done.
+    pub macro_method_defs: Vec<crate::jir::Method>,
+    // While lowering such a method: expansion tree root and expansion offset -> definition line.
+    pub macro_lines: Option<(SyntaxNode, HashMap<u32, u32>)>,
+}
+
+// Per-method state saved around lowering a nested method (a macro method generated mid-body).
+pub struct NestedState<'db> {
+    method: MethodState,
+    tmp_counter: u32,
+    cells: HashSet<ra_ap_hir::Local<'db>>,
+    cell_handles: HashSet<ra_ap_hir::Local<'db>>,
+    pulled_iters: HashMap<ra_ap_hir::Local<'db>, String>,
+    elem_aliases: HashMap<ra_ap_hir::Local<'db>, (String, String, ElemAliasKind)>,
+    lambda_depth: u32,
+    in_display: bool,
+    macro_lines: Option<(SyntaxNode, HashMap<u32, u32>)>,
 }
 
 #[derive(Clone, Copy)]
@@ -144,6 +163,9 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         pulled_iters: HashMap::new(),
         elem_aliases: HashMap::new(),
         local_traits: HashMap::new(),
+        macro_methods: HashMap::new(),
+        macro_method_defs: Vec::new(),
+        macro_lines: None,
     };
     let comments = collect_comments(&cx, file.syntax());
     let last_line = text.trim_end().lines().count().max(1) as u32;
@@ -191,6 +213,9 @@ impl<'a, 'db> Cx<'a, 'db> {
     // 1-based line where `node` starts, ignoring leading comments/attributes-trivia
     // (macro-expanded nodes map to their call site).
     pub fn line(&self, node: &SyntaxNode) -> u32 {
+        if let Some(l) = self.macro_line(node, false) {
+            return l;
+        }
         let first = node
             .descendants_with_tokens()
             .filter_map(|e| e.into_token())
@@ -203,7 +228,26 @@ impl<'a, 'db> Cx<'a, 'db> {
         self.line_of_offset(start)
     }
 
+    // Inside a macro method: the line in the macro definition the node (or the macro call
+    // containing it) came from.
+    fn macro_line(&self, node: &SyntaxNode, last: bool) -> Option<u32> {
+        let (root, map) = self.macro_lines.as_ref()?;
+        let anc = self
+            .sema
+            .ancestors_with_macros(node.clone())
+            .find(|a| a.ancestors().last().as_ref() == Some(root))?;
+        let mut tokens = anc
+            .descendants_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| !t.kind().is_trivia());
+        let t = if last { tokens.last() } else { tokens.next() }?;
+        map.get(&u32::from(t.text_range().start())).copied()
+    }
+
     pub fn end_line(&self, node: &SyntaxNode) -> u32 {
+        if let Some(l) = self.macro_line(node, true) {
+            return l;
+        }
         let range = self.sema.original_range(node).range;
         self.line_of_offset(u32::from(range.end()).saturating_sub(1))
     }
@@ -429,6 +473,33 @@ impl<'a, 'db> Cx<'a, 'db> {
             loops: std::mem::take(&mut self.loops),
             switch_depth: std::mem::replace(&mut self.switch_depth, 0),
         }
+    }
+
+    pub fn save_nested_state(&mut self) -> NestedState<'db> {
+        let method = self.save_method_state();
+        NestedState {
+            method,
+            tmp_counter: self.tmp_counter,
+            cells: std::mem::take(&mut self.cells),
+            cell_handles: std::mem::take(&mut self.cell_handles),
+            pulled_iters: std::mem::take(&mut self.pulled_iters),
+            elem_aliases: std::mem::take(&mut self.elem_aliases),
+            lambda_depth: std::mem::replace(&mut self.lambda_depth, 0),
+            in_display: std::mem::replace(&mut self.in_display, false),
+            macro_lines: self.macro_lines.take(),
+        }
+    }
+
+    pub fn restore_nested_state(&mut self, saved: NestedState<'db>) {
+        self.restore_method_state(saved.method);
+        self.tmp_counter = saved.tmp_counter;
+        self.cells = saved.cells;
+        self.cell_handles = saved.cell_handles;
+        self.pulled_iters = saved.pulled_iters;
+        self.elem_aliases = saved.elem_aliases;
+        self.lambda_depth = saved.lambda_depth;
+        self.in_display = saved.in_display;
+        self.macro_lines = saved.macro_lines;
     }
 
     pub fn restore_method_state(&mut self, saved: MethodState) {

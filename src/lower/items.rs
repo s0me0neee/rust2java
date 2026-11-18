@@ -39,6 +39,14 @@ pub fn lower_source_file(cx: &mut Cx, file: &ast::SourceFile, is_root: bool) -> 
     traits::collect(cx, &items);
     let mut members = Vec::new();
     lower_items(cx, &items, &mut members);
+    // Macro methods sit where their `macro_rules!` was written.
+    for m in std::mem::take(&mut cx.macro_method_defs) {
+        let at = members
+            .iter()
+            .position(|x| member_line(x) > m.line)
+            .unwrap_or(members.len());
+        members.insert(at, Member::Method(m));
+    }
     if is_root {
         let entry = entry_point(cx, file);
         cx.file_trailer.push(entry);
@@ -1976,6 +1984,14 @@ fn bound_java(cx: &mut Cx, b: &ast::TypeBound, param: &str) -> Option<String> {
     match name.as_str() {
         "Ord" | "PartialOrd" => Some(format!("Comparable<{param}>")),
         _ => None,
+    }
+}
+
+fn member_line(m: &Member) -> u32 {
+    match m {
+        Member::Field { line, .. } | Member::Raw { line, .. } => *line,
+        Member::Method(m) => m.line,
+        Member::Class(c) => c.line,
     }
 }
 
