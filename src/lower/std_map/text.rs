@@ -595,7 +595,15 @@ fn str_get_range(
 
 // `s.parse::<T>().unwrap()` / `T::from_str_radix(..).unwrap()`: a Java parser that throws exactly
 // where Rust's parse fails, so the panic (exit 101) survives without building the Result.
-pub(super) fn direct_parse(cx: &Cx, e: &ast::Expr) -> Option<&'static str> {
+pub(super) enum DirectParse {
+    // `parse::<String>()` can't fail.
+    Identity,
+    Call(&'static str),
+    // u8/u16: no exact Java parser, so parse as int and reject what's out of range.
+    Bounded(u32),
+}
+
+pub(super) fn direct_parse(cx: &Cx, e: &ast::Expr) -> Option<DirectParse> {
     let parent = ast::MethodCallExpr::cast(e.syntax().parent()?)?;
     if !matches!(method_name(&parent).as_str(), "unwrap" | "expect")
         || parent.receiver()?.syntax() != e.syntax()
@@ -606,10 +614,41 @@ pub(super) fn direct_parse(cx: &Cx, e: &ast::Expr) -> Option<&'static str> {
         return None;
     };
     match t.strip_refs() {
-        Ty::Int(i) => int_parser(*i),
-        // `parse::<String>()` can't fail: the empty name means "the input itself".
-        Ty::Str => Some(""),
+        Ty::Int(Int::U8) => Some(DirectParse::Bounded(255)),
+        Ty::Int(Int::U16) => Some(DirectParse::Bounded(65535)),
+        Ty::Int(i) => int_parser(*i).map(DirectParse::Call),
+        Ty::Str => Some(DirectParse::Identity),
         _ => None,
+    }
+}
+
+pub(super) fn lower_direct_parse(
+    cx: &mut Cx,
+    d: DirectParse,
+    mut args: Vec<Expr>,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) -> Expr {
+    match d {
+        DirectParse::Identity => args.remove(0),
+        DirectParse::Call(f) => Expr::static_call(f, args),
+        DirectParse::Bounded(max) => {
+            let v = cx.fresh("num");
+            let call = render(&Expr::static_call("Integer.parseUnsignedInt", args));
+            push_raw(
+                out,
+                line,
+                format!(
+                    "int {v} = {call}; if ({v} > {max}) throw new NumberFormatException(\"number too large to fit in target type\");"
+                ),
+            );
+            // u16 is a Java short; the range check above makes the narrowing exact.
+            if max == 65535 {
+                Expr::Cast("short".into(), Box::new(Expr::name(v)))
+            } else {
+                Expr::name(v)
+            }
+        }
     }
 }
 
@@ -642,10 +681,8 @@ pub(super) fn parse_expr(
     if let Ty::Adt { java, .. } = target.strip_refs() {
         return Expr::static_call(format!("{java}.from_str"), vec![recv]);
     }
-    match direct_parse(cx, &ast::Expr::MethodCallExpr(m.clone())) {
-        Some("") => return recv,
-        Some(f) => return Expr::static_call(f, vec![recv]),
-        None => {}
+    if let Some(d) = direct_parse(cx, &ast::Expr::MethodCallExpr(m.clone())) {
+        return lower_direct_parse(cx, d, vec![recv], line, out);
     }
     super::option::parse_result(cx, m, recv, ret, &target, line, out)
 }

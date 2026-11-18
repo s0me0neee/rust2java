@@ -588,8 +588,8 @@ fn from_str_radix(
     let owner = key.split("::").next().unwrap_or("i32");
     let s = args.first().cloned().unwrap_or_else(|| Expr::str_lit(""));
     let radix = args.get(1).cloned().unwrap_or_else(|| Expr::raw("10"));
-    if let Some(f) = text::direct_parse(cx, &ast::Expr::CallExpr(c.clone())) {
-        return Expr::static_call(f, vec![s, radix]);
+    if let Some(d) = text::direct_parse(cx, &ast::Expr::CallExpr(c.clone())) {
+        return text::lower_direct_parse(cx, d, vec![s, radix], line, out);
     }
     let i = Int::from_name(owner).unwrap_or(Int::I32);
     option::parse_int(cx, s, ret, i, Some(radix), true, line, out)
