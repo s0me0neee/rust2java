@@ -35,7 +35,9 @@ pub fn print_file(
         comments,
         ..Default::default()
     };
-    p.word(&format!("package {};", file.package));
+    if !file.package.is_empty() {
+        p.word(&format!("package {};", file.package));
+    }
     for imp in &file.imports {
         p.word(&format!("import {imp};"));
     }

@@ -59,8 +59,7 @@ fn main() {{
     let probe = work.path().join("Probe.java");
     std::fs::write(
         &probe,
-        r#"package fmt_java_probe;
-import java.util.*;
+        r#"import java.util.*;
 public class Probe {
     public static void main(String[] args) {
         HashMap<String, List<Optional<Integer>>> map = new HashMap<>();
@@ -75,7 +74,7 @@ public class Probe {
     )
     .unwrap();
     let classes = work.path().join("classes");
-    let java = output_dir.join("src/fmt_java_probe/Main.java");
+    let java = output_dir.join("fmt_java_probe.java");
     let javac = Command::new("javac")
         .arg("-d")
         .arg(&classes)
@@ -91,7 +90,7 @@ public class Probe {
     let result = Command::new("java")
         .arg("-cp")
         .arg(classes)
-        .arg("fmt_java_probe.Probe")
+        .arg("Probe")
         .output()
         .unwrap();
     assert!(

@@ -28,6 +28,15 @@ struct Args {
     // Compile with javac and run each transpiled program.
     #[arg(long)]
     run: bool,
+    // Also write `<name>.lines.json` (statement line-match report, used by the tests).
+    #[arg(long, hide = true)]
+    line_report: bool,
+}
+
+// Where a program's Java went: one file, or a package directory for multi-module crates.
+enum Output {
+    File(PathBuf),
+    Package(String, PathBuf),
 }
 
 fn main() -> ExitCode {
@@ -48,10 +57,13 @@ fn run() -> Result<ExitCode> {
 
 fn transpile(args: &Args, project: &frontend::Project) -> Result<ExitCode> {
     let sema = Semantics::new(&project.db);
-    let mut packages: BTreeMap<String, PathBuf> = BTreeMap::new();
+    let mut outputs: BTreeMap<String, Output> = BTreeMap::new();
     let mut errors = 0;
-    for unit in project.units() {
-        let lowered = lower::lower_unit(&sema, &unit);
+    let units = project.units();
+    for unit in &units {
+        // A crate that is one source file becomes one Java file with everything in it.
+        let single = units.iter().filter(|u| u.package == unit.package).count() == 1;
+        let mut lowered = lower::lower_unit(&sema, unit);
         for d in &lowered.diags {
             eprintln!(
                 "error: {}:{}:{}: {}",
@@ -62,38 +74,61 @@ fn transpile(args: &Args, project: &frontend::Project) -> Result<ExitCode> {
             );
         }
         errors += lowered.diags.len();
-        let (java, report) = emit::print_file(
+        if single {
+            lowered.file.package.clear();
+            lowered.file.class.header = lowered
+                .file
+                .class
+                .header
+                .trim_start_matches("public ")
+                .to_string();
+        }
+        let (mut java, report) = emit::print_file(
             &lowered.file,
             lowered.comments,
             &lowered.trailer,
             lowered.last_line,
         );
-        let dir = args.out.join("src").join(&unit.package);
+        let (dir, stem) = if single {
+            (args.out.clone(), unit.package.clone())
+        } else {
+            (
+                args.out.join("src").join(&unit.package),
+                unit.class_name.clone(),
+            )
+        };
         std::fs::create_dir_all(&dir)?;
-        let java_path = dir.join(format!("{}.java", unit.class_name));
+        if lowered.needs_result {
+            if single {
+                java.push_str(&embedded_result());
+            } else {
+                std::fs::write(
+                    dir.join("Result.java"),
+                    RESULT_JAVA.replace("PACKAGE", &unit.package),
+                )?;
+            }
+        }
+        let java_path = dir.join(format!("{stem}.java"));
         std::fs::write(&java_path, java)?;
         eprintln!("wrote {}", java_path.display());
-        let lines =
-            serde_json::json!({ "rust": unit.path, "stmts": report.stmts, "drift": report.drift });
-        std::fs::write(
-            dir.join(format!("{}.lines.json", unit.class_name)),
-            lines.to_string(),
-        )?;
-        if lowered.needs_result {
-            std::fs::write(
-                dir.join("Result.java"),
-                RESULT_JAVA.replace("PACKAGE", &unit.package),
-            )?;
+        if args.line_report {
+            let lines = serde_json::json!({ "rust": unit.path, "stmts": report.stmts, "drift": report.drift });
+            std::fs::write(dir.join(format!("{stem}.lines.json")), lines.to_string())?;
         }
-        packages.insert(unit.package.clone(), dir);
+        let output = if single {
+            Output::File(java_path)
+        } else {
+            Output::Package(unit.package.clone(), dir)
+        };
+        outputs.insert(unit.package.clone(), output);
     }
     if errors > 0 {
         eprintln!("{errors} error(s)");
         return Ok(ExitCode::from(1));
     }
     if args.run {
-        for (package, dir) in &packages {
-            let code = compile_and_run(&args.out, package, dir)?;
+        for output in outputs.values() {
+            let code = compile_and_run(&args.out, output)?;
             if code != 0 {
                 return Ok(ExitCode::from(code as u8));
             }
@@ -102,12 +137,37 @@ fn transpile(args: &Args, project: &frontend::Project) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn compile_and_run(out: &Path, package: &str, dir: &Path) -> Result<i32> {
-    let classes = out.join("classes");
-    let sources: Vec<PathBuf> = std::fs::read_dir(dir)?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|e| e == "java"))
+// `Result`/`Ok`/`Err` as package-private types after the program's class.
+fn embedded_result() -> String {
+    let body: Vec<&str> = RESULT_JAVA
+        .lines()
+        .skip_while(|l| l.starts_with("package") || l.starts_with("import") || l.is_empty())
         .collect();
+    format!(
+        "\n{}\n",
+        body.join("\n")
+            .replacen("public sealed interface", "sealed interface", 1)
+    )
+}
+
+fn compile_and_run(out: &Path, output: &Output) -> Result<i32> {
+    let (sources, classes, main): (Vec<PathBuf>, PathBuf, String) = match output {
+        Output::File(path) => {
+            let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+            (
+                vec![path.clone()],
+                out.join("classes").join(&*stem),
+                "Main".into(),
+            )
+        }
+        Output::Package(package, dir) => {
+            let sources = std::fs::read_dir(dir)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|e| e == "java"))
+                .collect();
+            (sources, out.join("classes"), format!("{package}.Main"))
+        }
+    };
     let javac = which::which("javac").context("javac not found on PATH")?;
     let status = Command::new(javac)
         .arg("-d")
@@ -115,13 +175,13 @@ fn compile_and_run(out: &Path, package: &str, dir: &Path) -> Result<i32> {
         .args(&sources)
         .status()?;
     if !status.success() {
-        anyhow::bail!("javac failed for package {package}");
+        anyhow::bail!("javac failed for {}", sources[0].display());
     }
     let java = which::which("java").context("java not found on PATH")?;
     let status = Command::new(java)
         .arg("-cp")
         .arg(&classes)
-        .arg(format!("{package}.Main"))
+        .arg(main)
         .status()?;
     Ok(status.code().unwrap_or(1))
 }

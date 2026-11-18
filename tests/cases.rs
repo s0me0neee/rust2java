@@ -87,7 +87,8 @@ fn differential() {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rust2java"));
     cmd.args(cases.iter().map(|c| &c.src))
         .arg("-o")
-        .arg(&out_dir);
+        .arg(&out_dir)
+        .arg("--line-report");
     let (_, _, diag) = run_with_stdin(&mut cmd, &None);
 
     let mut failures = Vec::new();
@@ -106,21 +107,12 @@ fn differential() {
             ));
             continue;
         }
-        let pkg_dir = out_dir.join("src").join(&case.name);
         let classes = work.path().join("classes").join(&case.name);
-        let files: Vec<PathBuf> = std::fs::read_dir(&pkg_dir)
-            .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
-            .unwrap_or_default();
-        let sources: Vec<&PathBuf> = files
-            .iter()
-            .filter(|p| p.extension().is_some_and(|e| e == "java"))
-            .collect();
-        for f in files
-            .iter()
-            .filter(|p| p.to_string_lossy().ends_with(".lines.json"))
+        let java_file = out_dir.join(format!("{}.java", case.name));
+        let sources: Vec<&PathBuf> = std::iter::once(&java_file).filter(|p| p.exists()).collect();
+        if let Ok(text) = std::fs::read_to_string(out_dir.join(format!("{}.lines.json", case.name)))
         {
-            let v: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(f).unwrap()).unwrap();
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
             let drift = v["drift"].as_array().map(|a| a.len()).unwrap_or(0) as u64;
             total_stmts += v["stmts"].as_u64().unwrap_or(0);
             total_drift += drift;
@@ -144,10 +136,7 @@ fn differential() {
             continue;
         }
         let (got, got_code, err) = run_with_stdin(
-            Command::new("java")
-                .arg("-cp")
-                .arg(&classes)
-                .arg(format!("{}.Main", case.name)),
+            Command::new("java").arg("-cp").arg(&classes).arg("Main"),
             &case.stdin,
         );
         if got != want || got_code != want_code {
