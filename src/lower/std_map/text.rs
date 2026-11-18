@@ -377,20 +377,5 @@ pub(super) fn parse_expr(
         Ty::Result(t, _) => (**t).clone(),
         _ => Ty::Other("?".into()),
     };
-    let call = match target.strip_refs() {
-        Ty::Int(i) if i.is_long() => Expr::call(Expr::raw("Long"), "parseLong", vec![recv.clone()]),
-        Ty::Int(_) => Expr::call(Expr::raw("Integer"), "parseInt", vec![recv.clone()]),
-        Ty::F32 => Expr::call(Expr::raw("Float"), "parseFloat", vec![recv.clone()]),
-        Ty::F64 => Expr::call(Expr::raw("Double"), "parseDouble", vec![recv.clone()]),
-        Ty::Bool => Expr::call(Expr::raw("Boolean"), "parseBoolean", vec![recv.clone()]),
-        Ty::Char => Expr::call(recv.clone(), "charAt", vec![Expr::raw("0")]),
-        _ => return cx.unsupported(m.syntax(), "`parse` to this type"),
-    };
-    if matches!(
-        consumed_by(cx, &ast::Expr::MethodCallExpr(m.clone())).as_deref(),
-        Some("unwrap" | "expect")
-    ) {
-        return call;
-    }
-    wrap_try_ok(cx, line, ret, call, "NumberFormatException", out)
+    super::option::parse_result(cx, m, recv, ret, &target, line, out)
 }

@@ -1,0 +1,19 @@
+Some((3, 'x'))
+None
+None
+Some(3)
+Some(4)
+None
+Some(5)
+None
+None
+7
+Some(7)
+Some(19)
+Some(9)
+inspected 1
+[4]
+Some("hi")
+Some(2)
+Some(3)
+Some(20)

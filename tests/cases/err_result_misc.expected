@@ -1,0 +1,18 @@
+3 0
+true true
+saw error 5
+Err(5)
+Ok(3)
+Err(42)
+Ok(2)
+"boom"
+""
+[4]
+Some(Ok(4))
+None
+Some(Err("x"))
+Ok(7)
+Err("deep")
+Err("top")
+Ok(3)
+Ok("a")

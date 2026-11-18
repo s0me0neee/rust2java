@@ -38,7 +38,8 @@ pub fn lower_source_file(cx: &mut Cx, file: &ast::SourceFile, is_root: bool) -> 
     let mut members = Vec::new();
     lower_items(cx, &items, &mut members);
     if is_root {
-        cx.file_trailer.push(entry_point(cx, file));
+        let entry = entry_point(cx, file);
+        cx.file_trailer.push(entry);
     }
     Class {
         line: 1,
@@ -49,17 +50,35 @@ pub fn lower_source_file(cx: &mut Cx, file: &ast::SourceFile, is_root: bool) -> 
     }
 }
 
-fn entry_point(cx: &Cx, file: &ast::SourceFile) -> String {
-    let main_returns_result = file.items().any(|i| match i {
-        ast::Item::Fn(f) => f.name().is_some_and(|n| n.text() == "main") && f.ret_type().is_some(),
-        _ => false,
+fn entry_point(cx: &mut Cx, file: &ast::SourceFile) -> String {
+    let result_err = file.items().find_map(|i| match i {
+        ast::Item::Fn(f) if f.name().is_some_and(|n| n.text() == "main") => f
+            .ret_type()
+            .and_then(|t| t.ty())
+            .and_then(|t| cx.sema.resolve_type(&t))
+            .map(|t| cx.convert(&t))
+            .and_then(|t| match t.strip_refs() {
+                Ty::Result(_, e) => Some((**e).clone()),
+                _ => None,
+            }),
+        _ => None,
     });
-    let call = if main_returns_result {
-        "if (main() instanceof Err<?, ?>(var e)) { System.err.println(\"Error: \" + e); System.exit(1); }"
-    } else {
-        "main();"
+    let call = match result_err {
+        Some(err) => {
+            // The pattern variable is Object; user error types need their Java type for `debug()`.
+            let value = if err.is_nameable() {
+                Expr::Cast(err.java(), Box::new(Expr::name("e")))
+            } else {
+                Expr::name("e")
+            };
+            let debug = crate::lower::fmt::debug(cx, value, &err);
+            format!(
+                "if (main() instanceof Err<?, ?>(var e)) {{ System.err.println(\"Error: \" + ({})); System.exit(1); }}",
+                crate::emit::render_expr(&debug)
+            )
+        }
+        None => "main();".into(),
     };
-    let _ = cx;
     format!(
         "static String[] ARGS; public static void main(String[] args) {{ ARGS = args; try {{ {call} }} catch (RuntimeException e) {{ System.out.flush(); System.err.println(\"thread 'main' panicked:\\n\" + e.getMessage()); System.exit(101); }} }}"
     )
@@ -1578,7 +1597,9 @@ fn debug_method(cx: &mut Cx, name: &str, kind: StructKind, fields: &[FieldInfo])
 }
 
 pub fn debug_value(cx: &mut Cx, ty: &Ty, v: Expr, depth: usize) -> Expr {
-    let _ = cx;
+    if let Some(e) = crate::lower::fmt::std_error_debug(cx, v.clone(), ty) {
+        return e;
+    }
     match ty.strip_refs() {
         Ty::Str => str_concat(vec![Expr::str_lit("\""), v, Expr::str_lit("\"")]),
         Ty::Char => str_concat(vec![Expr::str_lit("'"), v, Expr::str_lit("'")]),

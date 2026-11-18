@@ -1611,7 +1611,7 @@ fn try_result(
             },
         ));
     }
-    let err_expr = if want == *err {
+    let err_expr = if want == *err || is_dyn_error(&want) {
         Expr::New {
             ty: "Err<>".into(),
             args: vec![Expr::name(err_name.clone())],
@@ -1657,6 +1657,11 @@ fn try_result(
     } else {
         Expr::name(tmp)
     }
+}
+
+// `Box<dyn Error>` erases to its payload; no `From` conversion is involved.
+fn is_dyn_error(ty: &Ty) -> bool {
+    matches!(ty.strip_refs(), Ty::Other(n) if n.contains("dyn Error"))
 }
 
 fn try_option(

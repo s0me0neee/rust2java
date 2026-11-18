@@ -1,0 +1,19 @@
+invalid digit found in string | ParseIntError { kind: InvalidDigit }
+cannot parse integer from empty string | ParseIntError { kind: Empty }
+number too large to fit in target type | ParseIntError { kind: PosOverflow }
+number too small to fit in target type | ParseIntError { kind: NegOverflow }
+invalid float literal | ParseFloatError { kind: Invalid }
+cannot parse float from empty string | ParseFloatError { kind: Empty }
+Ok(12)
+Err(ParseIntError { kind: InvalidDigit })
+Ok(1.5)
+Err(ParseFloatError { kind: Invalid })
+Err(ParseIntError { kind: PosOverflow })
+Err(ParseIntError { kind: InvalidDigit })
+Err(ParseIntError { kind: PosOverflow })
+Err(ParseIntError { kind: NegOverflow })
+Ok(127)
+Ok(255)
+Err(ParseIntError { kind: InvalidDigit })
+Ok(255)
+Err(ParseIntError { kind: PosOverflow })

@@ -527,6 +527,7 @@ fn plain_display(spec: &Spec, ty: &Ty, v: &Expr) -> bool {
         && !spec.plus
         && !ty.is_str()
         && !ty.is_float()
+        && std_error_name(ty).is_none()
 }
 
 // `stream.collect(...)` infers its type from the call site, which breaks overloads like println.
@@ -738,7 +739,7 @@ fn format_one(
 ) -> Expr {
     let width = counts.width.clone();
     let precision = counts.precision.clone();
-    if matches!(ty.strip_refs(), Ty::Other(_)) {
+    if matches!(ty.strip_refs(), Ty::Other(_)) && std_error_name(ty).is_none() {
         return cx.unsupported(node, &format!("format argument type {ty:?}"));
     }
     let numeric = matches!(ty.strip_refs(), Ty::Int(_) | Ty::F32 | Ty::F64);
@@ -928,6 +929,9 @@ fn hoist_string(cx: &mut Cx, node: &SyntaxNode, value: Expr, out: &mut Vec<Stmt>
 
 // `{}`: Rust Display as a Java expression.
 pub fn display(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
+    if let Some(e) = std_error_display(cx, v.clone(), ty) {
+        return e;
+    }
     match ty.strip_refs() {
         Ty::F32 | Ty::F64 => {
             cx.import("java.math.BigDecimal");
@@ -945,6 +949,122 @@ pub fn display(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
     }
 }
 
+// Rust std errors keep rustc's Display text in a `NumberFormatException`; `Box<dyn Error>`
+// is the payload itself (a String for message errors).
+fn std_error_name(ty: &Ty) -> Option<&str> {
+    let Ty::Other(name) = ty.strip_refs() else {
+        return None;
+    };
+    if name.contains("ParseIntError")
+        || name.contains("ParseFloatError")
+        || name.contains("dyn Error")
+        || name.contains("Box<dyn Error")
+    {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+fn parse_error_text(v: Expr) -> Expr {
+    Expr::call(
+        Expr::Cast("NumberFormatException".into(), Box::new(v)),
+        "getMessage",
+        vec![],
+    )
+}
+
+// One switch over the Display text; the messages of the int and float errors are disjoint.
+fn parse_debug_switch(msg: Expr) -> Expr {
+    let messages = [
+        (
+            "cannot parse integer from empty string",
+            "ParseIntError { kind: Empty }",
+        ),
+        (
+            "number too large to fit in target type",
+            "ParseIntError { kind: PosOverflow }",
+        ),
+        (
+            "number too small to fit in target type",
+            "ParseIntError { kind: NegOverflow }",
+        ),
+        (
+            "invalid digit found in string",
+            "ParseIntError { kind: InvalidDigit }",
+        ),
+        (
+            "cannot parse float from empty string",
+            "ParseFloatError { kind: Empty }",
+        ),
+        ("invalid float literal", "ParseFloatError { kind: Invalid }"),
+    ];
+    let mut arms: Vec<Arm> = messages
+        .iter()
+        .map(|(msg, debug)| Arm {
+            line: 1,
+            label: crate::emit::render_expr(&Expr::str_lit(msg)),
+            body: ArmBody::Expr(Expr::str_lit(debug)),
+        })
+        .collect();
+    arms.push(Arm {
+        line: 1,
+        label: "default".into(),
+        body: ArmBody::Expr(Expr::call(
+            Expr::raw("String"),
+            "valueOf",
+            vec![msg.clone()],
+        )),
+    });
+    Expr::Switch {
+        scrut: Box::new(msg),
+        arms,
+    }
+}
+
+pub fn std_error_debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Option<Expr> {
+    let name = std_error_name(ty)?;
+    if name.contains("ParseIntError") || name.contains("ParseFloatError") {
+        return Some(parse_debug_switch(parse_error_text(v)));
+    }
+    let nf = cx.fresh("error");
+    let s = cx.fresh("error");
+    let quoted = concat(vec![
+        Expr::str_lit("\""),
+        Expr::name(s.clone()),
+        Expr::str_lit("\""),
+    ]);
+    let object = Expr::Cast("Object".into(), Box::new(v.clone()));
+    Some(Expr::Ternary(
+        Box::new(Expr::InstanceOf(
+            Box::new(object.clone()),
+            format!("NumberFormatException {nf}"),
+        )),
+        Box::new(parse_debug_switch(parse_error_text(Expr::name(nf)))),
+        Box::new(Expr::Ternary(
+            Box::new(Expr::InstanceOf(Box::new(object), format!("String {s}"))),
+            Box::new(quoted),
+            Box::new(Expr::call(Expr::raw("String"), "valueOf", vec![v])),
+        )),
+    ))
+}
+
+pub fn std_error_display(cx: &mut Cx, v: Expr, ty: &Ty) -> Option<Expr> {
+    let name = std_error_name(ty)?;
+    if name.contains("ParseIntError") || name.contains("ParseFloatError") {
+        return Some(parse_error_text(v));
+    }
+    let bound = cx.fresh("err_value");
+    Some(Expr::Ternary(
+        Box::new(Expr::InstanceOf(
+            Box::new(Expr::Cast("Object".into(), Box::new(v.clone()))),
+            format!("NumberFormatException {bound}"),
+        )),
+        Box::new(parse_error_text(Expr::name(bound))),
+        Box::new(Expr::call(Expr::raw("String"), "valueOf", vec![v])),
+    ))
+}
+
 pub fn debug_supported(ty: &Ty) -> bool {
     match ty.strip_refs() {
         Ty::Unit
@@ -955,6 +1075,7 @@ pub fn debug_supported(ty: &Ty) -> bool {
         | Ty::F64
         | Ty::Str
         | Ty::Adt { .. } => true,
+        Ty::Other(_) => std_error_name(ty).is_some(),
         Ty::Vec(t) | Ty::Set { t, .. } | Ty::Deque(t) | Ty::Option(t) => debug_supported(t),
         Ty::Map { k, v, .. } | Ty::Result(k, v) => debug_supported(k) && debug_supported(v),
         Ty::Tuple(ts) => ts.iter().all(debug_supported),
@@ -1372,6 +1493,10 @@ pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
             concat(parts)
         }
         Ty::Adt { .. } => Expr::call(v, "debug", vec![]),
+        Ty::Other(_) => match std_error_debug(cx, v.clone(), ty) {
+            Some(e) => e,
+            None => Expr::call(Expr::raw("String"), "valueOf", vec![v]),
+        },
         _ => Expr::call(Expr::raw("String"), "valueOf", vec![v]),
     }
 }

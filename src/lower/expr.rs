@@ -398,6 +398,60 @@ fn op_trait_method(a: ast::ArithOp) -> &'static str {
     }
 }
 
+// A `&mut` binding aliasing an `Option` place: `if let Some(ref mut x) = o`,
+// `if let Some(x) = o.as_mut()`, or `let x = o.get_or_insert(v)`.
+fn option_ref_place(cx: &mut Cx, inner: &ast::Expr, out: &mut Vec<Stmt>) -> Option<(Expr, Ty)> {
+    let local = cx.local_of_path(inner)?;
+    let scope = inner
+        .syntax()
+        .ancestors()
+        .find(|n| ast::Fn::can_cast(n.kind()))?;
+    let ip = cx
+        .expanded_descendants(&scope)
+        .into_iter()
+        .filter_map(ast::IdentPat::cast)
+        .find(|ip| cx.sema.to_def(ip) == Some(local))?;
+    let ty = cx.pat_ty(&ast::Pat::IdentPat(ip.clone()));
+    if !matches!(ty, Ty::Ref { mutable: true, .. }) {
+        return None;
+    }
+    let init = ip.syntax().ancestors().find_map(|n| {
+        if let Some(l) = ast::LetStmt::cast(n.clone()) {
+            return l.initializer();
+        }
+        if let Some(le) = ast::LetExpr::cast(n) {
+            return le.expr();
+        }
+        None
+    })?;
+    let target_ast = match &init {
+        ast::Expr::MethodCallExpr(mc) => match mc.name_ref()?.text().to_string().as_str() {
+            "as_mut" | "get_or_insert" | "get_or_insert_with" | "insert" => mc.receiver()?,
+            _ => return None,
+        },
+        e if ip.ref_token().is_some() && ip.mut_token().is_some() => e.clone(),
+        _ => return None,
+    };
+    if !plain_place(&target_ast) {
+        return None;
+    }
+    let inner_ty = match cx.ty(&target_ast).strip_refs() {
+        Ty::Option(t) => (**t).clone(),
+        _ => return None,
+    };
+    let target = lower_expr(cx, &target_ast, out);
+    Some((target, inner_ty))
+}
+
+fn plain_place(e: &ast::Expr) -> bool {
+    match e {
+        ast::Expr::PathExpr(_) => true,
+        ast::Expr::FieldExpr(f) => f.expr().is_some_and(|b| plain_place(&b)),
+        ast::Expr::ParenExpr(p) => p.expr().is_some_and(|i| plain_place(&i)),
+        _ => false,
+    }
+}
+
 // Java promotes byte/short arithmetic to int; cast back so the value fits its Rust type.
 fn narrow_if_needed(v: Expr, ty: &Ty) -> Expr {
     match ty.strip_refs() {
@@ -495,6 +549,23 @@ pub fn place_assign(
         }
         ast::Expr::PrefixExpr(p) if p.op_kind() == Some(ast::UnaryOp::Deref) => {
             let inner = p.expr().unwrap();
+            if let Some((target, elem_ty)) = option_ref_place(cx, &inner, out) {
+                let value = if sym == "=" {
+                    r
+                } else {
+                    let cur = Expr::call(target.clone(), "get", vec![]);
+                    narrow_if_needed(
+                        Expr::bin(cur, static_op(sym.trim_end_matches('=')), r),
+                        &elem_ty,
+                    )
+                };
+                let value = narrow_if_needed(value, &elem_ty);
+                return Expr::Assign(
+                    Box::new(target),
+                    "=",
+                    Box::new(Expr::call(Expr::raw("Optional"), "of", vec![value])),
+                );
+            }
             let place = lower_expr(cx, &inner, out);
             Expr::Assign(
                 Box::new(super::calls::deref_place(cx, &inner, place)),
@@ -547,6 +618,9 @@ fn lower_prefix(cx: &mut Cx, p: &ast::PrefixExpr, out: &mut Vec<Stmt>) -> Expr {
             }
         }
         Some(ast::UnaryOp::Deref) => {
+            if let Some((target, _)) = option_ref_place(cx, &inner, out) {
+                return Expr::call(target, "get", vec![]);
+            }
             // Cells (`n[0]`) and iter_mut aliases (`v.get(i)`) were resolved when lowering `inner`.
             let resolved = cx.cell_path(&inner).is_some()
                 || cx

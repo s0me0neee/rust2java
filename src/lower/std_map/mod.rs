@@ -566,20 +566,8 @@ fn from_str_radix(
     let owner = key.split("::").next().unwrap_or("i32");
     let s = args.first().cloned().unwrap_or_else(|| Expr::str_lit(""));
     let radix = args.get(1).cloned().unwrap_or_else(|| Expr::raw("10"));
-    let long = owner.starts_with('i') && matches!(owner, "i64" | "i128")
-        || matches!(owner, "u64" | "u128");
-    let call = if long {
-        Expr::call(Expr::raw("Long"), "parseLong", vec![s, radix])
-    } else {
-        Expr::call(Expr::raw("Integer"), "parseInt", vec![s, radix])
-    };
-    if matches!(
-        consumed_by(cx, &ast::Expr::CallExpr(c.clone())).as_deref(),
-        Some("unwrap" | "expect")
-    ) {
-        return call;
-    }
-    wrap_try_ok(cx, line, ret, call, "NumberFormatException", out)
+    let i = Int::from_name(owner).unwrap_or(Int::I32);
+    option::parse_int(cx, s, ret, i, Some(radix), line, out)
 }
 
 // ---- std paths (consts and unit variants) ----------------------------------------------------
@@ -588,7 +576,13 @@ pub fn lower_std_path(cx: &mut Cx, path: &ast::Path, def: ModuleDef) -> Expr {
     let _ = def;
     let text = path.syntax().text().to_string();
     let parts: Vec<&str> = text.split("::").collect();
-    let last = parts.last().copied().unwrap_or("");
+    // `None::<T>` and `<i32>::MAX`: the last segment's name skips generic arguments.
+    let last = path
+        .segment()
+        .and_then(|s| s.name_ref())
+        .map(|n| n.text().to_string())
+        .unwrap_or_else(|| parts.last().copied().unwrap_or("").to_string());
+    let last = last.as_str();
     let ty_tok = parts
         .iter()
         .rev()
@@ -982,6 +976,11 @@ pub fn lower_std_method(
     // Generic fallbacks.
     if name == "clone" {
         return clone_expr(recv, recv_ty);
+    }
+    if name == "to_string"
+        && let Some(e) = super::fmt::std_error_display(cx, recv.clone(), recv_ty)
+    {
+        return e;
     }
     if name == "into" || name == "from" {
         if recv_ty.strip_refs().java() != ret.strip_refs().java()

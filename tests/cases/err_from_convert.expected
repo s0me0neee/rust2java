@@ -1,0 +1,3 @@
+Ok(12)
+Err(Neg(-3))
+Err(Parse(ParseIntError { kind: InvalidDigit }))
