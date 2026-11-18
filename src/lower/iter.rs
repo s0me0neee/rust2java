@@ -402,7 +402,19 @@ fn for_each_source(
 fn collection_iterable(v: Expr, ty: &Ty) -> Expr {
     match ty.strip_refs() {
         Ty::Map { .. } => Expr::call(v, "entrySet", vec![]),
-        Ty::Option(_) => Expr::call(Expr::call(v, "stream", vec![]), "toList", vec![]),
+        Ty::Option(inner) => {
+            // `None` lowers to an untyped `Optional.empty()`.
+            let untyped = matches!(&v, Expr::Raw(s) if s == "Optional.empty()");
+            let v = if untyped {
+                Expr::Cast(
+                    format!("Optional<{}>", inner.boxed()),
+                    Box::new(Expr::Cast("Optional".into(), Box::new(v))),
+                )
+            } else {
+                v
+            };
+            Expr::call(Expr::call(v, "stream", vec![]), "toList", vec![])
+        }
         _ => v,
     }
 }
@@ -677,6 +689,7 @@ fn lower_source(
             Ty::Vec(_) | Ty::Set { .. } | Ty::Deque(_) | Ty::Heap(_) | Ty::Option(_),
             "iter" | "into_iter",
         ) => Expr::call(recv, "stream", vec![]),
+        (Ty::Result(..), "iter") => Expr::call(Expr::call(recv, "ok", vec![]), "stream", vec![]),
         (Ty::Vec(t) | Ty::Deque(t), "iter_mut") if !super::is_cell_value_ty(t) => {
             Expr::call(recv, "stream", vec![])
         }
@@ -1050,9 +1063,20 @@ fn lower_adaptor(
                 None => cx.unsupported(m.syntax(), "flat_map result type"),
             }
         }
-        "flatten" => match to_stream_fn(cx, &item) {
-            Some(ts) => call("flatMap", vec![ts]),
-            None => cx.unsupported(m.syntax(), "flatten item type"),
+        "flatten" => match item.strip_refs() {
+            // `vec![Some(1), None]` infers `List<Optional<Object>>`; pin the element type.
+            Ty::Option(inner) => {
+                let raw = Expr::Cast("Stream".into(), Box::new(src.clone()));
+                let src = Expr::Cast(
+                    format!("Stream<Optional<{}>>", inner.boxed()),
+                    Box::new(raw),
+                );
+                Expr::call(src, "flatMap", vec![Expr::raw("Optional::stream")])
+            }
+            _ => match to_stream_fn(cx, &item) {
+                Some(ts) => call("flatMap", vec![ts]),
+                None => cx.unsupported(m.syntax(), "flatten item type"),
+            },
         },
         "enumerate" => {
             if cx.lambda_depth > 0 {

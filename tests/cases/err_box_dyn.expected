@@ -1,0 +1,7 @@
+oops
+oops
+"oops"
+Ok(5)
+Err(ParseIntError { kind: InvalidDigit })
+7
+Err("inner")

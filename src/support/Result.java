@@ -1,6 +1,7 @@
 package PACKAGE;
 
 import java.util.Optional;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -19,11 +20,41 @@ public sealed interface Result<T, E> permits Ok, Err {
             case Err<T, E>(var e) -> throw new RuntimeException("called `Result::unwrap()` on an `Err` value: " + e);
         };
     }
+    default T unwrap(Function<E, String> debug) {
+        return switch (this) {
+            case Ok<T, E>(var v) -> v;
+            case Err<T, E>(var e) -> throw new RuntimeException("called `Result::unwrap()` on an `Err` value: " + debug.apply(e));
+        };
+    }
     default T expect(String msg) {
         return switch (this) {
             case Ok<T, E>(var v) -> v;
             case Err<T, E>(var e) -> throw new RuntimeException(msg + ": " + e);
         };
+    }
+    default T expect(String msg, Function<E, String> debug) {
+        return switch (this) {
+            case Ok<T, E>(var v) -> v;
+            case Err<T, E>(var e) -> throw new RuntimeException(msg + ": " + debug.apply(e));
+        };
+    }
+    default E unwrap_err() {
+        return switch (this) {
+            case Ok<T, E>(var v) -> throw new RuntimeException("called `Result::unwrap_err()` on an `Ok` value: " + v);
+            case Err<T, E>(var e) -> e;
+        };
+    }
+    default E expect_err(String msg, Function<T, String> debug) {
+        return switch (this) {
+            case Ok<T, E>(var v) -> throw new RuntimeException(msg + ": " + debug.apply(v));
+            case Err<T, E>(var e) -> e;
+        };
+    }
+    default Result<T, E> inspect_err(Consumer<E> f) {
+        if (this instanceof Err<T, E>(var e)) {
+            f.accept(e);
+        }
+        return this;
     }
     default T unwrap_or(T other) { return this instanceof Ok<T, E>(var v) ? v : other; }
     default T unwrap_or_else(Function<E, T> f) {

@@ -1,0 +1,3 @@
+ok 12
+error: negative: -4
+error: parse: invalid digit found in string
