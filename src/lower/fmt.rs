@@ -1293,66 +1293,21 @@ fn lambda(name: String, body: Expr) -> Expr {
     }
 }
 
+// Rust's `{:?}` escaping for str/char, emitted once per file as `debug_str` on the trailer line.
 fn debug_quote(cx: &mut Cx, value: Expr, quote: char) -> Expr {
-    let name = cx.fresh("fmt_char");
-    let c = Expr::name(&name);
-    let unicode = Expr::bin(
-        Expr::bin(
-            Expr::str_lit("\\u{"),
-            "+",
-            Expr::call(Expr::raw("Integer"), "toHexString", vec![c.clone()]),
-        ),
-        "+",
-        Expr::str_lit("}"),
-    );
-    let character = Expr::New {
-        ty: "String".into(),
-        args: vec![Expr::call(
-            Expr::raw("Character"),
-            "toChars",
-            vec![c.clone()],
-        )],
-    };
-    let mut escaped = Expr::Ternary(
-        Box::new(Expr::call(
-            Expr::raw("Character"),
-            "isISOControl",
-            vec![c.clone()],
-        )),
-        Box::new(unicode),
-        Box::new(character),
-    );
-    for (ch, replacement) in [
-        ('\\', "\\\\"),
-        ('\n', "\\n"),
-        ('\r', "\\r"),
-        ('\t', "\\t"),
-        ('\0', "\\0"),
-        (quote, if quote == '"' { "\\\"" } else { "\\'" }),
-    ] {
-        escaped = Expr::Ternary(
-            Box::new(Expr::bin(
-                c.clone(),
-                "==",
-                Expr::raw((ch as u32).to_string()),
-            )),
-            Box::new(Expr::str_lit(replacement)),
-            Box::new(escaped),
-        );
+    let helper = "static String debug_str(String s, char q) { StringBuilder b = new StringBuilder().append(q); \
+                  s.codePoints().forEach(c -> b.append(c == q ? \"\\\\\" + q : c == '\\\\' ? \"\\\\\\\\\" : c == '\\n' ? \"\\\\n\" : c == '\\r' ? \"\\\\r\" : c == '\\t' ? \"\\\\t\" : c == 0 ? \"\\\\0\" \
+                  : Character.isISOControl(c) ? \"\\\\u{\" + Integer.toHexString(c) + \"}\" : Character.toString(c))); return b.append(q).toString(); }";
+    if !cx.file_trailer.iter().any(|t| t == helper) {
+        cx.file_trailer.insert(0, helper.to_string());
     }
-    let stream = Expr::call(
-        Expr::call(Expr::raw("String"), "valueOf", vec![value]),
-        "codePoints",
-        vec![],
-    );
-    let mapped = Expr::call(stream, "mapToObj", vec![lambda(name, escaped)]);
-    let joining = Expr::call(Expr::raw("Collectors"), "joining", vec![]);
-    let escaped = Expr::call(mapped, "collect", vec![joining]);
-    Expr::bin(
-        Expr::bin(Expr::str_lit(&quote.to_string()), "+", escaped),
-        "+",
-        Expr::str_lit(&quote.to_string()),
-    )
+    let value = if quote == '\'' {
+        Expr::call(Expr::raw("String"), "valueOf", vec![value])
+    } else {
+        value
+    };
+    let q = if quote == '\'' { "'\\''" } else { "'\"'" };
+    Expr::static_call("debug_str", vec![value, Expr::raw(q)])
 }
 
 fn debug_sequence(cx: &mut Cx, v: Expr, inner: &Ty, open: &str, close: &str) -> Expr {

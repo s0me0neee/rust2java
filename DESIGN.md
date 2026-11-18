@@ -390,7 +390,7 @@ The transpiler knows the static type, so it builds the Debug string inline. Nest
 | Type | Java expression |
 |---|---|
 | integers, `bool`, `List` of those | `x`, or `v.toString()` (Java's `[1, 2, 3]` is the same as Rust's) |
-| `String`/`&str`, `char` | `"\"" + s + "\""`, `"'" + c + "'"` (escape sequences inside strings aren't reproduced) |
+| `String`/`&str`, `char` | `debug_str(s, '"')`, `debug_str(String.valueOf(c), '\'')`: one static helper per file, on the trailer line, with Rust's exact escaping |
 | floats | `String.valueOf(f)` (Rust's `{:?}` also prints `1.0`) |
 | `List<T>` | `v.stream().map(x -> <debug x>).collect(Collectors.joining(", ", "[", "]"))` |
 | `HashSet`/`BTreeSet` | the same, with `"{", "}"` |
