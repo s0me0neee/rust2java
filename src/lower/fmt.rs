@@ -3,7 +3,7 @@
 use ra_ap_hir::ScopeDef;
 use ra_ap_syntax::{AstNode, AstToken, SyntaxNode, ast, ast::HasName};
 
-use super::std_map::{unsigned_display, unsigned_string};
+use super::std_map::{signum, unsigned_display, unsigned_string};
 use super::{Cx, expr};
 use crate::jir::{Arm, ArmBody, Expr, LambdaBody, Stmt, StmtKind};
 use crate::ty::Ty;
@@ -1429,9 +1429,18 @@ pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
         }
         Ty::Int(i) if unsigned_display(*i) => unsigned_string(*i, v.clone()).unwrap_or(v),
         Ty::Adt { .. } => Expr::call(v, "debug", vec![]),
-        // `Ordering` is an int; only its sign matters.
+        // `Ordering` is an int: comparing its sign is shorter than the switch, when repeatable.
+        Ty::Ordering if is_pure(&v) => Expr::Ternary(
+            Box::new(Expr::bin(v.clone(), "<", Expr::raw("0"))),
+            Box::new(Expr::str_lit("Less")),
+            Box::new(Expr::Ternary(
+                Box::new(Expr::bin(v, "==", Expr::raw("0"))),
+                Box::new(Expr::str_lit("Equal")),
+                Box::new(Expr::str_lit("Greater")),
+            )),
+        ),
         Ty::Ordering => Expr::Switch {
-            scrut: Box::new(Expr::call(Expr::raw("Integer"), "signum", vec![v])),
+            scrut: Box::new(signum(v)),
             arms: vec![
                 Arm {
                     line: 1,

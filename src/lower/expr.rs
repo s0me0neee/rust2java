@@ -403,7 +403,7 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
         BinaryOp::CmpOp(CmpOp::Eq { negated }) => {
             if is_ordering(&lt) || is_ordering(&rt) {
                 // `compareTo` may return any difference; only its sign is the Ordering.
-                let (l, r) = (ordering_sign(l, &lt), ordering_sign(r, &rt));
+                let (l, r) = ordering_operands(l, &lt, r, &rt);
                 Expr::bin(l, if negated { "!=" } else { "==" }, r)
             } else if lt.is_primitive() && rt.is_primitive() {
                 // Two boxed operands (`list.get(i) == list.get(j)`) would compare references.
@@ -430,7 +430,7 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
                 (ast::Ordering::Greater, false) => ">=",
             };
             if is_ordering(&lt) || is_ordering(&rt) {
-                let (l, r) = (ordering_sign(l, &lt), ordering_sign(r, &rt));
+                let (l, r) = ordering_operands(l, &lt, r, &rt);
                 Expr::bin(l, sym, r)
             } else if let Some(cmp) = std_map::compare_expr(&lt, l.clone(), r.clone()) {
                 Expr::bin(cmp, sym, Expr::raw("0"))
@@ -493,10 +493,19 @@ fn ordering_sign(e: Expr, t: &Ty) -> Expr {
     // An `Ordering` constant is already -1/0/1.
     let constant = matches!(&e, Expr::Raw(s) if s == "-1" || s == "0" || s == "1");
     if is_ordering(t) && !constant {
-        Expr::call(Expr::raw("Integer"), "signum", vec![e])
+        std_map::signum(e)
     } else {
         e
     }
+}
+
+// Against 0 only the sign matters, so the raw int and the signum compare the same.
+fn ordering_operands(l: Expr, lt: &Ty, r: Expr, rt: &Ty) -> (Expr, Expr) {
+    let zero = |e: &Expr| matches!(e, Expr::Raw(s) if s == "0");
+    if zero(&l) || zero(&r) {
+        return (l, r);
+    }
+    (ordering_sign(l, lt), ordering_sign(r, rt))
 }
 
 fn arith_symbol(a: ast::ArithOp, lt: &Ty) -> &'static str {

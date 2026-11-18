@@ -31,7 +31,8 @@ pub(crate) use io::{
     bytes_stream, is_io_target, is_reader_source, lines_stream, output_handle, write_status,
 };
 pub(crate) use num::{
-    compare_expr, num_cast, unsigned_arith, unsigned_display, unsigned_literal, unsigned_string,
+    compare_expr, num_cast, signum, unsigned_arith, unsigned_display, unsigned_literal,
+    unsigned_string,
 };
 
 type StdFnHook = fn(&mut Cx, &ast::CallExpr, &str, &Ty, &mut Vec<Stmt>) -> Option<Expr>;
