@@ -1167,6 +1167,7 @@ fn tuple_field_assign(
 ) -> Expr {
     let index = f.name_ref().and_then(|n| n.text().parse::<usize>().ok());
     let through_ref = matches!(cx.ty(base), Ty::Ref { .. })
+        && cx.cell_path(base).is_none()
         && cx
             .local_of_path(base)
             .is_some_and(|l| !cx.elem_aliases.contains_key(&l));

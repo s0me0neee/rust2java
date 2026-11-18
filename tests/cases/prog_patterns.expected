@@ -1,0 +1,19 @@
+-5:negative 0:zero 7:digit 20:round 44:even 51:odd 
+circle area 7.07
+degenerate circle
+square 3
+wide rect
+rect 2x5
+triangle area 6.000
+squares=1 first circle=Some(0)
+false (-3, 9) ["hi", "noop", "..."]
+0 7 5 a then 2 more
+empty just z
+"3,4" -> Some((3, 4))
+" -1 , 8" -> Some((-1, 8))
+"x,1" -> None
+"12" -> None
+12.5 dozenish 12
+three=3
+nested digit 5
+tri side 3

@@ -320,10 +320,12 @@ pub fn convert(sema: &Semantics<'_, RootDatabase>, from: Module, ty: &ra_ap_hir:
         let krate = module.krate(db);
         let name = adt.name(db).as_str().to_string();
         if krate.origin(db).is_local() {
+            // Same escaping as the class declaration (`List` would shadow java.util.List).
+            let class = crate::lower::escape_keyword(&name);
             let java = if module == from {
-                name.clone()
+                class
             } else {
-                format!("{}.{}", module_class_from(sema.db, from, module), name)
+                format!("{}.{}", module_class_from(sema.db, from, module), class)
             };
             let args = match adt {
                 Adt::Struct(_) | Adt::Enum(_) | Adt::Union(_) => args.clone(),

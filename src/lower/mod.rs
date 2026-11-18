@@ -940,8 +940,12 @@ pub fn strip_parens(e: &ast::Expr) -> ast::Expr {
 
 // Types whose Java representation is immutable, so `&mut` needs a cell.
 // Types a `&mut` local/param must box in a one-element array: Java can't write through them.
+// Values Java can't change in place, so a `&mut` to one needs a one-element array: numbers,
+// strings, `Optional` and tuples (`Map.Entry` / records).
 pub fn is_mut_ref_cell_ty(ty: &Ty) -> bool {
-    is_cell_value_ty(ty) || matches!(ty.strip_refs(), Ty::Option(_))
+    is_cell_value_ty(ty)
+        || matches!(ty.strip_refs(), Ty::Option(_))
+        || matches!(ty.strip_refs(), Ty::Tuple(ts) if ts.len() >= 2)
 }
 
 pub fn is_cell_value_ty(ty: &Ty) -> bool {

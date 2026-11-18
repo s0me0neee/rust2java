@@ -1350,6 +1350,16 @@ fn ident_name(ip: &ast::IdentPat) -> String {
 fn literal_bound(cx: &mut Cx, p: &ast::Pat, ty: &Ty) -> Option<Expr> {
     match p {
         ast::Pat::LiteralPat(lp) => pattern_literal(cx, lp, ty),
+        // `i64::MIN..=-1`, `LIMIT..`: a constant path.
+        ast::Pat::PathPat(pp) => {
+            let path = pp.path()?;
+            match cx.sema.resolve_path(&path)? {
+                ra_ap_hir::PathResolution::Def(def) => {
+                    Some(super::items::lower_def_path(cx, &path, def))
+                }
+                _ => None,
+            }
+        }
         _ => None,
     }
 }

@@ -702,6 +702,23 @@ pub fn lower_iter_method(
     let name = method_name(m);
     let recv_ast = m.receiver()?;
     let ret_ty = cx.ty(&ast::Expr::MethodCallExpr(m.clone()));
+    // `v.chunks_exact(k).remainder()`: the last `len % k` elements.
+    if name == "remainder"
+        && let ast::Expr::MethodCallExpr(chunks) = strip_parens(&recv_ast)
+        && method_name(&chunks) == "chunks_exact"
+        && let (Some(v), Some(k)) = (chunks.receiver(), arg_exprs(&chunks).first().cloned())
+    {
+        let line = cx.line(m.syntax());
+        let vt = cx.ty(&v);
+        let v = expr::lower_expr(cx, &v, out);
+        let v = ensure_simple(cx, v, &vt, line, out);
+        let k = lower_arg(cx, &k, out);
+        let k = ensure_simple(cx, k, &Ty::Int(Int::Usize), line, out);
+        let (vs, ks) = (render(&v), render(&k));
+        return Some(Expr::raw(format!(
+            "{vs}.subList({vs}.size() - {vs}.size() % {ks}, {vs}.size())"
+        )));
+    }
     if let Some(local) = cx.local_of_path(&recv_ast)
         && let Some(items) = cx.pulled_iters.get(&local).cloned()
     {
@@ -859,7 +876,7 @@ fn lower_source(
             ));
             Expr::call(Expr::name(tmp), "stream", vec![])
         }
-        (Ty::Vec(_), "windows" | "chunks") => {
+        (Ty::Vec(_), "windows" | "chunks" | "chunks_exact") => {
             let v = ensure_simple(cx, recv.clone(), &recv_ty, line, out);
             let k = lower_arg(cx, &args[0], out);
             let k = ensure_simple(cx, k, &Ty::Int(Int::Usize), line, out);
@@ -868,6 +885,10 @@ fn lower_source(
             if name == "windows" {
                 Expr::raw(format!(
                     "IntStream.rangeClosed(0, {vs}.size() - {ks}).mapToObj({i} -> {vs}.subList({i}, {i} + {ks}))"
+                ))
+            } else if name == "chunks_exact" {
+                Expr::raw(format!(
+                    "IntStream.range(0, {vs}.size() / {ks}).mapToObj({i} -> {vs}.subList({i} * {ks}, {i} * {ks} + {ks}))"
                 ))
             } else {
                 Expr::raw(format!(
@@ -933,6 +954,58 @@ fn lower_source(
                 "filter",
                 vec![Expr::raw(format!("{w} -> !{w}.isEmpty()"))],
             )
+        }
+        // Non-overlapping occurrences of a literal pattern, or the chars a predicate accepts.
+        (Ty::Str, "matches") => {
+            let pat_ast = args[0].clone();
+            let pat_ty = cx.ty(&pat_ast);
+            let p = lower_arg(cx, &pat_ast, out);
+            let pat = match pat_ty.strip_refs() {
+                Ty::Str => p,
+                Ty::Char => Expr::call(Expr::raw("String"), "valueOf", vec![p]),
+                Ty::Fn { .. } => {
+                    let c = cx.fresh_param("c");
+                    cx.release_param(&c);
+                    let chars = Expr::call(
+                        Expr::call(recv, "chars", vec![]),
+                        "mapToObj",
+                        vec![Expr::raw(format!("{c} -> (char) {c}"))],
+                    );
+                    let kept = Expr::call(chars, "filter", vec![p]);
+                    return Expr::call(kept, "map", vec![Expr::raw("String::valueOf")]);
+                }
+                _ => return cx.unsupported(m.syntax(), "matches() pattern"),
+            };
+            cx.import("java.util.regex.Pattern");
+            let quoted = Expr::call(Expr::raw("Pattern"), "quote", vec![pat]);
+            let matcher = Expr::call(
+                Expr::call(Expr::raw("Pattern"), "compile", vec![quoted]),
+                "matcher",
+                vec![recv],
+            );
+            let r = cx.fresh_param("r");
+            cx.release_param(&r);
+            Expr::call(
+                Expr::call(matcher, "results", vec![]),
+                "map",
+                vec![Expr::raw(format!("{r} -> {r}.group()"))],
+            )
+        }
+        // `rsplit`: the `split` pieces, last first.
+        (Ty::Str, "rsplit") => {
+            let pat_ast = args[0].clone();
+            let pat_ty = cx.ty(&pat_ast);
+            let p = lower_arg(cx, &pat_ast, out);
+            let pat = match pat_ty.strip_refs() {
+                Ty::Str => p,
+                Ty::Char => Expr::call(Expr::raw("String"), "valueOf", vec![p]),
+                _ => return cx.unsupported(m.syntax(), "rsplit by closure/char set"),
+            };
+            cx.import("java.util.regex.Pattern");
+            let quoted = Expr::call(Expr::raw("Pattern"), "quote", vec![pat]);
+            let parts = Expr::call(recv, "split", vec![quoted, Expr::raw("-1")]);
+            let list = Expr::call(Expr::raw("Arrays"), "asList", vec![parts]);
+            Expr::call(Expr::call(list, "reversed", vec![]), "stream", vec![])
         }
         (Ty::Str, "split" | "splitn") => {
             let (limit, pat_ast) = if name == "splitn" {
@@ -1367,6 +1440,110 @@ fn lower_adaptor_core(
                 ))],
             )
         }
+        // The state lives in a local (a one-element array for numbers/strings/tuples) that the
+        // closure's `&mut` state parameter names; the first `None` ends the iteration.
+        "scan" => {
+            let ast::Expr::ClosureExpr(closure) = strip_parens(&args[1]) else {
+                return cx.unsupported(m.syntax(), "scan without a closure");
+            };
+            let Some(ast::Pat::IdentPat(st)) = closure
+                .param_list()
+                .and_then(|pl| pl.params().next())
+                .and_then(|p| p.pat())
+            else {
+                return cx.unsupported(m.syntax(), "scan state pattern");
+            };
+            let state_ty = cx.ty(&args[0]);
+            let init = lower_arg(cx, &args[0], out);
+            let cell = super::is_mut_ref_cell_ty(&state_ty);
+            let (ty, init) = if cell {
+                let elem = state_ty.java();
+                let raw = elem.split('<').next().unwrap_or(&elem).to_string();
+                (
+                    format!("{elem}[]"),
+                    Expr::raw(format!("new {raw}[]{{{}}}", render(&init))),
+                )
+            } else {
+                (stmt::decl_type(&state_ty), init)
+            };
+            let state = super::std_map::push_local(cx, line, ty, Some(init), out, "state");
+            if cell {
+                cx.mark_cell(&st);
+            }
+            let Expr::Lambda { params, body } = lower_arg(cx, &args[1], out) else {
+                return cx.unsupported(m.syntax(), "scan closure");
+            };
+            let bind = Stmt::new(
+                line,
+                StmtKind::Local {
+                    ty: "var".into(),
+                    name: params[0].clone(),
+                    init: Some(Expr::name(state)),
+                },
+            );
+            let mut stmts = vec![bind];
+            let close_line = match body {
+                crate::jir::LambdaBody::Expr(e) => {
+                    stmts.push(Stmt::new(line, StmtKind::Return(Some(*e))));
+                    line
+                }
+                crate::jir::LambdaBody::Block(b) => {
+                    stmts.extend(b.stmts);
+                    b.close_line
+                }
+            };
+            let step = Expr::Lambda {
+                params: params[1..].to_vec(),
+                body: crate::jir::LambdaBody::Block(crate::jir::Block { stmts, close_line }),
+            };
+            let present = Expr::call(
+                call("map", vec![step]),
+                "takeWhile",
+                vec![Expr::raw("Optional::isPresent")],
+            );
+            Expr::call(present, "map", vec![Expr::raw("Optional::get")])
+        }
+        // `(Vec, Vec)` is a `Map.Entry` of two lists.
+        "partition" => {
+            let f = lower_arg(cx, &args[0], out);
+            let p = cx.fresh_param("parts");
+            cx.release_param(&p);
+            let parts = format!(
+                "Collectors.collectingAndThen(Collectors.partitioningBy({}), {p} -> Map.entry({p}.get(true), {p}.get(false)))",
+                render(&f)
+            );
+            call("collect", vec![Expr::raw(parts)])
+        }
+        "unzip" => {
+            let e = cx.fresh_param("e");
+            cx.release_param(&e);
+            let side = |get: &str| {
+                format!(
+                    "Collectors.mapping({e} -> {e}.{get}(), Collectors.toCollection(ArrayList::new))"
+                )
+            };
+            let both = format!(
+                "Collectors.teeing({}, {}, Map::entry)",
+                side("getKey"),
+                side("getValue")
+            );
+            call("collect", vec![Expr::raw(both)])
+        }
+        // Element-wise equality of two iterators.
+        "eq" | "ne" => {
+            let other_ty = cx.ty(&args[0]);
+            let other = into_stream(lower_arg(cx, &args[0], out), &other_ty);
+            let same = Expr::call(
+                call("toList", vec![]),
+                "equals",
+                vec![Expr::call(other, "toList", vec![])],
+            );
+            if name == "eq" {
+                same
+            } else {
+                Expr::Unary("!", Box::new(same))
+            }
+        }
         "chain" => {
             let other_ty = cx.ty(&args[0]);
             let other = lower_arg(cx, &args[0], out);
@@ -1462,11 +1639,16 @@ fn lower_adaptor_core(
             );
             Expr::call(mapped, "findFirst", vec![])
         }
-        "position" => {
+        "position" | "rposition" => {
             let f = lower_arg(cx, &args[0], out);
+            let find = if name == "position" {
+                "indexOf"
+            } else {
+                "lastIndexOf"
+            };
             let idx = Expr::call(
                 Expr::call(call("map", vec![f]), "toList", vec![]),
-                "indexOf",
+                find,
                 vec![Expr::raw("true")],
             );
             let i = cx.fresh("i");
@@ -1544,6 +1726,12 @@ fn to_stream_fn(cx: &mut Cx, ty: &Ty) -> Option<Expr> {
     Some(match ty.strip_refs() {
         Ty::Vec(_) | Ty::Set { .. } | Ty::Deque(_) => Expr::raw("Collection::stream"),
         Ty::Option(_) => Expr::raw("Optional::stream"),
+        // A Result iterates its Ok value.
+        Ty::Result(..) => {
+            let r = cx.fresh_param("r");
+            cx.release_param(&r);
+            Expr::raw(format!("{r} -> {r}.ok().stream()"))
+        }
         Ty::Iter(_) => {
             let s = cx.fresh("s");
             Expr::raw(format!("{s} -> {s}"))

@@ -1,0 +1,18 @@
+"42" ok 42
+" 7 " ok 7
+"" err empty input / false
+"abc" err parse error: invalid digit found in string / true
+"500" err 500 not in -100..=100 / false
+"-100" ok -100
+"99999999999999999999" err parse error: number too large to fit in target type / true
+Some(6)
+error: unlucky total
+error: parse error: invalid digit found in string
+Some(8) None
+Err("5 is odd") 60
+Ok([4, 2, 1]) Err("3 is odd")
+Some([1, 2, 3])
+6 invalid digit found in string true
+12
+fallback because parse error: invalid digit found in string
+0

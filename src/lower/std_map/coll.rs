@@ -1019,6 +1019,27 @@ pub(super) fn lower_vec_method(
             vec![recv, b0, b1],
         )),
         "clear" => Some(Expr::call(recv, "clear", vec![])),
+        "split_off" => {
+            let p = simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out);
+            let n = simple(cx, b0, &Ty::Int(Int::Usize), line, out);
+            let (ps, ns) = (render(&p), render(&n));
+            let tail = push_local(
+                cx,
+                line,
+                format!("List<{}>", elem.boxed()),
+                Some(Expr::raw(format!(
+                    "new ArrayList<>({ps}.subList({ns}, {ps}.size()))"
+                ))),
+                out,
+                "tail",
+            );
+            push_raw(
+                out,
+                line,
+                format!("{ps}.subList({ns}, {ps}.size()).clear();"),
+            );
+            Some(Expr::name(tail))
+        }
         "truncate" => {
             let p = simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out);
             let n = simple(cx, b0, &Ty::Int(Int::Usize), line, out);

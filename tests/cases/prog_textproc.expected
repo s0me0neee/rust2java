@@ -1,0 +1,17 @@
+00|The quick brown fox     |19
+01|jumps over the lazy dog.|24
+02|Pack my box with five   |21
+03|dozen liquor jugs!      |18
+3ab2c5de  xyz
+Khoor, Zruog! -> Hello, World!
+"A man, a plan, a canal: Panama" true
+"hello" false
+"Was it a car or a cat I saw?" true
+[("name", "demo"), ("version", "1.2.3"), ("path", "/usr/local")]
+[1, 2, 3] major=1
+report.final.txt report.final txt ["", "home", "user", "docs/report.final.txt"]
+[0, 45] Some(16) Some(84)
+quick |  jugs! | 2
+[('o', 7), ('e', 5), ('i', 4), ('u', 4), ('h', 3)]
+PNG a--b
+4 5 5

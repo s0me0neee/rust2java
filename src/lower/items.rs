@@ -2457,6 +2457,11 @@ enum DebugSeg {
 }
 
 fn debug_method(cx: &mut Cx, name: &str, kind: StructKind, fields: &[FieldInfo]) -> String {
+    // Debug prints the Rust name, not the escaped class name (`List_`).
+    let name = match name.strip_suffix('_') {
+        Some(rust) if escape_keyword(rust) == name => rust,
+        _ => name,
+    };
     let mut segs: Vec<DebugSeg> = Vec::new();
     let mut lit = String::new();
     match kind {
