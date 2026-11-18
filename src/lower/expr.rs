@@ -268,8 +268,9 @@ pub fn literal_expr(cx: &mut Cx, l: &ast::Literal, ty: &Ty) -> Expr {
             Ok(bytes) => {
                 let items: Vec<Expr> = bytes.iter().map(|v| Expr::raw(v.to_string())).collect();
                 if items.is_empty() {
+                    // No elements to infer from: name the type so `b""` isn't a raw list.
                     Expr::New {
-                        ty: "ArrayList<>".into(),
+                        ty: "ArrayList<Integer>".into(),
                         args: vec![],
                     }
                 } else {

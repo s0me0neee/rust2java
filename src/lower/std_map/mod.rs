@@ -27,6 +27,9 @@ use option::{lower_option_method, lower_result_method};
 use text::{lower_small_method, lower_str_method};
 
 pub use coll::{lower_array_expr, lower_entry_assign, lower_repeat, lower_slice_range};
+pub(crate) use io::{
+    bytes_stream, is_io_target, is_reader_source, lines_stream, output_handle, write_status,
+};
 pub(crate) use num::{
     compare_expr, num_cast, unsigned_arith, unsigned_display, unsigned_literal, unsigned_string,
 };
@@ -246,9 +249,9 @@ fn default_value(ty: &Ty) -> Expr {
 
 // Declares (once) the shared stdin reader on the file's last line.
 pub fn need_stdin(cx: &mut Cx) {
-    let decl =
-        "static final BufferedReader STDIN = new BufferedReader(new InputStreamReader(System.in));";
+    let decl = "static final InputStream STDIN = new BufferedInputStream(System.in);";
     if !cx.file_trailer.iter().any(|t| t.contains("STDIN")) {
+        cx.import("java.io.*");
         cx.file_trailer.push(decl.into());
     }
 }
@@ -302,6 +305,7 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
             return Expr::raw("STDIN");
         }
         "io::stdout" | "stdio::stdout" => return Expr::raw("System.out"),
+        "io::stderr" | "stdio::stderr" => return Expr::raw("System.err"),
         "env::args" | "env::args_os" => {
             return Expr::raw("Stream.concat(Stream.of(\"main\"), Arrays.stream(ARGS))");
         }
