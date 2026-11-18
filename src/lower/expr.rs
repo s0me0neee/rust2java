@@ -599,6 +599,10 @@ fn lower_field(cx: &mut Cx, f: &ast::FieldExpr, out: &mut Vec<Stmt>) -> Expr {
         .map(|n| n.text().to_string())
         .unwrap_or_default();
     let name = if !name.is_empty() && name.chars().all(|c| c.is_ascii_digit()) {
+        // rust-analyzer reports `t.1` as a name_ref; tuples are Map.Entry/TupleN, not records.
+        if let Ty::Tuple(ts) = bt.strip_refs() {
+            return tuple_field(b, name.parse().unwrap_or(0), ts.len());
+        }
         format!("_{name}")
     } else {
         super::escape_keyword(&name)
