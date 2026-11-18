@@ -555,7 +555,7 @@ fn lower_cell_op(
                 StmtKind::Expr(Expr::Assign(
                     Box::new(p),
                     "=",
-                    Box::new(default_value(&inner)),
+                    Box::new(default_value_cx(cx, &inner)),
                 )),
             ));
             Some(Expr::name(tmp))

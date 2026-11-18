@@ -13,11 +13,37 @@ use crate::jir::{Expr, Stmt, StmtKind};
 // (Java base string, Java start offset variable)
 pub type View = (String, String);
 
-// Suffix of `base`: `base[from..]`, optionally `.trim_start()`ed.
+// Suffix of `base`: `base[from..]`, optionally `.trim_start()`ed. `branch` is an
+// `if c { &base[a..] } else { &base[b..] }`, whose offset is `c ? a : b` (`from` unused).
 struct Suffix {
     base: ast::Expr,
     from: Option<ast::Expr>,
     trim: bool,
+    branch: Option<(ast::Expr, Option<ast::Expr>, Option<ast::Expr>)>,
+}
+
+fn block_tail(b: ast::BlockExpr) -> Option<ast::Expr> {
+    let list = b.stmt_list()?;
+    if list.statements().next().is_some() {
+        return None;
+    }
+    list.tail_expr()
+}
+
+// The offset a suffix starts at, relative to its base (`None`: at the start).
+fn lower_from(cx: &mut Cx, s: &Suffix, out: &mut Vec<Stmt>) -> Option<Expr> {
+    match &s.branch {
+        Some((cond, a, b)) => {
+            let c = lower_expr(cx, cond, out);
+            let mut side = |e: &Option<ast::Expr>| match e {
+                Some(e) => lower_expr(cx, e, out),
+                None => Expr::raw("0"),
+            };
+            let (a, b) = (side(a), side(b));
+            Some(Expr::Ternary(Box::new(c), Box::new(a), Box::new(b)))
+        }
+        None => s.from.as_ref().map(|f| lower_expr(cx, f, out)),
+    }
 }
 
 fn suffix_form(e: &ast::Expr) -> Option<Suffix> {
@@ -35,7 +61,35 @@ fn suffix_form(e: &ast::Expr) -> Option<Suffix> {
                     base: recv,
                     from: None,
                     trim: true,
+                    branch: None,
                 },
+            })
+        }
+        // `if c { &rest[a..] } else { &rest[b..] }`: both arms must be suffixes of one base.
+        ast::Expr::IfExpr(i) => {
+            let cond = i.condition()?;
+            if matches!(cond, ast::Expr::LetExpr(_)) {
+                return None;
+            }
+            let then = suffix_form(&block_tail(i.then_branch()?)?)?;
+            let ast::ElseBranch::Block(else_block) = i.else_branch()? else {
+                return None;
+            };
+            let other = suffix_form(&block_tail(else_block)?)?;
+            let same_base =
+                then.base.syntax().text().to_string() == other.base.syntax().text().to_string();
+            if !same_base
+                || then.trim != other.trim
+                || then.branch.is_some()
+                || other.branch.is_some()
+            {
+                return None;
+            }
+            Some(Suffix {
+                base: then.base,
+                from: None,
+                trim: then.trim,
+                branch: Some((cond, then.from, other.from)),
             })
         }
         ast::Expr::IndexExpr(ix) => {
@@ -49,6 +103,7 @@ fn suffix_form(e: &ast::Expr) -> Option<Suffix> {
                 base: ix.base()?,
                 from: r.start(),
                 trim: false,
+                branch: None,
             })
         }
         _ => None,
@@ -172,11 +227,19 @@ pub fn lower_view_let(
     out: &mut Vec<Stmt>,
 ) {
     let (base_ast, from, trim) = match suffix_form(init) {
-        Some(s) => (s.base, s.from, s.trim),
-        None => (init.clone(), None, false),
+        Some(s) => {
+            let base = s.base.clone();
+            // The base is evaluated first, as in Rust's `base[from..]`.
+            let b = lower_expr(cx, &base, out);
+            let from = lower_from(cx, &s, out);
+            (Some(b), from, s.trim)
+        }
+        None => (None, None, false),
     };
-    let base = lower_expr(cx, &base_ast, out);
-    let from = from.map(|f| lower_expr(cx, &f, out));
+    let base = match base_ast {
+        Some(b) => b,
+        None => lower_expr(cx, init, out),
+    };
     // A computed base gets the Rust name; the offset is `<name>_start`.
     let base = match base {
         Expr::Name(n) => n,
@@ -218,8 +281,7 @@ pub fn view_assign(cx: &mut Cx, view: &View, rhs: &ast::Expr, out: &mut Vec<Stmt
     let s = suffix_form(rhs)?;
     let line = cx.line(rhs.syntax());
     let (base, start) = view;
-    if let Some(from) = s.from {
-        let k = lower_expr(cx, &from, out);
+    if let Some(k) = lower_from(cx, &s, out) {
         out.push(Stmt::new(
             line,
             StmtKind::Expr(Expr::Assign(Box::new(Expr::name(start)), "+=", Box::new(k))),

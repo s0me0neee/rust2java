@@ -642,6 +642,55 @@ fn option_ref_place(cx: &mut Cx, inner: &ast::Expr, out: &mut Vec<Stmt>) -> Opti
     Some((target, inner_ty))
 }
 
+// The Option place of `o.get_or_insert(..)` / `get_or_insert_with` / `insert` when its value is
+// immutable in Java (writes must replace the Optional's content).
+fn option_fill_target(cx: &Cx, call: &ast::MethodCallExpr) -> Option<ast::Expr> {
+    let name = call.name_ref()?.text().to_string();
+    if !matches!(
+        name.as_str(),
+        "get_or_insert" | "get_or_insert_with" | "insert"
+    ) {
+        return None;
+    }
+    let o = call.receiver()?;
+    match cx.ty(&o).strip_refs() {
+        Ty::Option(t) if super::is_cell_value_ty(t) && plain_place(&o) => Some(o),
+        _ => None,
+    }
+}
+
+fn option_write(
+    cx: &mut Cx,
+    o: ast::Expr,
+    lhs: &ast::Expr,
+    sym: &'static str,
+    r: Expr,
+    out: &mut Vec<Stmt>,
+) -> Expr {
+    let elem_ty = match cx.ty(&o).strip_refs() {
+        Ty::Option(t) => (**t).clone(),
+        _ => Ty::Other("?".into()),
+    };
+    let target = lower_expr(cx, &o, out);
+    let value = if sym == "=" {
+        r
+    } else {
+        let cur = Expr::call(target.clone(), "get", vec![]);
+        narrow_if_needed(
+            Expr::bin(cur, static_op(sym.trim_end_matches('=')), r),
+            &elem_ty,
+        )
+    };
+    let _ = lhs;
+    place_assign(
+        cx,
+        &o,
+        "=",
+        Expr::call(Expr::raw("Optional"), "of", vec![value]),
+        out,
+    )
+}
+
 fn plain_place(e: &ast::Expr) -> bool {
     match e {
         ast::Expr::PathExpr(_) => true,
@@ -717,6 +766,13 @@ pub fn place_assign(
         && ts.len() >= 2
     {
         return tuple_field_assign(cx, lhs, &base, &f, &ts, sym, r, out);
+    }
+    // `o.get_or_insert_with(f).push(c)` on a `String`/number: the receiver was lowered (and
+    // filled) by the caller; the new value goes back into the Optional.
+    if let ast::Expr::MethodCallExpr(call) = super::strip_parens(lhs)
+        && let Some(o) = option_fill_target(cx, &call)
+    {
+        return option_write(cx, o, lhs, sym, r, out);
     }
     if let Some(b) = cx.builder_path(lhs) {
         return match sym {
@@ -814,6 +870,13 @@ pub fn place_assign(
         }
         ast::Expr::PrefixExpr(p) if p.op_kind() == Some(ast::UnaryOp::Deref) => {
             let inner = p.expr().unwrap();
+            // `*o.get_or_insert(v) += 1`: fill `o`, then write the new value into it.
+            if let ast::Expr::MethodCallExpr(call) = super::strip_parens(&inner)
+                && let Some(o) = option_fill_target(cx, &call)
+            {
+                let _ = lower_expr(cx, &inner, out);
+                return option_write(cx, o, lhs, sym, r, out);
+            }
             if let Some((target, elem_ty)) = option_ref_place(cx, &inner, out) {
                 let value = if sym == "=" {
                     r
@@ -1288,10 +1351,13 @@ pub fn lower_closure(cx: &mut Cx, c: &ast::ClosureExpr, out: &mut Vec<Stmt>) -> 
     for (rust, java) in copies {
         cx.bind_name(&rust, &java);
     }
+    let before = cx.taken_names();
     cx.lambda_depth += 1;
     let e = lower_closure_inner(cx, c);
     cx.lambda_depth -= 1;
     cx.pop_scope();
+    // Sibling lambdas may reuse `value`, `item`, ...: Java scopes each lambda's names to itself.
+    cx.release_names_since(&before);
     e
 }
 
@@ -1416,7 +1482,7 @@ fn lower_closure_inner(cx: &mut Cx, c: &ast::ClosureExpr) -> Expr {
                         .name()
                         .map(|n| n.text().to_string())
                         .unwrap_or_else(|| "_".into());
-                    params.push(cx.declare(&n));
+                    params.push(cx.declare_param(&n));
                 }
                 Some(ast::Pat::WildcardPat(_)) | None => params.push(cx.fresh("unused")),
                 Some(other) => {

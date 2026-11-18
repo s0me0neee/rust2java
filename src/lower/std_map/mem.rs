@@ -118,7 +118,7 @@ pub(super) fn mem_replace(
     let ty = cx.ty(&place_ast);
     let old = expr::lower_expr(cx, &place_ast, out);
     let new = if take {
-        default_value(&ty)
+        default_value_cx(cx, &ty)
     } else {
         expr::lower_expr(cx, asts.get(1).unwrap_or(a_ast), out)
     };

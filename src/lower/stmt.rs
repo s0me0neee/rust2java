@@ -44,6 +44,13 @@ pub fn lower_stmt_list(cx: &mut Cx, list: &ast::StmtList, dest: &Dest, out: &mut
 }
 
 pub fn lower_stmt(cx: &mut Cx, s: &ast::Stmt, out: &mut Vec<Stmt>) {
+    // Lambda names of this statement stop mattering once it is done.
+    let saved = cx.stmt_lambda_names.clone();
+    lower_stmt_inner(cx, s, out);
+    cx.stmt_lambda_names = saved;
+}
+
+fn lower_stmt_inner(cx: &mut Cx, s: &ast::Stmt, out: &mut Vec<Stmt>) {
     match s {
         ast::Stmt::LetStmt(l) => lower_let(cx, l, out),
         ast::Stmt::ExprStmt(es) => {

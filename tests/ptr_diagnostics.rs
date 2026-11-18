@@ -70,11 +70,12 @@ fn main() {
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success());
+    // `set(&mut n.next);` as a statement is supported (cell + write-back); the alias is not.
     assert_eq!(
         stderr
             .matches("`&mut` to a field/element of immutable Java type")
             .count(),
-        2,
+        1,
         "{stderr}"
     );
     assert!(

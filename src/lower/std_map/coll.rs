@@ -612,7 +612,7 @@ pub(super) fn entry_method(
             let a = m.arg_list()?.args().next()?;
             ctor_value(cx, &a, &v_ty, out)?
         }
-        _ => default_value(&v_ty),
+        _ => default_value_cx(cx, &v_ty),
     };
     let ignored = cx.fresh("ignored");
     let f = Expr::Lambda {
@@ -668,7 +668,7 @@ fn and_modify(
     let fresh = match name {
         "or_insert" => expr::lower_expr(cx, &m.arg_list()?.args().next()?, out),
         "or_insert_with" => ctor_value(cx, &m.arg_list()?.args().next()?, &v_ty, out)?,
-        _ => default_value(&v_ty),
+        _ => default_value_cx(cx, &v_ty),
     };
     let body = conditional(
         Expr::bin(Expr::name(&x), "==", Expr::raw("null")),
@@ -758,7 +758,7 @@ pub(super) fn ctor_value(cx: &mut Cx, a: &ast::Expr, ty: &Ty, out: &mut Vec<Stmt
             ty: "HashSet<>".into(),
             args: vec![],
         },
-        "default" => default_value(ty),
+        "default" => default_value_cx(cx, ty),
         _ => return None,
     })
 }
@@ -841,7 +841,7 @@ pub fn lower_entry_assign(
                 ctor_value(cx, &arg, &v_ty, out)?
             }
         }
-        _ => default_value(&v_ty),
+        _ => default_value_cx(cx, &v_ty),
     };
     let ignored = cx.fresh("ignored");
     out.push(Stmt::new(

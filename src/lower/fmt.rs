@@ -1326,8 +1326,9 @@ fn debug_lambda(
     mut pre: Vec<Stmt>,
 ) -> Expr {
     if pre.is_empty() {
-        return lambda(name, body);
+        return lambda(cx, name, body);
     }
+    cx.release_param(&name);
     let line = cx.line(node);
     pre.push(Stmt::new(line, StmtKind::Return(Some(body))));
     Expr::Lambda {
@@ -1354,7 +1355,7 @@ fn debug_with_spec(
     }
     match ty.strip_refs() {
         Ty::Vec(inner) | Ty::Deque(inner) | Ty::Set { t: inner, .. } => {
-            let name = cx.fresh("fmt_item");
+            let name = cx.fresh_param("fmt_item");
             let mut pre = Vec::new();
             let item = format_one(cx, node, Expr::name(&name), inner, spec, counts, &mut pre);
             let mapper = debug_lambda(cx, node, name, item, pre);
@@ -1377,7 +1378,7 @@ fn debug_with_spec(
             Expr::call(mapped, "collect", vec![joining])
         }
         Ty::Map { k, v, .. } => {
-            let name = cx.fresh("fmt_entry");
+            let name = cx.fresh_param("fmt_entry");
             let mut pre = Vec::new();
             let key = format_one(
                 cx,
@@ -1409,7 +1410,7 @@ fn debug_with_spec(
             Expr::call(mapped, "collect", vec![joining])
         }
         Ty::Option(inner) => {
-            let name = cx.fresh("fmt_some");
+            let name = cx.fresh_param("fmt_some");
             let mut pre = Vec::new();
             let item = format_one(cx, node, Expr::name(&name), inner, spec, counts, &mut pre);
             let some = concat(vec![Expr::str_lit("Some("), item, Expr::str_lit(")")]);
@@ -1474,7 +1475,8 @@ fn debug_with_spec(
     }
 }
 
-fn lambda(name: String, body: Expr) -> Expr {
+fn lambda(cx: &mut Cx, name: String, body: Expr) -> Expr {
+    cx.release_param(&name);
     Expr::Lambda {
         params: vec![name],
         body: LambdaBody::Expr(Box::new(body)),
@@ -1492,9 +1494,9 @@ fn debug_mapper(cx: &mut Cx, ty: &Ty) -> Expr {
     {
         return Expr::raw(format!("{java}::debug"));
     }
-    let name = cx.fresh("fmt_item");
+    let name = cx.fresh_param("fmt_item");
     let item = debug(cx, Expr::name(&name), ty);
-    lambda(name, item)
+    lambda(cx, name, item)
 }
 
 // Rust's `{:?}` escaping for str/char, emitted once per file as `debug_str` on the trailer line.
@@ -1562,12 +1564,12 @@ pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
         Ty::Vec(inner) | Ty::Deque(inner) => debug_sequence(cx, v, inner, "[", "]"),
         Ty::Set { t, .. } => debug_sequence(cx, v, t, "{", "}"),
         Ty::Map { k, v: value, .. } => {
-            let name = cx.fresh("fmt_entry");
+            let name = cx.fresh_param("fmt_entry");
             let key = debug_operand(cx, Expr::call(Expr::name(&name), "getKey", vec![]), k);
             let val = debug_operand(cx, Expr::call(Expr::name(&name), "getValue", vec![]), value);
             let entry = concat(vec![key, Expr::str_lit(": "), val]);
             let stream = Expr::call(Expr::call(v, "entrySet", vec![]), "stream", vec![]);
-            let mapped = Expr::call(stream, "map", vec![lambda(name, entry)]);
+            let mapped = Expr::call(stream, "map", vec![lambda(cx, name, entry)]);
             let joining = Expr::call(
                 Expr::raw("Collectors"),
                 "joining",
@@ -1576,11 +1578,11 @@ pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
             Expr::call(mapped, "collect", vec![joining])
         }
         Ty::Option(inner) => {
-            let name = cx.fresh("fmt_some");
+            let name = cx.fresh_param("fmt_some");
             let value = debug_operand(cx, Expr::name(&name), inner);
             let some = concat(vec![Expr::str_lit("Some("), value, Expr::str_lit(")")]);
             Expr::call(
-                Expr::call(v, "map", vec![lambda(name, some)]),
+                Expr::call(v, "map", vec![lambda(cx, name, some)]),
                 "orElse",
                 vec![Expr::str_lit("None")],
             )
@@ -1753,7 +1755,7 @@ pub fn lower_debug_builder(
                     }
                     _ => Expr::call(src, "stream", vec![]),
                 };
-                let x = cx.fresh("item");
+                let x = cx.fresh_param("item");
                 let text = match (&kind[..], &item_ty) {
                     ("debug_map", Ty::Tuple(kv)) if kv.len() == 2 => {
                         let k = debug(cx, Expr::call(Expr::name(&x), "getKey", vec![]), &kv[0]);
@@ -1762,6 +1764,7 @@ pub fn lower_debug_builder(
                     }
                     _ => debug(cx, Expr::name(&x), &item_ty),
                 };
+                cx.release_param(&x);
                 let mapper = Expr::Lambda {
                     params: vec![x],
                     body: crate::jir::LambdaBody::Expr(Box::new(debug_string(text))),

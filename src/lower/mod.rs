@@ -75,6 +75,9 @@ pub struct Cx<'a, 'db> {
     // write-backs that must follow that statement.
     pub write_back_call: Option<SyntaxNode>,
     pub write_backs: Vec<jir::Stmt>,
+    // Lambda parameter names used in the current statement (see `release_param`).
+    pub stmt_lambda_names: HashSet<String>,
+    param_mode: bool,
     // Locals that *are* a one-element array: `Cell<i32>`/`RefCell<i32>` handles (`int[] c = {0}`).
     pub cell_handles: HashSet<ra_ap_hir::Local<'db>>,
     // >0 while lowering a closure body: statements hoisted to `out` would run only once, outside it.
@@ -186,6 +189,8 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         mutated: None,
         write_back_call: None,
         write_backs: Vec::new(),
+        stmt_lambda_names: HashSet::new(),
+        param_mode: false,
         cell_handles: HashSet::new(),
         lambda_depth: 0,
         pulled_iters: HashMap::new(),
@@ -360,6 +365,7 @@ impl<'a, 'db> Cx<'a, 'db> {
         self.method_names.clear();
         self.tmp_counter = 0;
         self.cells.clear();
+        self.stmt_lambda_names.clear();
         self.builders.clear();
         self.views.clear();
         self.cell_handles.clear();
@@ -735,6 +741,46 @@ impl<'a, 'db> Cx<'a, 'db> {
         self.switch_depth = saved.switch_depth;
     }
 
+    // Names taken so far in the current method; a lambda's own names can be released after it,
+    // since Java only forbids lambda names that shadow enclosing locals.
+    pub fn taken_names(&self) -> HashSet<String> {
+        self.method_names.clone()
+    }
+
+    // After a lambda is built, its names are free for sibling lambdas; locals of the same
+    // statement (hoisted before it) still avoid them.
+    pub fn release_names_since(&mut self, before: &HashSet<String>) {
+        let added: Vec<String> = self.method_names.difference(before).cloned().collect();
+        for n in added {
+            self.release_param(&n);
+        }
+    }
+
+    // A generated lambda parameter: avoids locals and enclosing lambdas' parameters only.
+    pub fn fresh_param(&mut self, base: &str) -> String {
+        self.param_mode = true;
+        let n = self.fresh(base);
+        self.param_mode = false;
+        n
+    }
+
+    pub fn declare_param(&mut self, rust: &str) -> String {
+        self.param_mode = true;
+        let n = self.declare(rust);
+        self.param_mode = false;
+        n
+    }
+
+    pub fn release_param(&mut self, name: &str) {
+        self.method_names.remove(name);
+        self.stmt_lambda_names.insert(name.to_string());
+    }
+
+    fn name_taken(&self, name: &str) -> bool {
+        self.method_names.contains(name)
+            || (!self.param_mode && self.stmt_lambda_names.contains(name))
+    }
+
     pub fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
     }
@@ -754,7 +800,7 @@ impl<'a, 'db> Cx<'a, 'db> {
         } else {
             ""
         };
-        while self.method_names.contains(&name) {
+        while self.name_taken(&name) {
             name = format!("{base}{sep}{n}");
             n += 1;
             if self.file_idents.contains(&name) {
@@ -802,7 +848,7 @@ impl<'a, 'db> Cx<'a, 'db> {
                 _ => format!("{base}{n}"),
             };
             n += 1;
-            if !self.method_names.contains(&name)
+            if !self.name_taken(&name)
                 && !self.file_idents.contains(&name)
                 && !RESERVED_NAMES.contains(&name.as_str())
                 && escape_keyword(&name) == name

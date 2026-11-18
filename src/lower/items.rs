@@ -2336,7 +2336,7 @@ fn derive_methods(
         out.push(compare_method(cx, node, name, fields));
     }
     if has("Default") {
-        out.push(default_method(name, generic_decls, kind, fields));
+        out.push(default_method(cx, name, generic_decls, kind, fields));
     }
     out
 }
@@ -2713,6 +2713,7 @@ fn clone_value(ty: &Ty, v: &str) -> String {
 }
 
 fn default_method(
+    cx: &mut Cx,
     name: &str,
     generic_decls: &[String],
     kind: StructKind,
@@ -2722,14 +2723,18 @@ fn default_method(
     if kind == StructKind::Unit {
         return format!("public static {generics}{name} default_() {{ return INSTANCE; }}");
     }
-    let args: Vec<String> = fields.iter().map(|f| default_value(&f.ty)).collect();
+    let args: Vec<String> = fields.iter().map(|f| default_value(cx, &f.ty)).collect();
     format!(
         "public static {generics}{name} default_() {{ return new {name}({}); }}",
         args.join(", ")
     )
 }
 
-fn default_value(ty: &Ty) -> String {
+fn default_value(cx: &mut Cx, ty: &Ty) -> String {
+    // Ordered collections of keys Java can't compare need the Rust `Ord` comparator.
+    if let Some(e) = super::std_map::ordered_new(cx, ty) {
+        return crate::emit::render_expr(&e);
+    }
     match ty.strip_refs() {
         Ty::Int(i) if i.is_long() => "0L".into(),
         Ty::Int(_) => "0".into(),
@@ -2757,8 +2762,8 @@ fn default_value(ty: &Ty) -> String {
         Ty::Tuple(ts) if ts.len() == 2 => {
             format!(
                 "Map.entry({}, {})",
-                default_value(&ts[0]),
-                default_value(&ts[1])
+                default_value(cx, &ts[0]),
+                default_value(cx, &ts[1])
             )
         }
         _ => "null".into(),

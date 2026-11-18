@@ -101,7 +101,10 @@ pub(super) fn lower_option_method(
         "unwrap_or_default" => Some(Expr::call(
             recv,
             "orElse",
-            vec![default_value(&inner.unwrap_or(Ty::Other("?".into())))],
+            vec![default_value_cx(
+                cx,
+                &inner.unwrap_or(Ty::Other("?".into())),
+            )],
         )),
         "map" | "and_then" | "filter" => {
             let java = if name == "and_then" { "flatMap" } else { name };
@@ -212,16 +215,26 @@ pub(super) fn lower_option_method(
             Some(Expr::call(recv, "get", vec![]))
         }
         "get_or_insert" | "get_or_insert_with" => {
-            let present = Expr::call(recv.clone(), "isPresent", vec![]);
-            let filled = if name == "get_or_insert" {
-                opt_of(b0)
-            } else {
-                let ty = inner.clone().unwrap_or(Ty::Other("?".into()));
-                opt_of(lambda_call(b0, &ty))
+            let ty = inner.clone().unwrap_or(Ty::Other("?".into()));
+            let value = match (name, arg_asts(m).first()) {
+                ("get_or_insert", _) => b0,
+                (_, Some(a)) => {
+                    super::coll::ctor_value(cx, a, &ty, out).unwrap_or_else(|| lambda_call(b0, &ty))
+                }
+                _ => lambda_call(b0, &ty),
             };
-            let keep = Expr::Ternary(Box::new(present), Box::new(recv.clone()), Box::new(filled));
-            let assign = expr::place_assign(cx, recv_ast, "=", keep, out);
-            out.push(Stmt::new(line, StmtKind::Expr(assign)));
+            // `if (o.isEmpty()) o = Optional.of(v);`, then the value is `o.get()`.
+            let mut fill = Vec::new();
+            let assign = expr::place_assign(cx, recv_ast, "=", opt_of(value), &mut fill);
+            out.extend(fill);
+            out.push(Stmt::new(
+                line,
+                StmtKind::Raw(format!(
+                    "if ({}.isEmpty()) {};",
+                    render(&recv),
+                    render(&assign)
+                )),
+            ));
             Some(Expr::call(recv, "get", vec![]))
         }
         "is_some_and" => {
@@ -391,7 +404,11 @@ pub(super) fn lower_result_method(
         "map" | "map_err" | "and_then" => Some(Expr::call(recv, name, vec![b0])),
         "unwrap_or" => Some(Expr::call(recv, "unwrap_or", vec![b0])),
         "unwrap_or_else" => Some(Expr::call(recv, "unwrap_or_else", vec![b0])),
-        "unwrap_or_default" => Some(Expr::call(recv, "unwrap_or", vec![default_value(&ok_ty)])),
+        "unwrap_or_default" => Some(Expr::call(
+            recv,
+            "unwrap_or",
+            vec![default_value_cx(cx, &ok_ty)],
+        )),
         "is_ok_and" => {
             let mapped = Expr::call(recv, "map", vec![b0]);
             Some(Expr::call(mapped, "unwrap_or", vec![Expr::raw("false")]))

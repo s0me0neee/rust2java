@@ -211,7 +211,7 @@ fn wrap_try_ok(
 }
 
 // `new TreeSet<>(cmp)` / `new TreeMap<>(cmp)` when the key needs a comparator for Rust's `Ord`.
-fn ordered_new(cx: &mut Cx, ty: &Ty) -> Option<Expr> {
+pub(crate) fn ordered_new(cx: &mut Cx, ty: &Ty) -> Option<Expr> {
     let (class, key) = match ty.strip_refs() {
         Ty::Set { ordered: true, t } => ("TreeSet<>", t),
         Ty::Map {
@@ -276,7 +276,11 @@ fn clone_expr(e: Expr, ty: &Ty) -> Expr {
     }
 }
 
-// Zero value for `Default::default` / `unwrap_or_default`.
+// Zero value for `Default::default` / `unwrap_or_default` / `or_default`.
+fn default_value_cx(cx: &mut Cx, ty: &Ty) -> Expr {
+    ordered_new(cx, ty).unwrap_or_else(|| default_value(ty))
+}
+
 fn default_value(ty: &Ty) -> Expr {
     match ty.strip_refs() {
         Ty::Bool => Expr::raw("false"),
@@ -526,7 +530,21 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
                 Expr::name(name)
             }
         }
-        "Default::default" => default_value(&ret),
+        "Default::default" => default_value_cx(cx, &ret),
+        k if k.ends_with("::default")
+            && matches!(
+                ret.strip_refs(),
+                Ty::Vec(_)
+                    | Ty::Deque(_)
+                    | Ty::Heap(_)
+                    | Ty::Set { .. }
+                    | Ty::Map { .. }
+                    | Ty::Str
+                    | Ty::Option(_)
+            ) =>
+        {
+            default_value_cx(cx, &ret)
+        }
         "From::from" | "Into::into" => match ret.strip_refs() {
             Ty::Set { ordered: true, .. } | Ty::Map { ordered: true, .. }
                 if ordered_new(cx, &ret).is_some() =>
@@ -861,6 +879,23 @@ pub fn lower_std_path(cx: &mut Cx, path: &ast::Path, def: ModuleDef) -> Expr {
                 return Expr::raw(format!("{last}::new"));
             }
             _ => {}
+        }
+    }
+    // `get_or_insert_with(String::new)`, `or_insert_with(Vec::new)`: constructor references.
+    if last == "new" && matches!(def, ModuleDef::Function(_)) {
+        let owner = parts.iter().rev().nth(1).copied().unwrap_or("");
+        let java = match owner {
+            "String" => Some("String::new"),
+            "Vec" => Some("ArrayList::new"),
+            "HashMap" => Some("HashMap::new"),
+            "HashSet" => Some("HashSet::new"),
+            "BTreeMap" => Some("TreeMap::new"),
+            "BTreeSet" => Some("TreeSet::new"),
+            "VecDeque" => Some("ArrayDeque::new"),
+            _ => None,
+        };
+        if let Some(j) = java {
+            return Expr::raw(j);
         }
     }
     let signed_or_float = matches!(
