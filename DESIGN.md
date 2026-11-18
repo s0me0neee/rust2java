@@ -298,6 +298,7 @@ Rust generics become Java generics, with primitives boxed in type arguments. Std
 
 ## 9. Expressions, control flow, patterns
 
+- **`var`.** A non-`mut` `let` with a generic std type (`List<…>`, `Map.Entry<…>`, `Optional<…>`) is declared `var` when the initializer alone infers exactly that type: no diamond, lambda, ternary or `empty()`, no user types, and no `Long`/`Short`/`Byte`/`Float` arguments (literals would infer `Integer`). Other locals keep their explicit type.
 - **Values from blocks.** `let x = { stmts; e };` → `int x; { stmts; x = e; }`. The same destination-passing lowering applies to `if`, `match` and `loop` in value position.
 - **`if`/`else` as a value** becomes `c ? a : b` when both branches are plain expressions.
 - **`match` as a value** becomes a switch expression, unless an arm contains `return`, `break`, `continue` or `?`. Java forbids jumping out of a switch expression, so those cases become a switch statement that assigns to a destination.

@@ -100,7 +100,8 @@ fn line_arg(cx: &mut Cx, m: &ast::MethodCallExpr, out: &mut Vec<Stmt>) -> Option
     Some(expr::lower_expr(cx, &ref_inner(&arg), out))
 }
 
-// Decode only at the String boundary so text reads retain Rust's byte counts and UTF-8 errors.
+// Decode only at the String boundary so text reads keep Rust's byte counts (invalid UTF-8 becomes
+// U+FFFD instead of an error: accepted).
 fn read_into(cx: &mut Cx, m: &ast::MethodCallExpr, to_string: bool, out: &mut Vec<Stmt>) -> Expr {
     let line = cx.line(m.syntax());
     let rdr = lower_receiver(cx, m, out);
@@ -122,7 +123,7 @@ fn read_into(cx: &mut Cx, m: &ast::MethodCallExpr, to_string: bool, out: &mut Ve
         format!(" if ({ch} == 10) break;")
     };
     let read = format!(
-        "ByteArrayOutputStream {text} = new ByteArrayOutputStream(); for (int {ch}; ({ch} = {rs}.read()) != -1;) {{ {text}.write({ch});{stop} }} {ps} += StandardCharsets.UTF_8.newDecoder().decode(java.nio.ByteBuffer.wrap({text}.toByteArray())).toString();"
+        "ByteArrayOutputStream {text} = new ByteArrayOutputStream(); for (int {ch}; ({ch} = {rs}.read()) != -1;) {{ {text}.write({ch});{stop} }} {ps} += {text}.toString(StandardCharsets.UTF_8);"
     );
     let e = ast::Expr::MethodCallExpr(m.clone());
     if unwrapped(cx, &e) {
@@ -739,7 +740,7 @@ pub(crate) fn lines_stream(cx: &mut Cx, recv: Expr, line_mode: bool) -> Expr {
     let len = cx.fresh("len");
     let ex = cx.fresh("ex");
     Expr::raw(format!(
-        "Stream.<Result<String, Object>>generate(() -> {{ try {{ ByteArrayOutputStream {text} = new ByteArrayOutputStream(); for (int {ch}; ({ch} = {r}.read()) != -1;) {{ {text}.write({ch}); if ({ch} == 10) break; }} byte[] {bytes} = {text}.toByteArray(); int {len} = {bytes}.length; if ({len} == 0) return null; if ({bytes}[{len} - 1] == 10) {{ {len}--; if ({len} > 0 && {bytes}[{len} - 1] == 13) {len}--; }} return new Ok<>(StandardCharsets.UTF_8.newDecoder().decode(java.nio.ByteBuffer.wrap({bytes}, 0, {len})).toString()); }} catch (IOException {ex}) {{ return new Err<>({ex}); }} }}).takeWhile(Objects::nonNull)"
+        "Stream.<Result<String, Object>>generate(() -> {{ try {{ ByteArrayOutputStream {text} = new ByteArrayOutputStream(); for (int {ch}; ({ch} = {r}.read()) != -1;) {{ {text}.write({ch}); if ({ch} == 10) break; }} byte[] {bytes} = {text}.toByteArray(); int {len} = {bytes}.length; if ({len} == 0) return null; if ({bytes}[{len} - 1] == 10) {{ {len}--; if ({len} > 0 && {bytes}[{len} - 1] == 13) {len}--; }} return new Ok<>(new String({bytes}, 0, {len}, StandardCharsets.UTF_8)); }} catch (IOException {ex}) {{ return new Err<>({ex}); }} }}).takeWhile(Objects::nonNull)"
     ))
 }
 

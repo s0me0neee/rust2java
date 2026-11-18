@@ -1,3 +1,4 @@
-invalid=true text=kept
+invalid=false text=keptok
+
 bytes=[0, 255]
 n=3 rest=[42, 128, 13, 97]

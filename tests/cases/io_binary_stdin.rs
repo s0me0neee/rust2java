@@ -1,3 +1,4 @@
+// read_line then raw bytes from the same stdin (non-UTF-8 bytes only reach the byte reads).
 use std::io::{self, BufRead, Read};
 
 fn main() {

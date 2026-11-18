@@ -55,6 +55,55 @@ pub fn lower_stmt(cx: &mut Cx, s: &ast::Stmt, out: &mut Vec<Stmt>) {
     }
 }
 
+// `var` for a long generic type, when the initializer alone determines exactly that type. Boxed
+// Long/Short/Byte/Float are excluded: `Map.entry(i, 0)` would infer Integer from the literal.
+fn var_infers(jty: &str, init: &Expr) -> bool {
+    if !jty.contains('<')
+        || ["Long", "Short", "Byte", "Float"]
+            .iter()
+            .any(|t| jty.contains(t))
+    {
+        return false;
+    }
+    // Only std types: a list of user values could infer an intersection type, not the interface.
+    let std_only = jty
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|w| w.starts_with(|c: char| c.is_ascii_uppercase()))
+        .all(|w| {
+            matches!(
+                w,
+                "List"
+                    | "ArrayList"
+                    | "Map"
+                    | "Entry"
+                    | "HashMap"
+                    | "TreeMap"
+                    | "Set"
+                    | "HashSet"
+                    | "TreeSet"
+                    | "ArrayDeque"
+                    | "PriorityQueue"
+                    | "Optional"
+                    | "Stream"
+                    | "Integer"
+                    | "Character"
+                    | "String"
+                    | "Boolean"
+                    | "Double"
+            )
+        });
+    let text = crate::emit::render_expr(init);
+    std_only
+        && !matches!(init, Expr::Lambda { .. } | Expr::Ternary(..))
+        && !text.contains("->")
+        && !text.contains("<>")
+        && !text.contains("empty")
+        && !text.contains(" ? ")
+        && !text.contains("Optional.empty()")
+        && !text.contains("::")
+        && !text.starts_with("null")
+}
+
 // `[a, b]` or `vec![a, b]` (not the `[x; n]` repeat form).
 fn is_list_literal(e: &ast::Expr) -> bool {
     match e {
@@ -170,6 +219,11 @@ pub fn lower_let(cx: &mut Cx, l: &ast::LetStmt, out: &mut Vec<Stmt>) {
             let e = expr::lower_expr_as(cx, &init, &ty, out);
             cx.read_only_literal = false;
             let name = cx.declare(&rust_name);
+            let jty = if ip.mut_token().is_none() && var_infers(&jty, &e) {
+                "var".to_string()
+            } else {
+                jty
+            };
             out.push(Stmt::new(
                 line,
                 StmtKind::Local {

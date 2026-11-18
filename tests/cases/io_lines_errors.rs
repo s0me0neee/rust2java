@@ -1,4 +1,4 @@
-// Exact byte-level line splitting: the byte read below keeps stdin out of line mode.
+// Byte-level line splitting (lone \r kept, \r\n stripped): the byte read keeps stdin out of line mode.
 use std::io::{self, BufRead, Read};
 
 fn main() {
