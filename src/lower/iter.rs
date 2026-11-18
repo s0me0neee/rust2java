@@ -172,6 +172,39 @@ fn lower_for_kind(
         return ForStmt::Counted { header, body };
     }
 
+    // `for (a, b) in v.iter().zip(w)` over lists: index loop up to the shorter list.
+    if let ast::Pat::TuplePat(tp) = p
+        && tp.fields().count() == 2
+        && let Some((left_ast, right_ast)) = zip_lists(cx, iterable)
+    {
+        let fields: Vec<ast::Pat> = tp.fields().collect();
+        let (lt, rt) = (cx.ty(&left_ast), cx.ty(&right_ast));
+        let left = expr::lower_expr(cx, &left_ast, out);
+        let left = ensure_simple(cx, left, &lt, line, out);
+        let right = expr::lower_expr(cx, &right_ast, out);
+        let right = ensure_simple(cx, right, &rt, line, out);
+        let idx = cx.fresh("i");
+        let (ls, rs) = (render(&left), render(&right));
+        let header = format!("int {idx} = 0; {idx} < Math.min({ls}.size(), {rs}.size()); {idx}++");
+        let mut binds = Vec::new();
+        super::pat::bind_pattern(
+            cx,
+            &fields[0],
+            Expr::call(left, "get", vec![Expr::name(idx.clone())]),
+            &mut binds,
+        );
+        super::pat::bind_pattern(
+            cx,
+            &fields[1],
+            Expr::call(right, "get", vec![Expr::name(idx)]),
+            &mut binds,
+        );
+        let mut body = loop_body(cx, f);
+        binds.append(&mut body.stmts);
+        body.stmts = binds;
+        return ForStmt::Counted { header, body };
+    }
+
     // `for x in v.iter_mut()` over immutable Java values: index loop where `*x` reads/writes `v[i]`.
     if let ast::Pat::IdentPat(ip) = p
         && let Some(name) = simple_ident(p)
@@ -323,6 +356,19 @@ fn enumerate_of_list(cx: &Cx, e: &ast::Expr) -> Option<ast::Expr> {
     list_receiver_of_iter(cx, &m.receiver()?)
 }
 
+// `v.iter().zip(w)` where both sides are lists: returns the two lists' ASTs.
+fn zip_lists(cx: &Cx, e: &ast::Expr) -> Option<(ast::Expr, ast::Expr)> {
+    let ast::Expr::MethodCallExpr(m) = strip_parens(e) else {
+        return None;
+    };
+    if method_name(&m) != "zip" {
+        return None;
+    }
+    let left = list_receiver_of_iter(cx, &m.receiver()?)?;
+    let right = list_receiver_of_iter(cx, &m.arg_list()?.args().next()?)?;
+    Some((left, right))
+}
+
 fn iter_mut_of_list(cx: &Cx, e: &ast::Expr) -> Option<ast::Expr> {
     let target = match strip_parens(e) {
         ast::Expr::MethodCallExpr(m) if method_name(&m) == "iter_mut" => m.receiver()?,
@@ -404,12 +450,40 @@ fn for_each_source(
             Box::new(Expr::raw(format!("{}::iterator", render(&stream)))),
         );
     }
+    // A collection lowered to `c.stream()` is iterable as `c` itself.
+    if let Some(list) = collection_stream(&src) {
+        return list;
+    }
     match it_ty.strip_refs() {
         Ty::Iter(t) => Expr::Cast(
             format!("Iterable<{}>", t.boxed()),
             Box::new(Expr::raw(format!("{}::iterator", render(&src)))),
         ),
         other => collection_iterable(src, other),
+    }
+}
+
+// `c.stream()` where `c` is a collection: the collection is already `Iterable`.
+fn collection_stream(e: &Expr) -> Option<Expr> {
+    let Expr::Call {
+        recv: Some(recv),
+        name,
+        args,
+    } = e
+    else {
+        return None;
+    };
+    if name != "stream" || !args.is_empty() {
+        return None;
+    }
+    match &**recv {
+        Expr::Name(_) => Some((**recv).clone()),
+        Expr::Call { name, .. }
+            if matches!(name.as_str(), "values" | "keySet" | "entrySet" | "reversed") =>
+        {
+            Some((**recv).clone())
+        }
+        _ => None,
     }
 }
 
@@ -956,6 +1030,24 @@ fn item_of(t: &Ty) -> Ty {
     }
 }
 
+// The string in `s.chars().rev()`, if `e` is exactly that.
+fn chars_rev_of(cx: &Cx, e: &ast::Expr) -> Option<ast::Expr> {
+    let ast::Expr::MethodCallExpr(rev) = strip_parens(e) else {
+        return None;
+    };
+    if method_name(&rev) != "rev" {
+        return None;
+    }
+    let ast::Expr::MethodCallExpr(chars) = strip_parens(&rev.receiver()?) else {
+        return None;
+    };
+    if method_name(&chars) != "chars" {
+        return None;
+    }
+    let s = chars.receiver()?;
+    cx.ty(&s).is_str().then_some(s)
+}
+
 fn lower_adaptor(
     cx: &mut Cx,
     m: &ast::MethodCallExpr,
@@ -969,6 +1061,23 @@ fn lower_adaptor(
     let line = cx.line(m.syntax());
     let args = arg_exprs(m);
     let item = item_of(recv_ty);
+
+    // `s.chars().rev().collect::<String>()`: reverse the string itself.
+    if name == "collect"
+        && matches!(ret_ty.strip_refs(), Ty::Str)
+        && let Some(s) = chars_rev_of(cx, recv_ast)
+    {
+        let s = expr::lower_expr(cx, &s, out);
+        let reversed = Expr::call(
+            Expr::New {
+                ty: "StringBuilder".into(),
+                args: vec![s],
+            },
+            "reverse",
+            vec![],
+        );
+        return Expr::call(reversed, "toString", vec![]);
+    }
 
     // Range specials, before the receiver is turned into a stream.
     if let ast::Expr::RangeExpr(r) = strip_parens(recv_ast)
@@ -1476,7 +1585,7 @@ fn lower_collect(
     let collect = |c: String| Expr::call(src.clone(), "collect", vec![Expr::raw(c)]);
     match target.strip_refs() {
         Ty::Vec(_) => {
-            if collected_into_immutable_let(m) {
+            if collected_read_only(cx, m) {
                 Expr::call(src, "toList", vec![])
             } else {
                 collect("Collectors.toCollection(ArrayList::new)".into())
@@ -1544,15 +1653,35 @@ fn lower_collect(
     }
 }
 
-// `let xs: Vec<_> = ....collect();` without `mut`: an unmodifiable `toList()` is fine.
-fn collected_into_immutable_let(m: &ast::MethodCallExpr) -> bool {
+// A collect result that is never mutated can be the unmodifiable `toList()`.
+fn collected_read_only(cx: &Cx, m: &ast::MethodCallExpr) -> bool {
     let Some(parent) = m.syntax().parent() else {
         return false;
     };
-    let Some(l) = ast::LetStmt::cast(parent) else {
-        return false;
-    };
-    matches!(l.pat(), Some(ast::Pat::IdentPat(ip)) if ip.mut_token().is_none())
+    if let Some(l) = ast::LetStmt::cast(parent.clone()) {
+        return matches!(l.pat(), Some(ast::Pat::IdentPat(ip)) if cx.binding_read_only(&ip));
+    }
+    // A `{:?}` argument is only streamed by the format helper.
+    if ast::FormatArgsArg::can_cast(parent.kind()) {
+        return true;
+    }
+    // A temporary receiver is only read by methods that cannot mutate it.
+    ast::MethodCallExpr::cast(parent).is_some_and(|p| {
+        p.receiver().is_some_and(|r| r.syntax() == m.syntax())
+            && matches!(
+                method_name(&p).as_str(),
+                "join"
+                    | "concat"
+                    | "len"
+                    | "is_empty"
+                    | "iter"
+                    | "into_iter"
+                    | "first"
+                    | "last"
+                    | "get"
+                    | "contains"
+            )
+    })
 }
 
 // `it.next().unwrap()` on a pulled iterator: `ListIterator.next()` already throws when empty.

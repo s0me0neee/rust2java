@@ -427,6 +427,10 @@ impl<'a, 'db> Cx<'a, 'db> {
                 if let Some(i) = ast::IndexExpr::cast(parent.clone()) {
                     return i.base().is_some_and(|b| b.syntax() == &me);
                 }
+                // A `{:?}` argument is only streamed by the format helper.
+                if ast::FormatArgsArg::can_cast(parent.kind()) {
+                    return true;
+                }
                 if let Some(f) = ast::ForExpr::cast(parent) {
                     return f.iterable().is_some_and(|it| it.syntax() == &me);
                 }
