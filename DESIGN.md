@@ -36,14 +36,20 @@ rust2java <cargo project dir | file.rs> -o out/ [--run]
 
 A bare `file.rs` is wrapped in a temporary cargo project so the frontend can load it.
 
+A crate that is one source file (every `.rs` input) becomes one Java file: `out/<name>.java`, holding a
+package-private `final class Main` with no package line, plus `Result`/`Ok`/`Err` appended after the
+class when the program uses Result (§13). Run it with `java out/<name>.java`, or `--run`. The hidden
+`--line-report` flag also writes `out/<name>.lines.json` (statement line-match report, for the tests).
+
+A cargo project with several module files keeps one class per module in a package:
+
 ```
 out/src/<crate>/Main.java       from src/main.rs
 out/src/<crate>/Geometry.java   from src/geometry.rs (mod geometry)
 out/src/<crate>/Result.java     only if the program uses Result (§13)
-out/src/<crate>/lines.json      Java line → Rust file:line, for drifted lines only
 ```
 
-To build and run: `javac -d out/classes $(fd -e java . out/src) && java -cp out/classes <crate>.Main`. `--run` does both.
+To build and run that: `javac -d out/classes $(fd -e java . out/src) && java -cp out/classes <crate>.Main`. `--run` does both.
 
 ---
 
@@ -109,7 +115,7 @@ Closing braces go on the Rust closing brace's line. Chained method calls and arg
 
 | Rust | Java |
 |---|---|
-| line 1 | `package demo; import java.util.*; import java.util.stream.*; public final class Main {` (followed by whatever Rust line 1 contains) |
+| line 1 | `import java.util.*; import java.util.stream.*; final class Main {` (followed by whatever Rust line 1 contains; multi-module crates add `package <crate>;` and `public`) |
 | `use …;` | blank line. Imports are emitted on line 1. |
 | `#[derive(…)]` and other attributes | blank line. Derived methods are emitted on the type's closing-brace line (§7.2). |
 | comments (`//`, `/* */`, `///`, `//!`) | copied verbatim to the same line |
@@ -493,7 +499,7 @@ There is **no helper library**. Apart from translations of the user's own types,
 
 | Emitted | When | Contents |
 |---|---|---|
-| `Result.java` | the program uses `Result` | `sealed interface Result<T, E>` with records `Ok(T value)` and `Err(E error)`, plus the Rust methods that would otherwise be multi-line switches: `unwrap`, `expect`, `is_ok`, `is_err`, `ok`, `err`, `map`, `map_err`, `and_then`, `unwrap_or`, `unwrap_or_else`, `debug`. About 40 lines. |
+| `Result` (after the class; `Result.java` for multi-module crates) | the program uses `Result` | `sealed interface Result<T, E>` with records `Ok(T value)` and `Err(E error)`, plus the Rust methods that would otherwise be multi-line switches: `unwrap`, `expect`, `is_ok`, `is_err`, `ok`, `err`, `map`, `map_err`, `and_then`, `unwrap_or`, `unwrap_or_else`, `debug`. About 40 lines. |
 | `record Tuple3<A, B, C>(…)` etc. | a 3+-element tuple is used | a nested record with a `debug()` method, on the module class's last line. Pairs use `Map.Entry`. |
 | `@FunctionalInterface interface Fn3<…>` etc. | a closure with 3+ parameters is used | one line, on the module class's last line |
 | `static String[] ARGS`, `static final BufferedReader STDIN`, the Java `main` | always / when args or stdin are used | on the last line of the file that contains `fn main` (§9.3, §12) |
