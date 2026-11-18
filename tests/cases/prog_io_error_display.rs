@@ -1,4 +1,4 @@
-// Display of `std::io::Error` is not lowered yet.
+// Display of `std::io::Error`: Rust's text for the common file errors.
 use std::fs;
 
 fn main() {

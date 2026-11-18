@@ -483,6 +483,13 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
             } else if lt.is_primitive() {
                 Expr::bin(l, sym, r)
             } else {
+                // `impl<T: Ord> Bag<T>`: the bound isn't on the Java class's `T`, so cast for compareTo.
+                let l = match lt.strip_refs() {
+                    Ty::Param(t) if impl_declared_param(cx, &lhs) => {
+                        Expr::Cast(format!("Comparable<{t}>"), Box::new(l))
+                    }
+                    _ => l,
+                };
                 let cmp = std_map::coll::ord_compare(cx, lt.strip_refs(), l, r);
                 Expr::bin(cmp, sym, Expr::raw("0"))
             }
@@ -703,6 +710,14 @@ pub fn place_assign(
     r: Expr,
     out: &mut Vec<Stmt>,
 ) -> Expr {
+    // `t.0 += 1`: Java tuples (`Map.Entry`, records) are immutable, so the place gets a new tuple.
+    if let ast::Expr::FieldExpr(f) = super::strip_parens(lhs)
+        && let Some(base) = f.expr()
+        && let Ty::Tuple(ts) = cx.ty(&base).strip_refs().clone()
+        && ts.len() >= 2
+    {
+        return tuple_field_assign(cx, lhs, &base, &f, &ts, sym, r, out);
+    }
     if let Some(b) = cx.builder_path(lhs) {
         return match sym {
             "+=" => Expr::call(Expr::name(b), "append", vec![super::fmt::as_any_value(r)]),
@@ -959,7 +974,19 @@ fn lower_field(cx: &mut Cx, f: &ast::FieldExpr, out: &mut Vec<Stmt>) -> Expr {
     } else {
         super::escape_keyword(&name)
     };
-    Expr::Field(Box::new(b), name)
+    let field = Expr::Field(Box::new(b), name);
+    // In `impl Wrap<i32>` the Java field is still `T value`: cast it to the concrete type.
+    let generic_field = matches!(&base, ast::Expr::PathExpr(p) if p.syntax().text() == "self")
+        && cx
+            .sema
+            .resolve_field(f)
+            .and_then(|r| r.left())
+            .is_some_and(|fd| fd.ty(cx.db).as_type_param(cx.db).is_some());
+    let actual = cx.ty(&ast::Expr::FieldExpr(f.clone()));
+    if generic_field && actual.is_nameable() && !matches!(actual.strip_refs(), Ty::Param(_)) {
+        return Expr::Cast(actual.strip_refs().boxed(), Box::new(field));
+    }
+    field
 }
 
 pub fn tuple_field(b: Expr, i: usize, arity: usize) -> Expr {
@@ -1062,6 +1089,81 @@ fn write_back_cell(
     back.push(Stmt::new(line, StmtKind::Expr(assign)));
     cx.write_backs.extend(back);
     Some(Expr::name(name))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tuple_field_assign(
+    cx: &mut Cx,
+    lhs: &ast::Expr,
+    base: &ast::Expr,
+    f: &ast::FieldExpr,
+    ts: &[Ty],
+    sym: &'static str,
+    r: Expr,
+    out: &mut Vec<Stmt>,
+) -> Expr {
+    let index = f.name_ref().and_then(|n| n.text().parse::<usize>().ok());
+    let through_ref = matches!(cx.ty(base), Ty::Ref { .. })
+        && cx
+            .local_of_path(base)
+            .is_some_and(|l| !cx.elem_aliases.contains_key(&l));
+    let Some(index) = index.filter(|i| *i < ts.len() && stable_place(base) && !through_ref) else {
+        return cx.unsupported(lhs.syntax(), "assigning a tuple field here");
+    };
+    let b = crate::emit::render_expr(&lower_expr(cx, base, out));
+    let getter = |j: usize| match ts.len() {
+        2 => Expr::raw(format!("{b}.{}", ["getKey()", "getValue()"][j])),
+        _ => Expr::raw(format!("{b}._{j}()")),
+    };
+    let fields = (0..ts.len())
+        .map(|j| match j {
+            _ if j != index => getter(j),
+            _ if sym == "=" => r.clone(),
+            _ => narrow_if_needed(
+                Expr::bin(getter(j), static_op(sym.trim_end_matches('=')), r.clone()),
+                &ts[j],
+            ),
+        })
+        .collect();
+    let rebuilt = tuple_expr(cx, &Ty::Tuple(ts.to_vec()), fields);
+    place_assign(cx, base, "=", rebuilt, out)
+}
+
+// Whether `e`'s type is an impl's type parameter that is `Ord` only by the impl's bound: the
+// Java class's own `T` (from the struct) then has no `Comparable` bound.
+fn impl_declared_param(cx: &Cx, e: &ast::Expr) -> bool {
+    let db = cx.db;
+    let Some(p) = cx
+        .sema
+        .type_of_expr(e)
+        .and_then(|t| t.original.strip_references().as_type_param(db))
+    else {
+        return false;
+    };
+    let ra_ap_hir::GenericDef::Impl(imp) = p.parent(db) else {
+        return false;
+    };
+    let self_ty = imp.self_ty(db);
+    let Some(adt) = self_ty.as_adt() else {
+        return false;
+    };
+    let Some(pos) = self_ty
+        .type_arguments()
+        .position(|a| a.as_type_param(db) == Some(p))
+    else {
+        return false;
+    };
+    let ordered = |t: &ra_ap_hir::TypeParam| {
+        t.trait_bounds(db)
+            .iter()
+            .any(|tr| matches!(tr.name(db).as_str(), "Ord" | "PartialOrd"))
+    };
+    let struct_param = ra_ap_hir::GenericDef::from(adt)
+        .type_or_const_params(db)
+        .into_iter()
+        .filter_map(|tp| tp.as_type_param(db))
+        .nth(pos);
+    !struct_param.is_some_and(|sp| ordered(&sp))
 }
 
 // A place that can be read now and assigned after the call: fields/indexes over a local or `self`.
@@ -1180,7 +1282,8 @@ fn lower_cast(cx: &mut Cx, c: &ast::CastExpr, out: &mut Vec<Stmt>) -> Expr {
 pub fn lower_closure(cx: &mut Cx, c: &ast::ClosureExpr, out: &mut Vec<Stmt>) -> Expr {
     std_map::ptr::note_fn(cx, c.syntax(), &cx.ty(&ast::Expr::ClosureExpr(c.clone())));
     // `move` takes immutable captures by value; Java lambdas would share the cell array.
-    let copies = moved_cell_copies(cx, c, out);
+    let mut copies = moved_cell_copies(cx, c, out);
+    copies.extend(reassigned_snapshots(cx, c, out));
     cx.push_scope();
     for (rust, java) in copies {
         cx.bind_name(&rust, &java);
@@ -1231,6 +1334,62 @@ fn moved_cell_copies(
                 ty: format!("{}[]", ty.java()),
                 name: copy.clone(),
                 init: Some(Expr::raw(format!("{{{name}[0]}}"))),
+            },
+        ));
+        copies.push((local.name(cx.db).as_str().to_string(), copy));
+    }
+    copies
+}
+
+// A captured local that is reassigned elsewhere isn't effectively final, which Java lambdas need.
+// Rust's borrow keeps it unchanged while the closure lives, so the lambda can read a snapshot.
+fn reassigned_snapshots(
+    cx: &mut Cx,
+    c: &ast::ClosureExpr,
+    out: &mut Vec<Stmt>,
+) -> Vec<(String, String)> {
+    let Some(scope) = cx.enclosing_fn(c.syntax()) else {
+        return Vec::new();
+    };
+    let line = cx.line(c.syntax());
+    let nodes = cx.expanded_descendants(c.syntax());
+    let bound: std::collections::HashSet<_> = nodes
+        .iter()
+        .filter_map(|n| ast::IdentPat::cast(n.clone()))
+        .filter_map(|p| cx.sema.to_def(&p))
+        .collect();
+    let assigned = |cx: &Cx, root: &ra_ap_syntax::SyntaxNode, local: ra_ap_hir::Local| {
+        cx.expanded_descendants(root)
+            .into_iter()
+            .filter_map(ast::BinExpr::cast)
+            .any(|b| {
+                matches!(b.op_kind(), Some(ast::BinaryOp::Assignment { .. }))
+                    && b.lhs().is_some_and(|l| cx.local_of_path(&l) == Some(local))
+            })
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut copies = Vec::new();
+    for pe in nodes.into_iter().filter_map(ast::PathExpr::cast) {
+        let Some(local) = cx.local_of_path(&ast::Expr::PathExpr(pe.clone())) else {
+            continue;
+        };
+        if bound.contains(&local)
+            || cx.cells.contains(&local)
+            || cx.cell_handles.contains(&local)
+            || !seen.insert(local)
+            || assigned(cx, c.syntax(), local)
+            || !assigned(cx, &scope, local)
+        {
+            continue;
+        }
+        let name = cx.lookup(local.name(cx.db).as_str());
+        let copy = cx.fresh(&name);
+        out.push(Stmt::new(
+            line,
+            StmtKind::Local {
+                ty: "var".into(),
+                name: copy.clone(),
+                init: Some(Expr::name(&name)),
             },
         ));
         copies.push((local.name(cx.db).as_str().to_string(), copy));

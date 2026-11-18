@@ -623,6 +623,42 @@ pub(super) fn lower_str_method(
             return Some(Expr::name(r));
         }
         "trim" => return Some(Expr::call(recv, "strip", vec![])),
+        // A literal char/str pattern: one `replaceAll`, the regex escaped here.
+        "trim_matches" | "trim_start_matches" | "trim_end_matches" => {
+            let pat = match arg_asts.first() {
+                Some(ast::Expr::Literal(l)) => match l.kind() {
+                    ast::LiteralKind::Char(c) => c.value().ok().map(String::from),
+                    ast::LiteralKind::String(s) => s.value().ok().map(|v| v.to_string()),
+                    _ => None,
+                },
+                _ => None,
+            }?;
+            if pat.is_empty() {
+                return Some(recv);
+            }
+            let esc: String = pat
+                .chars()
+                .map(|c| {
+                    if c.is_alphanumeric() || c == '_' {
+                        c.to_string()
+                    } else {
+                        format!("\\{c}")
+                    }
+                })
+                .collect();
+            let rep = if pat.chars().count() == 1 {
+                format!("{esc}+")
+            } else {
+                format!("(?:{esc})+")
+            };
+            let regex = match name {
+                "trim_matches" => format!("^{rep}|{rep}$"),
+                "trim_start_matches" => format!("^{rep}"),
+                _ => format!("{rep}$"),
+            };
+            let lit = Expr::raw(crate::jir::java_string_literal(&regex));
+            return Some(Expr::call(recv, "replaceAll", vec![lit, Expr::str_lit("")]));
+        }
         "trim_start" => return Some(Expr::call(recv, "stripLeading", vec![])),
         "trim_end" => return Some(Expr::call(recv, "stripTrailing", vec![])),
         "to_uppercase" | "to_ascii_uppercase" => {

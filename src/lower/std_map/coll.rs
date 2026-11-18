@@ -166,7 +166,14 @@ fn call_comparator(cmp: Option<String>, ty: &Ty, a: &str, b: &str) -> String {
 
 // `a.cmp(&b)` as a Java int, for any type (`compareTo` only where Java's order agrees).
 pub(crate) fn ord_compare(cx: &mut Cx, ty: &Ty, a: Expr, b: Expr) -> Expr {
-    let (a, b) = (render(&a), render(&b));
+    // `a` may become a receiver (`a.compareTo(b)`), so a cast or operator needs parentheses.
+    let receiver = |e: &Expr| match e {
+        Expr::Cast(..) | Expr::Binary(..) | Expr::Unary(..) | Expr::Ternary(..) => {
+            format!("({})", render(e))
+        }
+        _ => render(e),
+    };
+    let (a, b) = (receiver(&a), render(&b));
     Expr::raw(compare_call(cx, ty, &a, &b))
 }
 

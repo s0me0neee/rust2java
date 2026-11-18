@@ -1,4 +1,4 @@
-// An inherent `name()` on a fieldless enum collides with Java's final `Enum.name()`.
+// An inherent `name()` on a fieldless enum is renamed past Java's final `Enum.name()`.
 enum Color {
     Red,
     Green,

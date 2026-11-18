@@ -877,7 +877,10 @@ fn format_one(
 ) -> Expr {
     let width = counts.width.clone();
     let precision = counts.precision.clone();
-    if matches!(ty.strip_refs(), Ty::Other(_)) && std_error_name(ty).is_none() {
+    if matches!(ty.strip_refs(), Ty::Other(_))
+        && std_error_name(ty).is_none()
+        && !(spec.kind.is_empty() && is_io_error(ty))
+    {
         return cx.unsupported(node, &format!("format argument type {ty:?}"));
     }
     let numeric = matches!(ty.strip_refs(), Ty::Int(_) | Ty::F32 | Ty::F64);
@@ -1218,7 +1221,41 @@ pub fn std_error_debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Option<Expr> {
     ))
 }
 
+// `std::io::Error` (a Java IOException).
+fn is_io_error(ty: &Ty) -> bool {
+    matches!(ty.strip_refs(), Ty::Other(n) if n == "Error" || n.ends_with("io::Error"))
+}
+
+// Display of an io::Error: Rust's text for the common file errors, the Java message otherwise.
+fn io_error_text(cx: &mut Cx, v: Expr) -> Expr {
+    cx.import("java.nio.file.*");
+    let object = Expr::Cast("Object".into(), Box::new(v.clone()));
+    let known = [
+        (
+            "NoSuchFileException",
+            "No such file or directory (os error 2)",
+        ),
+        ("AccessDeniedException", "Permission denied (os error 13)"),
+        ("FileAlreadyExistsException", "File exists (os error 17)"),
+    ];
+    let fallback = Expr::call(
+        Expr::Cast("Exception".into(), Box::new(v)),
+        "getMessage",
+        vec![],
+    );
+    known.iter().rev().fold(fallback, |rest, (class, text)| {
+        Expr::Ternary(
+            Box::new(Expr::InstanceOf(Box::new(object.clone()), (*class).into())),
+            Box::new(Expr::str_lit(text)),
+            Box::new(rest),
+        )
+    })
+}
+
 pub fn std_error_display(cx: &mut Cx, v: Expr, ty: &Ty) -> Option<Expr> {
+    if is_io_error(ty) {
+        return Some(io_error_text(cx, v));
+    }
     let name = std_error_name(ty)?;
     if name.contains("ParseIntError") || name.contains("ParseFloatError") {
         return Some(parse_error_text(v));

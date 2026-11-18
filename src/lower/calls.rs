@@ -93,7 +93,7 @@ fn lower_fn_call(
         return std_map::lower_std_fn_call(cx, c, &key, out);
     }
     let db = cx.db;
-    let name = escape_keyword(f.name(db).as_str());
+    let name = items::method_java_name(cx, f);
     let mut args = expr::call_args(cx, c, out);
     if let Some(assoc) = f.as_assoc_item(db) {
         if let AssocItemContainer::Impl(imp) = assoc.container(db)
@@ -175,7 +175,11 @@ pub fn lower_method_call(cx: &mut Cx, m: &ast::MethodCallExpr, out: &mut Vec<Stm
                 _ => {}
             }
         }
-        return Expr::call(recv, escape_keyword(&name), args);
+        let java = match cx.sema.resolve_method_call(m) {
+            Some(func) => items::method_java_name(cx, func),
+            None => escape_keyword(&name),
+        };
+        return Expr::call(recv, java, args);
     }
     // A field holding a closure, called as `(self.f)(x)`, is a CallExpr; here it's a real method.
     let recv_ty = cx.ty(&recv_ast);

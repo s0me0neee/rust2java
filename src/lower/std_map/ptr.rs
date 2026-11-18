@@ -334,6 +334,8 @@ fn lower_rc(
             Some(a) => expr::lower_expr(cx, a, out),
             None => cx.unsupported(node, "`Rc::clone` without argument"),
         },
+        // The pointer is the object itself in Java.
+        "as_ref" | "as_mut" if args.len() == 1 => expr::lower_expr(cx, &args[0], out),
         "ptr_eq" => {
             let (Some(a), Some(b)) = (args.first(), args.get(1)) else {
                 return cx.unsupported(node, "`Rc::ptr_eq` without two arguments");

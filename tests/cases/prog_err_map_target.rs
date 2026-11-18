@@ -1,4 +1,4 @@
-// `Result::map` does not take the surrounding expected type, so the mapped Ok type is lost.
+// `.map(Command::Remove)`: the variant constructor is typed as producing the enum.
 #[derive(Debug)]
 enum Command {
     Remove(usize),

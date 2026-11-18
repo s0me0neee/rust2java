@@ -852,6 +852,37 @@ pub fn lower_std_path(cx: &mut Cx, path: &ast::Path, def: ModuleDef) -> Expr {
         }
         _ => {}
     }
+    // Constructors and numeric functions used as values: `.map(Some)`, `fold(0.0, f64::max)`.
+    if let ModuleDef::EnumVariant(_) = def {
+        match last {
+            "Some" => return Expr::raw("Optional::of"),
+            "Ok" | "Err" => {
+                cx.needs_result = true;
+                return Expr::raw(format!("{last}::new"));
+            }
+            _ => {}
+        }
+    }
+    let signed_or_float = matches!(
+        ty_tok,
+        Some("i8" | "i16" | "i32" | "i64" | "isize" | "f32" | "f64")
+    );
+    if signed_or_float && matches!(def, ModuleDef::Function(_)) {
+        let float = matches!(ty_tok, Some("f32" | "f64"));
+        let math = match last {
+            "max" | "min" | "abs" => Some(last),
+            "sqrt" | "cbrt" | "floor" | "ceil" | "sin" | "cos" | "tan" | "exp" | "log10"
+                if float =>
+            {
+                Some(last)
+            }
+            "ln" if float => Some("log"),
+            _ => None,
+        };
+        if let Some(m) = math {
+            return Expr::raw(format!("Math::{m}"));
+        }
+    }
     // Function values (`map(String::from)`), before the const/unit-variant paths above.
     if let Some(e) = text::path(cx, path, def) {
         return e;

@@ -1,4 +1,4 @@
-// `impl` for one instantiation of a generic type has no Java equivalent yet.
+// `impl` for one instantiation of a generic type: `self.value` is cast to the concrete type.
 struct Wrap<T> {
     value: T,
 }

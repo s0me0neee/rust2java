@@ -1,4 +1,4 @@
-// `Box::as_ref` on a boxed trait object is not lowered yet.
+// `Box::as_ref` on a boxed trait object is the object itself.
 trait Shape {
     fn area(&self) -> i32;
 }

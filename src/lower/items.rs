@@ -196,6 +196,35 @@ fn lower_items(cx: &mut Cx, items: &[ast::Item], members: &mut Vec<Member>) {
     }
 }
 
+// A Rust method name as a Java method: keywords get `_`, and so do names Java reserves as final
+// (`Enum.name()`/`ordinal()` on fieldless enums, which are Java enums; `Object.getClass()`/`wait()`).
+pub fn method_java_name(cx: &Cx, func: ra_ap_hir::Function) -> String {
+    let name = func.name(cx.db).as_str().to_string();
+    const ENUM_FINAL: &[&str] = &[
+        "name",
+        "ordinal",
+        "compareTo",
+        "getDeclaringClass",
+        "describeConstable",
+        "values",
+        "valueOf",
+    ];
+    const OBJECT_FINAL: &[&str] = &["getClass", "wait", "notify", "notifyAll"];
+    let on_java_enum = func
+        .as_assoc_item(cx.db)
+        .and_then(|a| match a.container(cx.db) {
+            ra_ap_hir::AssocItemContainer::Impl(i) => i.self_ty(cx.db).as_adt(),
+            _ => None,
+        })
+        .is_some_and(|adt| matches!(adt, Adt::Enum(e) if enum_is_plain(cx, e)));
+    if (on_java_enum && ENUM_FINAL.contains(&name.as_str()))
+        || OBJECT_FINAL.contains(&name.as_str())
+    {
+        return format!("{name}_");
+    }
+    escape_keyword(&name)
+}
+
 fn class_name_of(header: &str) -> String {
     header.rsplit(' ').next().unwrap_or(header).to_string()
 }
@@ -1516,9 +1545,12 @@ fn lower_fn_sig(
         None if ret.is_unit() => "void".to_string(),
         None => ret.java(),
     };
+    let java_name = match cx.sema.to_def(f) {
+        Some(func) => method_java_name(cx, func),
+        None => escape_keyword(&name),
+    };
     let header = format!(
-        "{modifiers}{generics}{ret_java} {}({})",
-        escape_keyword(&name),
+        "{modifiers}{generics}{ret_java} {java_name}({})",
         params.join(", ")
     );
     cx.ret_ty = Some(ret);
@@ -1806,7 +1838,20 @@ pub fn lower_def_path(cx: &mut Cx, path: &ast::Path, def: ModuleDef) -> Expr {
                     args: Vec::new(),
                 }
             } else {
-                Expr::raw(format!("{}::new", variant_java_name(cx, v)))
+                let ctor = Expr::raw(format!("{}::new", variant_java_name(cx, v)));
+                // As a function value it must produce the enum, not the variant record:
+                // `.map(Command::Remove)` would otherwise infer `Result<Remove, ..>`.
+                let fn_ty = path
+                    .syntax()
+                    .parent()
+                    .and_then(ast::PathExpr::cast)
+                    .map(|p| cx.ty(&ast::Expr::PathExpr(p)));
+                match fn_ty {
+                    Some(t @ Ty::Fn { .. }) if t.is_nameable() => {
+                        Expr::Cast(t.java(), Box::new(ctor))
+                    }
+                    _ => ctor,
+                }
             }
         }
         ModuleDef::Adt(Adt::Struct(s)) => {

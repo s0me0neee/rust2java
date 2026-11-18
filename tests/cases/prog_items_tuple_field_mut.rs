@@ -1,4 +1,4 @@
-// Mutating a tuple field goes through `getKey()`/`getValue()`, which Java cannot assign.
+// Mutating a tuple field builds a new tuple for the place.
 fn main() {
     let mut stats = (0, 0.0);
     stats.0 += 1;

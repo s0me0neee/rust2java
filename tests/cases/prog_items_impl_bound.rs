@@ -1,4 +1,4 @@
-// A bound written only on the impl does not reach the Java class header.
+// A bound written only on the impl: comparisons cast the Java `T` to Comparable.
 struct Bag<T> {
     items: Vec<T>,
 }
