@@ -437,7 +437,7 @@ fn printf_piece(cx: &mut Cx, v: Expr, ty: &Ty, spec: &Spec, counts: &Counts) -> 
         return None;
     }
     // `%d` prints unsigned values signed; pad their unsigned text instead.
-    if spec.kind.is_empty() && matches!(t, Ty::Int(i) if unsigned_display(*i)) {
+    if matches!(spec.kind.as_str(), "" | "?") && matches!(t, Ty::Int(i) if unsigned_display(*i)) {
         let Ty::Int(i) = t else { unreachable!() };
         if spec.plus
             || spec.zero
@@ -531,7 +531,9 @@ fn lower_printf(
             return None;
         }
         // Unsigned values need `toUnsignedString`; the concatenation path does that.
-        if spec.kind.is_empty() && matches!(ty.strip_refs(), Ty::Int(i) if unsigned_display(*i)) {
+        if matches!(spec.kind.as_str(), "" | "?")
+            && matches!(ty.strip_refs(), Ty::Int(i) if unsigned_display(*i))
+        {
             return None;
         }
         let conv = if has_flags(spec) {

@@ -49,7 +49,22 @@ pub fn lower_expr(cx: &mut Cx, e: &ast::Expr, out: &mut Vec<Stmt>) -> Expr {
         ast::Expr::ClosureExpr(c) => lower_closure(cx, c, out),
         ast::Expr::TupleExpr(t) => {
             let ty = cx.ty(e);
-            let args: Vec<Expr> = t.fields().map(|f| lower_expr(cx, &f, out)).collect();
+            let args: Vec<Expr> = t
+                .fields()
+                .map(|f| {
+                    let v = lower_expr(cx, &f, out);
+                    // `Map.entry(x, 1)` can't be a `Map.Entry<Integer, Short>`.
+                    match cx.ty(&f).strip_refs() {
+                        Ty::Int(i)
+                            if matches!(i.java(), "short" | "byte")
+                                && !matches!(v, Expr::Cast(..)) =>
+                        {
+                            Expr::Cast(i.java().into(), Box::new(v))
+                        }
+                        _ => v,
+                    }
+                })
+                .collect();
             tuple_expr(cx, &ty, args)
         }
         ast::Expr::ArrayExpr(a) => std_map::lower_array_expr(cx, a, out),

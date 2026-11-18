@@ -14,7 +14,10 @@ pub(super) fn fn_call(
         let src = expr::call_args(cx, c, out).into_iter().next()?;
         return Some(ordered_from(cx, src, ret));
     }
-    if matches!(key, "HashSet::from" | "BTreeSet::from") {
+    if matches!(
+        key,
+        "HashSet::from" | "BTreeSet::from" | "VecDeque::from" | "BinaryHeap::from_vec"
+    ) {
         let src = expr::call_args(cx, c, out).into_iter().next()?;
         if ordered_new(cx, ret).is_some() {
             return Some(ordered_from(cx, src, ret));
