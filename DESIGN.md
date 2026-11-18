@@ -368,7 +368,7 @@ The format string is compiled at transpile time into plain Java:
 | Rust | Java |
 |---|---|
 | `println!("x = {}, y = {}", x, y)` (Display of ints, strings, chars, bools) | `System.out.println("x = " + x + ", y = " + y);` |
-| `{}` of `f32`/`f64` | `display_float(f)`: a per-file static helper (trailer line) using `new BigDecimal(String.valueOf(f)).stripTrailingZeros().toPlainString()` plus Rust's `NaN`/`inf`/`-0` text. Rust prints `1.0` as `1` and never uses exponent notation. |
+| `{}` of `f32`/`f64` | `BigDecimal.valueOf(f).stripTrailingZeros().toPlainString()` (`new BigDecimal(String.valueOf(f))` for `f32`). Rust prints `1.0` as `1` and never uses exponent notation. `-0.0` prints `0` and NaN/inf throw (accepted). |
 | `{}` of a `Display` user type | concatenated directly (its `toString()`) |
 | `{:?}` | a type-directed inline expression (below) |
 | `{:#?}` | Phase C (a diagnostic until then) |

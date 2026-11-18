@@ -104,14 +104,20 @@ fn num_from(from: &Ty, to: &Ty, v: Expr) -> Option<Expr> {
 fn int_convert(a: Int, b: Int, v: Expr) -> Expr {
     let to = b.java();
     match a {
-        Int::I8 | Int::I16 | Int::I32 | Int::Isize | Int::I64 | Int::I128 | Int::U8 => {
-            Expr::Cast(to.into(), Box::new(v))
-        }
+        // usize stays signed for readability, like its comparisons and arithmetic.
+        Int::I8
+        | Int::I16
+        | Int::I32
+        | Int::Isize
+        | Int::I64
+        | Int::I128
+        | Int::U8
+        | Int::Usize => Expr::Cast(to.into(), Box::new(v)),
         Int::U16 => {
             let masked = Expr::bin(v, "&", Expr::raw("0xFFFF"));
             Expr::Cast(to.into(), Box::new(masked))
         }
-        Int::U32 | Int::Usize => {
+        Int::U32 => {
             if b.is_long() {
                 let widened = Expr::Cast("long".into(), Box::new(v));
                 Expr::bin(widened, "&", Expr::raw("0xFFFFFFFFL"))
@@ -131,7 +137,7 @@ fn int_to_float(a: Int, to_f32: bool, v: Expr) -> Expr {
             let masked = Expr::bin(v, "&", Expr::raw("0xFFFF"));
             Expr::Cast(ty.into(), Box::new(masked))
         }
-        Int::U32 | Int::Usize => {
+        Int::U32 => {
             let widened = Expr::Cast("long".into(), Box::new(v));
             let masked = Expr::bin(widened, "&", Expr::raw("0xFFFFFFFFL"));
             Expr::Cast(ty.into(), Box::new(masked))

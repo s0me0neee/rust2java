@@ -1087,19 +1087,23 @@ fn file_helper(cx: &mut Cx, decl: String) {
     }
 }
 
-// Rust's float Display: no exponent, `-0`, `NaN`, `inf`; Java's own toString differs in all four.
+// Rust's float Display; NaN/inf throw in BigDecimal and -0.0 prints `0` (accepted).
 fn display_float(cx: &mut Cx, v: Expr, f32: bool) -> Expr {
     cx.import("java.math.BigDecimal");
-    let t = if f32 { "float" } else { "double" };
-    file_helper(
-        cx,
-        format!(
-            "static String display_float({t} x) {{ String s = String.valueOf(x); return s.equals(\"NaN\") ? s \
-             : s.equals(\"Infinity\") ? \"inf\" : s.equals(\"-Infinity\") ? \"-inf\" : s.equals(\"-0.0\") ? \"-0\" \
-             : new BigDecimal(s).stripTrailingZeros().toPlainString(); }}"
-        ),
-    );
-    Expr::static_call("display_float", vec![v])
+    // `BigDecimal.valueOf(float)` would widen first and print the double's extra digits.
+    let big = if f32 {
+        Expr::New {
+            ty: "BigDecimal".into(),
+            args: vec![Expr::call(Expr::raw("String"), "valueOf", vec![v])],
+        }
+    } else {
+        Expr::call(Expr::raw("BigDecimal"), "valueOf", vec![v])
+    };
+    Expr::call(
+        Expr::call(big, "stripTrailingZeros", vec![]),
+        "toPlainString",
+        vec![],
+    )
 }
 
 pub fn debug_supported(ty: &Ty) -> bool {
