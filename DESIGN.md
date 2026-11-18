@@ -292,7 +292,12 @@ Rust generics become Java generics, with primitives boxed in type arguments. Std
   ```
   Generic `T` uses `AtomicReference<T>`.
 - `&mut v[i]` / `&mut s.f` on a primitive or `String` element: a temporary cell, the call, then a write-back, all on the same line.
-- `*r = value` where `r: &mut Obj`: lists become `r.clear(); r.addAll(value);`, maps similar, and structs call a generated `assign(other)` that copies fields.
+- `*r = value` where `r: &mut Obj`: lists become `r.clear(); r.addAll(value);`, maps similar, and a struct gets the
+  value's fields copied in (`var value = ..; r.x = value.x; r.y = value.y;`, also for `*self = ..` and `iter_mut`).
+  Enums (records) behind `&mut` and writes through a `&mut` that Java can't share are reported, never silently lost.
+- `Option<T>` is immutable in Java like `String`, so `&mut Option` locals and parameters use the same cells.
+- A `Copy` struct copied out of a place (`let a = b`, an argument, a return) gets `.clone()` when that struct, or one
+  it contains, is changed in place anywhere in the crate (`lower::values`); otherwise sharing is unobservable.
 - `std::mem::swap`, `replace` and `take` are expanded into temp + assign sequences on the same line.
 - **Closures** become lambdas, and `move` makes no difference. A local that a closure mutates becomes a one-element array, because Java requires captured locals to be effectively final.
 

@@ -1,0 +1,4 @@
+Vec2 { x: 2.0, y: 1.0 } [Vec2 { x: 10.0, y: 1.0 }, Vec2 { x: 0.0, y: 0.0 }]
+Body { pos: Vec2 { x: 1.0, y: 1.0 }, mass: 3 } Body { pos: Vec2 { x: 7.0, y: 1.0 }, mass: 9 } [Body { pos: Vec2 { x: 5.0, y: 5.0 }, mass: 3 }, Body { pos: Vec2 { x: 7.0, y: 1.0 }, mass: 9 }]
+true
+Pair(4, "four") | [3, 1]{"k": 2} | Hidden { id: 7, .. } | Unit

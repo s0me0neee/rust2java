@@ -105,11 +105,7 @@ impl Project {
                 let class_name = if is_root {
                     "Main".to_string()
                 } else {
-                    let name = module
-                        .name(db)
-                        .map(|n| n.as_str().to_string())
-                        .unwrap_or_default();
-                    pascal_case(&name)
+                    module_class_name(db, module)
                 };
                 units.push(Unit {
                     krate,
@@ -138,18 +134,48 @@ pub fn pascal_case(s: &str) -> String {
         .collect()
 }
 
+// `mod geometry` -> `Geometry`, unless a type inside is also `Geometry` (Java forbids a nested class
+// named like an enclosing one); then the Rust name itself: `vec2.Vec2`.
+pub fn module_class_name(db: &RootDatabase, module: Module) -> String {
+    let rust = module
+        .name(db)
+        .map(|n| n.as_str().to_string())
+        .unwrap_or_default();
+    let pascal = pascal_case(&rust);
+    let mut stack = vec![module];
+    while let Some(m) = stack.pop() {
+        for decl in m.declarations(db) {
+            let inner = match decl {
+                ra_ap_hir::ModuleDef::Adt(a) => Some(a.name(db)),
+                ra_ap_hir::ModuleDef::Trait(t) => Some(t.name(db)),
+                _ => None,
+            };
+            if inner.is_some_and(|n| n.as_str() == pascal) {
+                return rust;
+            }
+        }
+        for child in m.children(db) {
+            if pascal_case(
+                &child
+                    .name(db)
+                    .map(|n| n.as_str().to_string())
+                    .unwrap_or_default(),
+            ) == pascal
+            {
+                return rust;
+            }
+            stack.push(child);
+        }
+    }
+    pascal
+}
+
 // Fully qualified Java class path of a module, e.g. `Main`, `Geometry`, `Geometry.Inner`.
 pub fn module_java_path(db: &RootDatabase, module: Module) -> String {
     if module.is_crate_root(db) {
         return "Main".into();
     }
-    let name = pascal_case(
-        module
-            .name(db)
-            .map(|n| n.as_str().to_string())
-            .unwrap_or_default()
-            .as_str(),
-    );
+    let name = module_class_name(db, module);
     if matches!(
         module.definition_source(db).value,
         ModuleSource::SourceFile(_)
@@ -175,11 +201,6 @@ pub fn top_module(db: &RootDatabase, mut module: Module) -> Module {
         }
     }
     module
-}
-
-#[allow(dead_code)]
-pub fn module_class_name(db: &RootDatabase, module: Module) -> String {
-    module_java_path(db, module)
 }
 
 // Module class name as seen from `from`: relative inside one file, qualified across files.

@@ -10,6 +10,7 @@ pub mod pat;
 pub mod std_map;
 pub mod stmt;
 pub mod traits;
+pub mod values;
 pub mod views;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -68,6 +69,8 @@ pub struct Cx<'a, 'db> {
     pub builders: HashSet<ra_ap_hir::Local<'db>>,
     // `&str` locals kept as (base, start offset); see `views`.
     pub views: HashMap<ra_ap_hir::Local<'db>, views::View>,
+    // Structs changed in place somewhere in the crate (computed on first use; see `values`).
+    pub mutated_structs: Option<HashSet<ra_ap_hir::Struct>>,
     // Locals that *are* a one-element array: `Cell<i32>`/`RefCell<i32>` handles (`int[] c = {0}`).
     pub cell_handles: HashSet<ra_ap_hir::Local<'db>>,
     // >0 while lowering a closure body: statements hoisted to `out` would run only once, outside it.
@@ -176,6 +179,7 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         cells: HashSet::new(),
         builders: HashSet::new(),
         views: HashMap::new(),
+        mutated_structs: None,
         cell_handles: HashSet::new(),
         lambda_depth: 0,
         pulled_iters: HashMap::new(),

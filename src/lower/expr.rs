@@ -9,6 +9,15 @@ use crate::jir::{Expr, LambdaBody, Stmt, StmtKind, java_char_literal, java_strin
 use crate::ty::{Int, Ty};
 
 pub fn lower_expr(cx: &mut Cx, e: &ast::Expr, out: &mut Vec<Stmt>) -> Expr {
+    let v = lower_expr_inner(cx, e, out);
+    // A `Copy` struct copied out of a place gets its own object if anyone changes one in place.
+    if super::values::needs_copy(cx, e) {
+        return Expr::call(v, "clone", vec![]);
+    }
+    v
+}
+
+fn lower_expr_inner(cx: &mut Cx, e: &ast::Expr, out: &mut Vec<Stmt>) -> Expr {
     match e {
         ast::Expr::Literal(l) => lower_literal(cx, l, e),
         ast::Expr::ParenExpr(p) => match p.expr() {
@@ -815,6 +824,13 @@ pub fn place_assign(
                     lhs.syntax(),
                     "replacing a shared object through `borrow_mut`",
                 );
+            }
+            // A struct behind `&mut`: Java can't swap the object, so its fields are overwritten.
+            let line = cx.line(lhs.syntax());
+            if sym == "="
+                && let Some(e) = super::values::assign_through(cx, &inner, r.clone(), line, out)
+            {
+                return e;
             }
             // A Java local holding a copy of an immutable value: the write would be lost.
             if cx.local_of_path(&inner).is_some()

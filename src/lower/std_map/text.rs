@@ -169,6 +169,11 @@ pub(super) fn method(
     out: &mut Vec<Stmt>,
 ) -> Option<Expr> {
     let name = key.rsplit("::").next().unwrap_or(key);
+    if key.starts_with("Debug")
+        && let Some(e) = crate::lower::fmt::lower_debug_builder(cx, m, out)
+    {
+        return Some(e);
+    }
     if let Some(view) = m.receiver().and_then(|r| cx.view_of(&r))
         && let Some(e) = view_method(cx, m, name, &view, out)
     {

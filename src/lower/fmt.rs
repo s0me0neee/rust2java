@@ -1634,6 +1634,180 @@ pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
 // Joins pieces with `+`, making sure Java treats the chain as string concatenation. Nested
 // concatenations and adjacent literals are spliced so `"Some(" + ("(" + x + ")") + ")"` comes out
 // as `"Some((" + x + "))"`.
+// `f.debug_struct("P").field("x", &self.x).finish()` (and debug_tuple/list/set/map): the text
+// `#[derive(Debug)]` would print, appended to the formatter in one go.
+pub fn lower_debug_builder(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    out: &mut Vec<Stmt>,
+) -> Option<Expr> {
+    let finish = method_name_of(m)?;
+    if !matches!(finish.as_str(), "finish" | "finish_non_exhaustive") {
+        return None;
+    }
+    // Walk the chain back to `f.debug_*(..)`.
+    let mut steps: Vec<(String, Vec<ast::Expr>)> = Vec::new();
+    let mut cur = m.receiver()?;
+    let (kind, title, formatter) = loop {
+        let ast::Expr::MethodCallExpr(call) = super::strip_parens(&cur) else {
+            return None;
+        };
+        let name = method_name_of(&call)?;
+        let args: Vec<ast::Expr> = ast::HasArgList::arg_list(&call)
+            .map(|a| a.args().collect())
+            .unwrap_or_default();
+        if name.starts_with("debug_") {
+            break (name, args.into_iter().next(), call.receiver()?);
+        }
+        steps.push((name, args));
+        cur = call.receiver()?;
+    };
+    steps.reverse();
+    let strip_ref = |e: &ast::Expr| match e {
+        ast::Expr::RefExpr(r) => r.expr().unwrap_or_else(|| e.clone()),
+        _ => e.clone(),
+    };
+    let mut items: Vec<Expr> = Vec::new();
+    let mut joined: Option<Expr> = None;
+    for (name, args) in &steps {
+        match (name.as_str(), args.as_slice()) {
+            ("field", [n, v]) if kind == "debug_struct" => {
+                let label = super::expr::lower_expr(cx, n, out);
+                let v = strip_ref(v);
+                let ty = cx.ty(&v);
+                let val = super::expr::lower_expr(cx, &v, out);
+                items.push(concat(vec![
+                    label,
+                    Expr::str_lit(": "),
+                    debug(cx, val, &ty),
+                ]));
+            }
+            ("field", [v]) | ("entry", [v]) if kind != "debug_struct" && kind != "debug_map" => {
+                let v = strip_ref(v);
+                let ty = cx.ty(&v);
+                let val = super::expr::lower_expr(cx, &v, out);
+                items.push(debug(cx, val, &ty));
+            }
+            ("entry", [k, v]) if kind == "debug_map" => {
+                let (k, v) = (strip_ref(k), strip_ref(v));
+                let (kt, vt) = (cx.ty(&k), cx.ty(&v));
+                let (kv, vv) = (
+                    super::expr::lower_expr(cx, &k, out),
+                    super::expr::lower_expr(cx, &v, out),
+                );
+                items.push(concat(vec![
+                    debug(cx, kv, &kt),
+                    Expr::str_lit(": "),
+                    debug(cx, vv, &vt),
+                ]));
+            }
+            ("entries", [it]) if joined.is_none() && cx.lambda_depth == 0 => {
+                let ty = cx.ty(it);
+                let item_ty = match ty.strip_refs() {
+                    Ty::Iter(t) | Ty::Vec(t) | Ty::Deque(t) | Ty::Set { t, .. } => (**t).clone(),
+                    Ty::Map { k, v, .. } => Ty::Tuple(vec![(**k).clone(), (**v).clone()]),
+                    _ => return None,
+                };
+                let src = super::expr::lower_expr(cx, it, out);
+                let stream = match ty.strip_refs() {
+                    Ty::Iter(_) => src,
+                    Ty::Map { .. } => {
+                        Expr::call(Expr::call(src, "entrySet", vec![]), "stream", vec![])
+                    }
+                    _ => Expr::call(src, "stream", vec![]),
+                };
+                let x = cx.fresh("item");
+                let text = match (&kind[..], &item_ty) {
+                    ("debug_map", Ty::Tuple(kv)) if kv.len() == 2 => {
+                        let k = debug(cx, Expr::call(Expr::name(&x), "getKey", vec![]), &kv[0]);
+                        let v = debug(cx, Expr::call(Expr::name(&x), "getValue", vec![]), &kv[1]);
+                        concat(vec![k, Expr::str_lit(": "), v])
+                    }
+                    _ => debug(cx, Expr::name(&x), &item_ty),
+                };
+                let mapper = Expr::Lambda {
+                    params: vec![x],
+                    body: crate::jir::LambdaBody::Expr(Box::new(debug_string(text))),
+                };
+                let mapped = Expr::call(stream, "map", vec![mapper]);
+                joined = Some(Expr::call(
+                    mapped,
+                    "collect",
+                    vec![Expr::raw("Collectors.joining(\", \")")],
+                ));
+            }
+            _ => return None,
+        }
+    }
+    // A joined stream may be empty, so it can't share separators with single entries.
+    if joined.is_some() && !items.is_empty() {
+        return None;
+    }
+    let mut body: Vec<Expr> = Vec::new();
+    for (i, item) in items.into_iter().enumerate() {
+        if i > 0 {
+            body.push(Expr::str_lit(", "));
+        }
+        body.push(item);
+    }
+    body.extend(joined);
+    let more = finish == "finish_non_exhaustive";
+    let title = match title {
+        Some(t) => super::expr::lower_expr(cx, &t, out),
+        None => Expr::str_lit(""),
+    };
+    let text = match kind.as_str() {
+        "debug_struct" => {
+            let mut parts = vec![title];
+            match (body.is_empty(), more) {
+                (true, false) => {}
+                (true, true) => parts.push(Expr::str_lit(" { .. }")),
+                (false, _) => {
+                    parts.push(Expr::str_lit(" { "));
+                    parts.extend(body);
+                    parts.push(Expr::str_lit(if more { ", .. }" } else { " }" }));
+                }
+            }
+            concat(parts)
+        }
+        "debug_tuple" if body.is_empty() => title,
+        "debug_tuple" => concat(
+            [
+                vec![title, Expr::str_lit("(")],
+                body,
+                vec![Expr::str_lit(")")],
+            ]
+            .concat(),
+        ),
+        "debug_list" => concat([vec![Expr::str_lit("[")], body, vec![Expr::str_lit("]")]].concat()),
+        "debug_set" | "debug_map" => {
+            concat([vec![Expr::str_lit("{")], body, vec![Expr::str_lit("}")]].concat())
+        }
+        _ => return None,
+    };
+    let f = super::expr::lower_expr(cx, &formatter, out);
+    out.push(Stmt::new(
+        cx.line(m.syntax()),
+        StmtKind::Expr(Expr::call(f, "append", vec![text])),
+    ));
+    Some(Expr::raw("null"))
+}
+
+fn method_name_of(m: &ast::MethodCallExpr) -> Option<String> {
+    m.name_ref().map(|n| n.text().to_string())
+}
+
+// A lambda body must be a String even when the debug text is a bare number.
+fn debug_string(e: Expr) -> Expr {
+    match e {
+        Expr::Raw(ref s) if s.starts_with('"') => e,
+        Expr::Binary(ref l, "+", _) if matches!(l.as_ref(), Expr::Raw(s) if s.starts_with('"')) => {
+            e
+        }
+        e => Expr::bin(Expr::str_lit(""), "+", e),
+    }
+}
+
 fn concat(parts: Vec<Expr>) -> Expr {
     let mut flat = Vec::new();
     for p in parts {

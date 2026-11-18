@@ -764,7 +764,10 @@ fn generic_arg_names(generics: &str) -> Vec<String> {
 // --- modules -----------------------------------------------------------------------------
 
 fn lower_inline_module(cx: &mut Cx, m: &ast::Module) -> Member {
-    let name = pascal_case(&m.name().map(|n| n.text().to_string()).unwrap_or_default());
+    let name = match cx.sema.to_def(m) {
+        Some(module) => crate::frontend::module_class_name(cx.db, module),
+        None => pascal_case(&m.name().map(|n| n.text().to_string()).unwrap_or_default()),
+    };
     let vis = if m.visibility().is_some() {
         "public "
     } else {
