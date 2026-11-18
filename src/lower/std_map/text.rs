@@ -395,8 +395,36 @@ pub(super) fn lower_str_method(
                 "lastIndexOf"
             };
             let sv = simple(cx, recv, &Ty::Str, line, out);
-            let av = simple(cx, b0, &arg0_ty, line, out);
-            let idx = Expr::call(sv, getter, vec![av]);
+            let idx = if matches!(arg0_ty.strip_refs(), Ty::Char | Ty::Str) {
+                let av = simple(cx, b0, &arg0_ty, line, out);
+                Expr::call(sv, getter, vec![av])
+            } else {
+                // A `char` predicate (closure or `char::is_*`): scan the indices.
+                if cx.lambda_depth > 0 {
+                    return Some(cx.unsupported(
+                        _m.syntax(),
+                        "`str::find` with a predicate inside a closure",
+                    ));
+                }
+                let pred = push_local(
+                    cx,
+                    line,
+                    "Function<Character, Boolean>".into(),
+                    Some(b0),
+                    out,
+                    "pred",
+                );
+                let s = render(&sv);
+                let i = cx.fresh("i");
+                let range = if name == "find" {
+                    format!("IntStream.range(0, {s}.length())")
+                } else {
+                    format!("IntStream.iterate({s}.length() - 1, {i} -> {i} >= 0, {i} -> {i} - 1)")
+                };
+                Expr::raw(format!(
+                    "{range}.filter({i} -> {pred}.apply({s}.charAt({i}))).findFirst().orElse(-1)"
+                ))
+            };
             let n = push_local(cx, line, "int".into(), Some(idx), out, "idx");
             return Some(conditional(
                 Expr::bin(Expr::name(n.clone()), ">=", Expr::raw("0")),

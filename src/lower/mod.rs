@@ -53,6 +53,8 @@ pub struct Cx<'a, 'db> {
     pub ret_ty: Option<Ty>,
     // Code appended to the file's last line (entry point, generated records, fields).
     pub file_trailer: Vec<String>,
+    // `STDIN` was declared above a static initializer that reads it, not on the last line.
+    pub stdin_hoisted: bool,
     // Set when the program uses `Result`, so `Result.java` gets written.
     pub needs_result: bool,
     // Enclosing loops/labeled blocks: (Java label, variable receiving `break value`).
@@ -162,6 +164,7 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         tmp_counter: 0,
         ret_ty: None,
         file_trailer: Vec::new(),
+        stdin_hoisted: false,
         needs_result: false,
         loops: Vec::new(),
         switch_depth: 0,

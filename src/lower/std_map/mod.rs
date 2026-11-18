@@ -316,7 +316,7 @@ pub fn need_stdin(cx: &mut Cx) {
     } else {
         "static final InputStream STDIN = new BufferedInputStream(System.in);"
     };
-    if !cx.file_trailer.iter().any(|t| t.contains("STDIN")) {
+    if !cx.stdin_hoisted && !cx.file_trailer.iter().any(|t| t.contains("STDIN")) {
         cx.import("java.io.*");
         cx.file_trailer.push(decl.into());
     }

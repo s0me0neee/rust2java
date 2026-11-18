@@ -183,6 +183,9 @@ fn lower_items(cx: &mut Cx, items: &[ast::Item], members: &mut Vec<Member>) {
                     members.push(m);
                 }
             }
+            ast::Item::MacroCall(mc) if super::macros::macro_name(mc) == "thread_local" => {
+                lower_thread_local(cx, mc, members);
+            }
             ast::Item::Use(_) | ast::Item::ExternCrate(_) | ast::Item::MacroRules(_) => {}
             ast::Item::Module(_) => {}
             ast::Item::TypeAlias(_) => {}
@@ -1984,6 +1987,128 @@ fn lower_const(
             crate::emit::render_expr(&v)
         ),
     })
+}
+
+// `thread_local! { static X: T = init; }`: the program has one thread, so `X` is a plain static
+// field; an initializer with statements runs in a `static { }` block on its own lines.
+fn lower_thread_local(cx: &mut Cx, mc: &ast::MacroCall, members: &mut Vec<Member>) {
+    let Some(tt) = mc.token_tree() else { return };
+    let text = tt.syntax().text().to_string();
+    let base = tt.syntax().text_range().start() + ra_ap_syntax::TextSize::from(1);
+    let parsed =
+        ast::SourceFile::parse(&text[1..text.len() - 1], ra_ap_syntax::Edition::Edition2024);
+    for item in parsed.tree().items() {
+        let ast::Item::Static(s) = item else {
+            cx.unsupported(mc.syntax(), "`thread_local!` item other than a static");
+            continue;
+        };
+        let (Some(name), Some(body)) = (s.name(), s.body()) else {
+            continue;
+        };
+        // The typed copy of the initializer lives in the macro expansion.
+        let squash =
+            |e: &SyntaxNode| -> String { e.text().to_string().split_whitespace().collect() };
+        let want = squash(body.syntax());
+        let init = body.syntax().first_token().and_then(|first| {
+            let at = base + first.text_range().start();
+            let orig = mc.syntax().token_at_offset(at).right_biased()?;
+            cx.sema.descend_into_macros(orig).into_iter().find_map(|t| {
+                t.parent_ancestors()
+                    .filter_map(ast::Expr::cast)
+                    .find(|e| squash(e.syntax()) == want)
+            })
+        });
+        let Some(init) = init else {
+            cx.unsupported(mc.syntax(), "`thread_local!` initializer");
+            continue;
+        };
+        lower_static_init(cx, &escape_keyword(&name.text()), &init, members);
+    }
+}
+
+// Java type where `Cell<T>` parts are their `T[]` arrays (the type model erases `Cell`).
+fn java_type_with_cells<'db>(cx: &Cx<'_, 'db>, t: &ra_ap_hir::Type<'db>, boxed: bool) -> String {
+    if let Some(inner) = super::std_map::ptr::array_cell(cx, t) {
+        return format!("{}[]", inner.java());
+    }
+    let fields = t.tuple_fields(cx.db);
+    match fields.len() {
+        2 => format!(
+            "Map.Entry<{}, {}>",
+            java_type_with_cells(cx, &fields[0], true),
+            java_type_with_cells(cx, &fields[1], true)
+        ),
+        _ => {
+            let ty = cx.convert(t);
+            if boxed { ty.boxed() } else { ty.java() }
+        }
+    }
+}
+
+fn lower_static_init(cx: &mut Cx, name: &str, init: &ast::Expr, members: &mut Vec<Member>) {
+    let ty = cx.ty(init);
+    let line = cx.line(init.syntax());
+    let saved = cx.save_method_state();
+    cx.enter_method();
+    let mut stmts = Vec::new();
+    let (value, value_line) = match init {
+        ast::Expr::BlockExpr(b)
+            if b.stmt_list()
+                .is_some_and(|l| l.statements().next().is_some()) =>
+        {
+            let list = b.stmt_list().unwrap();
+            for s in list.statements() {
+                stmt::lower_stmt(cx, &s, &mut stmts);
+            }
+            match list.tail_expr() {
+                Some(t) => (
+                    super::expr::lower_expr_as(cx, &t, &ty, &mut stmts),
+                    cx.line(t.syntax()),
+                ),
+                None => (Expr::raw("null"), cx.end_line(init.syntax())),
+            }
+        }
+        _ => (super::expr::lower_expr_as(cx, init, &ty, &mut stmts), line),
+    };
+    cx.restore_method_state(saved);
+    // Statics initialize in order, so the reader must be declared above the block using it.
+    if let Some(i) = cx.file_trailer.iter().position(|t| t.contains(" STDIN = ")) {
+        let text = cx.file_trailer.remove(i);
+        cx.stdin_hoisted = true;
+        members.push(Member::Field { line, text });
+    }
+    let ty_java = match cx.sema.type_of_expr(init) {
+        Some(t) => java_type_with_cells(cx, &t.original, false),
+        None => ty.java(),
+    };
+    if stmts.is_empty() {
+        let text = format!(
+            "static final {ty_java} {name} = {};",
+            crate::emit::render_expr(&value)
+        );
+        members.push(Member::Field { line, text });
+        return;
+    }
+    members.push(Member::Field {
+        line,
+        text: format!("static final {ty_java} {name};"),
+    });
+    stmts.push(Stmt::new(
+        value_line,
+        StmtKind::Expr(Expr::Assign(
+            Box::new(Expr::name(name)),
+            "=",
+            Box::new(value),
+        )),
+    ));
+    members.push(Member::Method(Method {
+        line,
+        header: "static".into(),
+        body: Some(crate::jir::Block {
+            stmts,
+            close_line: cx.end_line(init.syntax()),
+        }),
+    }));
 }
 
 // --- generics ----------------------------------------------------------------------------

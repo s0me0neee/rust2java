@@ -1244,7 +1244,12 @@ fn lower_pat(
                 let line = cx.line(p.syntax());
                 let rust = ident_name(ip);
                 let java = cx.declare(&rust);
-                let ty = cx.pat_ty(p);
+                let mut ty = cx.pat_ty(p);
+                // A `Cell` inside a tuple/struct value is its one-element array: bind the handle.
+                if super::std_map::ptr::array_cell_pat(cx, ip).is_some() {
+                    cx.mark_cell_handle(ip);
+                    ty = Ty::Other("cell array".into());
+                }
                 out.binds.push(Bind {
                     line,
                     rust,

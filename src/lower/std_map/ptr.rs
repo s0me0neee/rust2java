@@ -374,6 +374,9 @@ pub(super) fn method(
     out: &mut Vec<Stmt>,
 ) -> Option<Expr> {
     let _ = recv_ty;
+    if key == "LocalKey::with" {
+        return Some(lower_local_key_with(cx, m, out));
+    }
     let owner = key.split_once("::").map(|(o, _)| o)?;
     if !matches!(owner, "Cell" | "RefCell" | "Rc" | "Arc" | "Box" | "Weak") {
         return None;
@@ -389,6 +392,66 @@ pub(super) fn method(
             out,
         )),
         _ => lower_cell_op(cx, m.syntax(), key, &recv, &args, out),
+    }
+}
+
+// `KEY.with(|v| body)` runs the closure at once on the thread-local static: the body is inlined.
+fn lower_local_key_with(cx: &mut Cx, m: &ast::MethodCallExpr, out: &mut Vec<Stmt>) -> Expr {
+    let closure = match arg_asts(m).into_iter().next() {
+        Some(ast::Expr::ClosureExpr(c)) => c,
+        _ => return cx.unsupported(m.syntax(), "`LocalKey::with` without a closure literal"),
+    };
+    if cx.lambda_depth > 0 {
+        return cx.unsupported(m.syntax(), "`LocalKey::with` inside a closure");
+    }
+    let (Some(recv), Some(pat), Some(body)) = (
+        m.receiver(),
+        closure
+            .param_list()
+            .and_then(|l| l.params().next())
+            .and_then(|p| p.pat()),
+        closure.body(),
+    ) else {
+        return cx.unsupported(m.syntax(), "`LocalKey::with` closure");
+    };
+    // A `return` would leave the closure, not the enclosing Java method.
+    if body
+        .syntax()
+        .descendants()
+        .any(|n| ast::ReturnExpr::can_cast(n.kind()))
+    {
+        return cx.unsupported(m.syntax(), "`return` inside a `LocalKey::with` closure");
+    }
+    let value = expr::lower_expr(cx, &recv, out);
+    let stat = match &value {
+        Expr::Name(n) | Expr::Raw(n) if n.chars().all(|c| c.is_alphanumeric() || c == '_') => {
+            Some(n.clone())
+        }
+        _ => None,
+    };
+    match (&pat, stat) {
+        // `|c| ..` on a static: `c` is just another name for it.
+        (ast::Pat::IdentPat(ip), Some(stat)) if ip.pat().is_none() => {
+            let rust = ip.name().map(|n| n.text().to_string()).unwrap_or_default();
+            cx.declare_as(&rust, &stat);
+            if array_cell_pat(cx, ip).is_some() {
+                cx.mark_cell_handle(ip);
+            }
+        }
+        _ => crate::lower::pat::bind_pattern(cx, &pat, value, out),
+    }
+    match strip_parens(&body) {
+        ast::Expr::BlockExpr(b) if b.stmt_list().is_some() => {
+            let list = b.stmt_list().unwrap();
+            for s in list.statements() {
+                crate::lower::stmt::lower_stmt(cx, &s, out);
+            }
+            match list.tail_expr() {
+                Some(t) => expr::lower_expr(cx, &t, out),
+                None => Expr::raw("null"),
+            }
+        }
+        e => expr::lower_expr(cx, &e, out),
     }
 }
 
