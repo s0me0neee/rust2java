@@ -555,13 +555,31 @@ fn lower_dbg(cx: &mut Cx, mc: &ast::MacroCall, out: &mut Vec<Stmt>) -> Expr {
     let Some(value) = matched.expr() else {
         return cx.unsupported(mc.syntax(), "dbg! value");
     };
+    // dbg! writes to stderr, which is never compared: Java's own toString is enough.
     let ty = cx.ty(&value);
-    if !fmt::debug_supported(&ty) {
-        return cx.unsupported(mc.syntax(), "dbg! Debug type");
-    }
     let lowered = expr::lower_expr(cx, &value, out);
-    let name = cx.fresh("dbg_value");
     let line = cx.line(mc.syntax());
+    let label = Expr::str_lit(&format!("[line {line}] {} = ", value.syntax().text()));
+    let discarded = mc
+        .syntax()
+        .parent()
+        .and_then(|p| p.parent())
+        .is_some_and(|p| ast::ExprStmt::can_cast(p.kind()));
+    let print = |v: Expr| {
+        Stmt::new(
+            line,
+            StmtKind::Expr(Expr::call(
+                Expr::raw("System.err"),
+                "println",
+                vec![Expr::bin(label.clone(), "+", v)],
+            )),
+        )
+    };
+    if discarded {
+        out.push(print(lowered));
+        return Expr::raw("null");
+    }
+    let name = cx.fresh("dbg_value");
     out.push(Stmt::new(
         line,
         StmtKind::Local {
@@ -574,15 +592,7 @@ fn lower_dbg(cx: &mut Cx, mc: &ast::MacroCall, out: &mut Vec<Stmt>) -> Expr {
             init: Some(lowered),
         },
     ));
-    let text = Expr::bin(
-        Expr::str_lit(&format!("[line {line}] {} = ", value.syntax().text())),
-        "+",
-        fmt::debug(cx, Expr::name(&name), &ty),
-    );
-    out.push(Stmt::new(
-        line,
-        StmtKind::Expr(Expr::call(Expr::raw("System.err"), "println", vec![text])),
-    ));
+    out.push(print(Expr::name(&name)));
     Expr::name(name)
 }
 
