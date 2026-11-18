@@ -445,7 +445,7 @@ pub(super) fn is_unwrapped_source(cx: &Cx, recv_ast: &ast::Expr) -> bool {
             matches!(
                 method_name(mc).as_str(),
                 "read_line" | "read_to_string" | "read_to_end" | "write_all" | "write" | "flush"
-            ) || (method_name(mc) == "parse" && super::text::direct_parse(cx, mc).is_some())
+            ) || (method_name(mc) == "parse" && super::text::direct_parse(cx, recv_ast).is_some())
         }
         // `write!`/`writeln!` perform the write and hand back a dummy `Ok`.
         ast::Expr::MacroExpr(m) => m.macro_call().is_some_and(|mc| {
@@ -459,7 +459,8 @@ pub(super) fn is_unwrapped_source(cx: &Cx, recv_ast: &ast::Expr) -> bool {
                 .expr()
                 .map(|e| e.syntax().text().to_string())
                 .unwrap_or_default();
-            text.ends_with("read_to_string")
+            (text.ends_with("from_str_radix") && super::text::direct_parse(cx, recv_ast).is_some())
+                || text.ends_with("read_to_string")
                 || text.ends_with("from_utf8")
                 || text.ends_with("fs::write")
                 || text.ends_with("write")
