@@ -383,7 +383,8 @@ fn printf_conv(
     if spec.plus {
         flags.push('+');
     }
-    if spec.alternate && value {
+    // Java rejects `#` on `%d`/`%s`; Rust ignores it outside radix formats anyway.
+    if spec.alternate && matches!(spec.kind.as_str(), "x" | "X" | "o" | "b") && value {
         flags.push('#');
     }
     if zero {
@@ -397,6 +398,104 @@ fn printf_conv(
     }
     segs.push(Expr::str_lit(conv));
     Some((segs, value))
+}
+
+// Joins `printf_conv` segments into one format-string expression (`"%0" + w + "x"`).
+fn printf_format(segs: Vec<Expr>) -> Option<Expr> {
+    let mut parts = Vec::new();
+    let mut text = String::new();
+    for seg in segs {
+        match seg {
+            Expr::Raw(r) if r.starts_with('"') => text.push_str(&r[1..r.len() - 1]),
+            Expr::Raw(r) if r.chars().all(|c| c.is_ascii_digit()) => text.push_str(&r),
+            e => {
+                parts.push(Expr::str_lit(&text));
+                text.clear();
+                parts.push(e);
+            }
+        }
+    }
+    parts.push(Expr::str_lit(&text));
+    parts
+        .into_iter()
+        .filter(|e| !is_empty_string(e))
+        .reduce(|a, b| Expr::bin(a, "+", b))
+}
+
+// One `String.format` for a single flagged piece. `lower_printf` already does this for a whole
+// template; this covers the pieces left over when another spec forces the concatenation path.
+fn printf_piece(cx: &mut Cx, v: Expr, ty: &Ty, spec: &Spec, counts: &Counts) -> Option<Expr> {
+    if counts.width.is_none()
+        && !spec.plus
+        && !(counts.precision.is_some() && spec.kind.is_empty() && ty.is_str())
+    {
+        return None;
+    }
+    let t = ty.strip_refs();
+    // Debug of str/char ignores width, so those never reach the padding code anyway.
+    if spec.kind == "?" && matches!(t, Ty::Str | Ty::Char) {
+        return None;
+    }
+    // `%d` prints unsigned values signed; pad their unsigned text instead.
+    if spec.kind.is_empty() && matches!(t, Ty::Int(i) if unsigned_display(*i)) {
+        let Ty::Int(i) = t else { unreachable!() };
+        if spec.plus
+            || spec.zero
+            || counts.precision.is_some()
+            || spec.fill != ' '
+            || spec.align == Some('^')
+        {
+            return None;
+        }
+        let mut segs = vec![Expr::str_lit(if spec.align == Some('<') {
+            "%-"
+        } else {
+            "%"
+        })];
+        segs.push(counts.width.clone()?);
+        segs.push(Expr::str_lit("s"));
+        return Some(Expr::call(
+            Expr::raw("String"),
+            "format",
+            vec![printf_format(segs)?, unsigned_string(*i, v)?],
+        ));
+    }
+    let (segs, value) = printf_conv(spec, ty, counts.width.clone(), counts.precision.clone())?;
+    let arg = if value {
+        let mut arg = v;
+        // Narrow signed values are sign-extended; Java needs the unsigned window.
+        if let Ty::Int(i) = t
+            && matches!(spec.kind.as_str(), "x" | "X" | "o")
+            && matches!(
+                i,
+                crate::ty::Int::I8 | crate::ty::Int::I16 | crate::ty::Int::U16
+            )
+        {
+            let mask = if *i == crate::ty::Int::I8 {
+                "255"
+            } else {
+                "65535"
+            };
+            arg = Expr::bin(arg, "&", Expr::raw(mask));
+        }
+        arg
+    } else {
+        match t {
+            // Debug forces `.0`, Display drops it; `%s` pads whichever text this is.
+            Ty::F32 | Ty::F64 if spec.kind == "?" => debug_float(cx, v, *t == Ty::F32),
+            Ty::F32 | Ty::F64 => display_float(cx, v, *t == Ty::F32),
+            // Radix text (alternate prefixes) is built by the concatenation path.
+            Ty::Int(_) => return None,
+            _ => v,
+        }
+    };
+    let mut call_args = Vec::new();
+    if value && matches!(t, Ty::F32 | Ty::F64) {
+        call_args.push(Expr::raw("Locale.ROOT"));
+    }
+    call_args.push(printf_format(segs)?);
+    call_args.push(arg);
+    Some(Expr::call(Expr::raw("String"), "format", call_args))
 }
 
 // Templates with width/precision/sign/radix flags become one `String.format` when every piece
@@ -781,6 +880,10 @@ fn format_one(
             _ => {}
         }
     }
+    // A single Java conversion is shorter than hand-built padding and matches Rust's text.
+    if let Some(e) = printf_piece(cx, v.clone(), ty, spec, counts) {
+        return e;
+    }
     let mut text = if spec.kind == "?" {
         if ty.is_float()
             && let Some(p) = precision
@@ -879,13 +982,18 @@ fn format_one(
         return text;
     }
     if spec.plus && numeric {
-        let tmp = hoist_string(cx, node, text, out);
-        let negative = Expr::call(tmp.clone(), "startsWith", vec![Expr::str_lit("-")]);
-        text = Expr::Ternary(
-            Box::new(negative),
-            Box::new(tmp.clone()),
-            Box::new(Expr::bin(Expr::str_lit("+"), "+", tmp)),
-        );
+        if matches!(spec.kind.as_str(), "x" | "X" | "o" | "b") {
+            // Radix digits never carry a sign, so Rust always adds the `+` here.
+            text = Expr::bin(Expr::str_lit("+"), "+", text);
+        } else {
+            let tmp = hoist_string(cx, node, text, out);
+            let negative = Expr::call(tmp.clone(), "startsWith", vec![Expr::str_lit("-")]);
+            text = Expr::Ternary(
+                Box::new(negative),
+                Box::new(tmp.clone()),
+                Box::new(Expr::bin(Expr::str_lit("+"), "+", tmp)),
+            );
+        }
     }
     let Some(width) = width else { return text };
     let tmp = hoist_string(cx, node, text, out);
@@ -900,19 +1008,29 @@ fn format_one(
         vec![Expr::raw("0"), Expr::bin(width, "-", len)],
     );
     if spec.zero && numeric {
-        let raw = crate::emit::render_expr(&tmp);
-        let prefix = if spec.alternate && !spec.kind.is_empty() {
+        let prefix = if spec.alternate && matches!(spec.kind.as_str(), "x" | "X" | "o" | "b") {
             2
         } else {
             0
         };
-        let sign = Expr::raw(format!(
-            "({raw}.startsWith(\"-\") || {raw}.startsWith(\"+\") ? 1 : 0) + {prefix}"
-        ));
-        let left = Expr::call(tmp.clone(), "substring", vec![Expr::raw("0"), sign.clone()]);
         let zeros = Expr::call(Expr::str_lit("0"), "repeat", vec![pad]);
-        let right = Expr::call(tmp, "substring", vec![sign]);
-        return Expr::bin(Expr::bin(left, "+", zeros), "+", right);
+        // Radix digits start right after the prefix, with no sign to skip.
+        let sign = if !spec.kind.is_empty() {
+            (prefix != 0).then(|| Expr::raw("2"))
+        } else {
+            let raw = crate::emit::render_expr(&tmp);
+            Some(Expr::raw(format!(
+                "({raw}.startsWith(\"-\") || {raw}.startsWith(\"+\") ? 1 : 0) + {prefix}"
+            )))
+        };
+        return match sign {
+            None => Expr::bin(zeros, "+", tmp),
+            Some(sign) => {
+                let left = Expr::call(tmp.clone(), "substring", vec![Expr::raw("0"), sign.clone()]);
+                let right = Expr::call(tmp, "substring", vec![sign]);
+                Expr::bin(Expr::bin(left, "+", zeros), "+", right)
+            }
+        };
     }
     let align = spec.align.unwrap_or(if numeric { '>' } else { '<' });
     let fill = Expr::str_lit(&spec.fill.to_string());
@@ -920,6 +1038,17 @@ fn format_one(
         '<' => Expr::bin(tmp, "+", Expr::call(fill, "repeat", vec![pad])),
         '>' => Expr::bin(Expr::call(fill, "repeat", vec![pad]), "+", tmp),
         _ => {
+            // Centering needs both sides; keep the pad in one temp instead of re-deriving it.
+            let name = cx.fresh("fmt_pad");
+            out.push(Stmt::new(
+                cx.line(node),
+                StmtKind::Local {
+                    ty: "int".into(),
+                    name: name.clone(),
+                    init: Some(pad),
+                },
+            ));
+            let pad = Expr::name(name);
             let left = Expr::bin(pad.clone(), "/", Expr::raw("2"));
             let right = Expr::bin(pad, "-", left.clone());
             Expr::bin(
