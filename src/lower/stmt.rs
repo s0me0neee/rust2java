@@ -217,6 +217,11 @@ pub fn lower_let(cx: &mut Cx, l: &ast::LetStmt, out: &mut Vec<Stmt>) {
             cx.read_only_literal = is_list_literal(&init) && cx.binding_read_only(ip);
             // The initializer is lowered before declaring so `let x = x + 1` sees the old `x`.
             let e = expr::lower_expr_as(cx, &init, &ty, out);
+            let e = if matches!(ty.strip_refs(), Ty::Option(_)) {
+                expr::unwitness_empty(e)
+            } else {
+                e
+            };
             cx.read_only_literal = false;
             let name = cx.declare(&rust_name);
             let jty = if ip.mut_token().is_none() && var_infers(&jty, &e) {

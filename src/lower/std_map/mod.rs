@@ -112,7 +112,15 @@ fn push_raw(out: &mut Vec<Stmt>, line: u32, text: String) {
 
 // Re-evaluating `e` must be safe and cheap; otherwise bind it to a temporary on this line.
 fn simple(cx: &mut Cx, e: Expr, ty: &Ty, line: u32, out: &mut Vec<Stmt>) -> Expr {
-    let simple = match &e {
+    if is_simple(&e) || cx.lambda_depth > 0 {
+        return e;
+    }
+    let name = push_local(cx, line, super::stmt::decl_type(ty), Some(e), out, "tmp");
+    Expr::name(name)
+}
+
+fn is_simple(e: &Expr) -> bool {
+    match e {
         Expr::Name(_) => true,
         Expr::Raw(s) => {
             s.starts_with('"')
@@ -120,13 +128,18 @@ fn simple(cx: &mut Cx, e: Expr, ty: &Ty, line: u32, out: &mut Vec<Stmt>) -> Expr
                 || s.chars()
                     .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '[' | ']'))
         }
+        Expr::Call {
+            recv: Some(r),
+            name,
+            args,
+        } => {
+            matches!(&**r, Expr::Raw(t) if t == "Optional")
+                && name == "of"
+                && args.len() == 1
+                && is_simple(&args[0])
+        }
         _ => false,
-    };
-    if simple || cx.lambda_depth > 0 {
-        return e;
     }
-    let name = push_local(cx, line, super::stmt::decl_type(ty), Some(e), out, "tmp");
-    Expr::name(name)
 }
 
 fn consumed_by(cx: &Cx, e: &ast::Expr) -> Option<String> {

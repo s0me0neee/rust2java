@@ -175,9 +175,13 @@ pub(super) fn lower_option_method(
         }
         "as_ref" | "as_mut" | "as_deref" | "cloned" | "copied" => Some(recv),
         "flatten" => {
-            // `Option<Option<T>>`: `orElse` yields the contained `Option<T>`.
-            let item = inner.as_ref().and_then(opt_inner);
-            Some(Expr::call(recv, "orElse", vec![opt_empty(item.as_ref())]))
+            // `Option<Option<T>>`: `orElse` yields the contained `Option<T>`; its type parameter
+            // target-types the empty argument.
+            Some(Expr::call(
+                recv,
+                "orElse",
+                vec![Expr::raw("Optional.empty()")],
+            ))
         }
         "replace" => {
             let p = expr::lower_expr(cx, recv_ast, out);
@@ -197,8 +201,8 @@ pub(super) fn lower_option_method(
                 None => "Optional<Object>".into(),
             };
             let n = push_local(cx, line, ty, Some(p), out, "taken");
-            let empty = opt_empty(opt_inner_from_recv(m, cx).as_ref());
-            let assign = expr::place_assign(cx, recv_ast, "=", empty, out);
+            // The target's declared type supplies the witness here.
+            let assign = expr::place_assign(cx, recv_ast, "=", Expr::raw("Optional.empty()"), out);
             out.push(Stmt::new(line, StmtKind::Expr(assign)));
             Some(Expr::name(n))
         }
@@ -234,10 +238,6 @@ pub(super) fn lower_option_method(
             Some(Expr::call(mapped, "orElseGet", vec![b0]))
         }
         "zip" => {
-            let a = match cx.ty(recv_ast).strip_refs() {
-                Ty::Option(t) => (**t).clone(),
-                _ => Ty::Other("?".into()),
-            };
             let b = m
                 .arg_list()
                 .and_then(|l| l.args().next())
@@ -246,26 +246,46 @@ pub(super) fn lower_option_method(
                     _ => None,
                 })
                 .unwrap_or(Ty::Other("?".into()));
-            let r = simple(cx, recv, &Ty::Option(Box::new(a.clone())), line, out);
-            let other = simple(cx, b0, &Ty::Option(Box::new(b.clone())), line, out);
-            let pair = Ty::Tuple(vec![a, b]);
-            let cond = Expr::bin(
-                Expr::call(r.clone(), "isPresent", vec![]),
-                "&&",
-                Expr::call(other.clone(), "isPresent", vec![]),
-            );
-            let some = opt_of(Expr::call(
+            // Hoisted when not simple, so the argument is still evaluated eagerly like Rust's.
+            let other = simple(cx, b0, &Ty::Option(Box::new(b)), line, out);
+            let x = cx.fresh("x");
+            let y = cx.fresh("y");
+            let entry = Expr::call(
                 Expr::raw("Map"),
                 "entry",
-                vec![
-                    Expr::call(r, "get", vec![]),
-                    Expr::call(other, "get", vec![]),
-                ],
-            ));
-            Some(Expr::Ternary(
-                Box::new(cond),
-                Box::new(some),
-                Box::new(opt_empty(Some(&pair))),
+                vec![Expr::name(x.clone()), Expr::name(y.clone())],
+            );
+            let nested = Expr::call(
+                other,
+                "map",
+                vec![Expr::Lambda {
+                    params: vec![y],
+                    body: LambdaBody::Expr(Box::new(entry)),
+                }],
+            );
+            Some(Expr::call(
+                recv,
+                "flatMap",
+                vec![Expr::Lambda {
+                    params: vec![x],
+                    body: LambdaBody::Expr(Box::new(nested)),
+                }],
+            ))
+        }
+        "and" => {
+            let b = match ret.strip_refs() {
+                Ty::Option(t) => (**t).clone(),
+                _ => Ty::Other("?".into()),
+            };
+            let other = simple(cx, b0, &Ty::Option(Box::new(b)), line, out);
+            let x = cx.fresh("x");
+            Some(Expr::call(
+                recv,
+                "flatMap",
+                vec![Expr::Lambda {
+                    params: vec![x],
+                    body: LambdaBody::Expr(Box::new(other)),
+                }],
             ))
         }
         "xor" => {

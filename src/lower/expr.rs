@@ -105,6 +105,21 @@ pub fn lower_expr_as(cx: &mut Cx, e: &ast::Expr, want: &Ty, out: &mut Vec<Stmt>)
     coerce(v, &have, want)
 }
 
+// A declared local's type target-types its initializer, so javac infers a bare `Optional.empty()`.
+pub fn unwitness_empty(v: Expr) -> Expr {
+    match v {
+        Expr::Ternary(c, a, b) => Expr::Ternary(
+            c,
+            Box::new(unwitness_empty(*a)),
+            Box::new(unwitness_empty(*b)),
+        ),
+        Expr::Raw(s) if s.starts_with("Optional.<") && s.ends_with(">empty()") => {
+            Expr::raw("Optional.empty()")
+        }
+        _ => v,
+    }
+}
+
 pub fn coerce(v: Expr, have: &Ty, want: &Ty) -> Expr {
     match (have.strip_refs(), want.strip_refs()) {
         // Java won't implicitly narrow int-typed expressions into byte/short.
@@ -881,11 +896,38 @@ pub fn tuple_expr(cx: &mut Cx, ty: &Ty, args: Vec<Expr>) -> Expr {
     }
 }
 
+// True for an index expression of the shape `v[v.len() - 1]`.
+fn last_index(base: &ast::Expr, index: &ast::Expr) -> bool {
+    let ast::Expr::BinExpr(b) = index else {
+        return false;
+    };
+    if !matches!(b.op_kind(), Some(ast::BinaryOp::ArithOp(ast::ArithOp::Sub))) {
+        return false;
+    }
+    let (Some(lhs), Some(rhs)) = (b.lhs(), b.rhs()) else {
+        return false;
+    };
+    if rhs.syntax().text().to_string() != "1" {
+        return false;
+    }
+    let ast::Expr::MethodCallExpr(m) = lhs else {
+        return false;
+    };
+    m.name_ref().is_some_and(|n| n.text() == "len")
+        && m.receiver()
+            .is_some_and(|r| r.syntax().text().to_string() == base.syntax().text().to_string())
+}
+
 fn lower_index(cx: &mut Cx, i: &ast::IndexExpr, out: &mut Vec<Stmt>) -> Expr {
     let (Some(base), Some(index)) = (i.base(), i.index()) else {
         return cx.unsupported(i.syntax(), "index expression");
     };
     let bt = cx.ty(&base);
+    // `v[v.len() - 1]` is the last element, which Java 21 spells `getLast()`.
+    if last_index(&base, &index) && matches!(bt.strip_refs(), Ty::Vec(_) | Ty::Deque(_)) {
+        let b = lower_expr(cx, &base, out);
+        return Expr::call(b, "getLast", vec![]);
+    }
     if let ast::Expr::RangeExpr(r) = &index {
         let b = lower_expr(cx, &base, out);
         return std_map::lower_slice_range(cx, b, &bt, r, out);

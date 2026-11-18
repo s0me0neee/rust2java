@@ -660,11 +660,11 @@ pub(super) fn lower_vec_method(
                 let sub = lower_slice_range(cx, recv, &Ty::Vec(Box::new(elem.clone())), r, out);
                 return Some(opt_of(sub));
             }
-            let cond = Expr::bin(b0.clone(), "<", Expr::call(recv.clone(), "size", vec![]));
-            Some(conditional(
-                cond,
-                opt_of(Expr::call(recv, "get", vec![b0])),
-                opt_empty(witness.as_ref()),
+            // `skip(i).findFirst()` yields `Optional.empty()` past the end, like Rust's `get`.
+            Some(Expr::call(
+                Expr::call(Expr::call(recv, "stream", vec![]), "skip", vec![b0]),
+                "findFirst",
+                vec![],
             ))
         }
         "first" | "first_mut" => Some(Expr::call(
@@ -672,14 +672,12 @@ pub(super) fn lower_vec_method(
             "findFirst",
             vec![],
         )),
-        "last" | "last_mut" => {
-            let cond = Expr::call(recv.clone(), "isEmpty", vec![]);
-            Some(conditional(
-                cond,
-                opt_empty(witness.as_ref()),
-                opt_of(Expr::call(recv, "getLast", vec![])),
-            ))
-        }
+        // `reversed()` is a view, so this neither copies nor throws on an empty list.
+        "last" | "last_mut" => Some(Expr::call(
+            Expr::call(Expr::call(recv, "reversed", vec![]), "stream", vec![]),
+            "findFirst",
+            vec![],
+        )),
         "insert" => Some(Expr::call(recv, "add", vec![b0, b1])),
         "remove" => Some(Expr::call(recv, "remove", vec![b0])),
         "swap" => Some(Expr::call(
