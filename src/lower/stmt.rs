@@ -190,6 +190,39 @@ pub fn lower_let(cx: &mut Cx, l: &ast::LetStmt, out: &mut Vec<Stmt>) {
         lower_cell_let(cx, l, ip, &rust_name, &ty, out);
         return;
     }
+    if let Some(init) = l.initializer()
+        && !is_control_flow(&init)
+        && super::views::binding_is_view(cx, ip, &init)
+    {
+        let line = cx.line(l.syntax());
+        super::views::lower_view_let(cx, ip, &rust_name, &init, line, out);
+        return;
+    }
+    if l.initializer().is_some_and(|i| !is_control_flow(&i)) && cx.binding_is_builder(ip) {
+        let line = cx.line(l.syntax());
+        let init = expr::lower_expr_as(cx, &l.initializer().unwrap(), &ty, out);
+        let name = cx.declare(&rust_name);
+        if let Some(local) = cx.sema.to_def(ip) {
+            cx.builders.insert(local);
+        }
+        let args = if expr::is_empty_string_expr(&init) {
+            vec![]
+        } else {
+            vec![init]
+        };
+        out.push(Stmt::new(
+            line,
+            StmtKind::Local {
+                ty: "StringBuilder".into(),
+                name,
+                init: Some(Expr::New {
+                    ty: "StringBuilder".into(),
+                    args,
+                }),
+            },
+        ));
+        return;
+    }
     // `var` can't be initialized with a bare `null`, which is what a `()` value becomes.
     let jty = if ty.is_unit() {
         "Object".into()

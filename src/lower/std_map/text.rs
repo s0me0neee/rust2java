@@ -83,6 +83,84 @@ pub(super) fn path(cx: &mut Cx, _path: &ast::Path, def: ModuleDef) -> Option<Exp
 }
 
 // Hook for std methods, before the receiver is lowered (`key` like `RefCell::borrow`).
+// Methods of a suffix view (see `lower::views`), answered on the base string from the offset.
+fn view_method(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    name: &str,
+    view: &crate::lower::views::View,
+    out: &mut Vec<Stmt>,
+) -> Option<Expr> {
+    let (base, start) = (Expr::name(&view.0), Expr::name(&view.1));
+    let length = || Expr::call(Expr::name(&view.0), "length", vec![]);
+    let line = cx.line(m.syntax());
+    let arg_ast = arg_asts(m).into_iter().next();
+    let arg_ty = arg_ast.as_ref().map(|a| cx.ty(a));
+    match name {
+        "len" => Some(Expr::bin(length(), "-", start)),
+        "is_empty" => Some(Expr::bin(start, ">=", length())),
+        "starts_with" => {
+            let text = match arg_ty?.strip_refs() {
+                Ty::Str => expr::lower_expr(cx, &arg_ast?, out),
+                Ty::Char => Expr::call(
+                    Expr::raw("String"),
+                    "valueOf",
+                    vec![expr::lower_expr(cx, &arg_ast?, out)],
+                ),
+                _ => return None,
+            };
+            Some(Expr::call(base, "startsWith", vec![text, start]))
+        }
+        "find" | "rfind" => {
+            let s = &view.0;
+            let o = &view.1;
+            let idx = match arg_ty?.strip_refs() {
+                Ty::Str | Ty::Char => {
+                    let p = expr::lower_expr(cx, &arg_ast?, out);
+                    if name == "find" {
+                        Expr::call(base, "indexOf", vec![p, start.clone()])
+                    } else {
+                        Expr::call(base, "lastIndexOf", vec![p])
+                    }
+                }
+                _ => {
+                    if cx.lambda_depth > 0 {
+                        return None;
+                    }
+                    let f = expr::lower_expr(cx, &arg_ast?, out);
+                    let pred = push_local(
+                        cx,
+                        line,
+                        "Function<Character, Boolean>".into(),
+                        Some(f),
+                        out,
+                        "pred",
+                    );
+                    let i = cx.fresh("i");
+                    let range = if name == "find" {
+                        format!("IntStream.range({o}, {s}.length())")
+                    } else {
+                        format!(
+                            "IntStream.iterate({s}.length() - 1, {i} -> {i} >= {o}, {i} -> {i} - 1)"
+                        )
+                    };
+                    Expr::raw(format!(
+                        "{range}.filter({i} -> {pred}.apply({s}.charAt({i}))).findFirst().orElse(-1)"
+                    ))
+                }
+            };
+            let n = push_local(cx, line, "int".into(), Some(idx), out, "idx");
+            let ret = cx.ty(&ast::Expr::MethodCallExpr(m.clone()));
+            Some(conditional(
+                Expr::bin(Expr::name(&n), ">=", Expr::name(o)),
+                opt_of(Expr::bin(Expr::name(&n), "-", Expr::name(o))),
+                opt_empty(opt_inner(&ret).as_ref()),
+            ))
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn method(
     cx: &mut Cx,
     m: &ast::MethodCallExpr,
@@ -91,6 +169,22 @@ pub(super) fn method(
     out: &mut Vec<Stmt>,
 ) -> Option<Expr> {
     let name = key.rsplit("::").next().unwrap_or(key);
+    if let Some(view) = m.receiver().and_then(|r| cx.view_of(&r))
+        && let Some(e) = view_method(cx, m, name, &view, out)
+    {
+        return Some(e);
+    }
+    // `s.as_bytes().len()` without copying the bytes into a list first.
+    if matches!(name, "len" | "is_empty")
+        && let Some(s) = m.receiver().and_then(|r| expr::as_bytes_receiver(cx, &r))
+    {
+        let s = expr::lower_expr(cx, &s, out);
+        return Some(Expr::call(
+            s,
+            if name == "len" { "length" } else { "isEmpty" },
+            vec![],
+        ));
+    }
     if !matches!(name, "unwrap" | "expect") || !matches!(recv_ty.strip_refs(), Ty::Option(_)) {
         return None;
     }
@@ -307,6 +401,23 @@ pub(super) fn lower_str_method(
         .first()
         .map(|a| cx.ty(a))
         .unwrap_or_else(|| Ty::Str);
+    // A `StringBuilder` string answers these itself; anything else reads `s.toString()`.
+    if let Some(b) = cx.builder_path(recv_ast) {
+        let b = Expr::name(b);
+        match name {
+            "len" => return Some(Expr::call(b, "length", vec![])),
+            "is_empty" => return Some(Expr::call(b, "isEmpty", vec![])),
+            "push" | "push_str" => {
+                return Some(Expr::call(
+                    b,
+                    "append",
+                    vec![crate::lower::fmt::as_any_value(b0)],
+                ));
+            }
+            "clear" => return Some(Expr::call(b, "setLength", vec![Expr::raw("0")])),
+            _ => {}
+        }
+    }
     match name {
         "len" => return Some(Expr::call(recv, "length", vec![])),
         "is_empty" => return Some(Expr::call(recv, "isEmpty", vec![])),

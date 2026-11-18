@@ -642,6 +642,29 @@ fn plain_display(spec: &Spec, ty: &Ty, v: &Expr) -> bool {
 }
 
 // `stream.collect(...)` infers its type from the call site, which breaks overloads like println.
+// `String.valueOf(x)` / `sb.toString()` where the consumer (print, append) takes any value.
+pub fn as_any_value(e: Expr) -> Expr {
+    match e {
+        Expr::Call {
+            recv: Some(r),
+            name,
+            mut args,
+        } if matches!(r.as_ref(), Expr::Raw(c) if c == "String")
+            && name == "valueOf"
+            && args.len() == 1
+            && !is_target_typed(&args[0]) =>
+        {
+            args.remove(0)
+        }
+        Expr::Call {
+            recv: Some(r),
+            name,
+            args,
+        } if name == "toString" && args.is_empty() && matches!(r.as_ref(), Expr::Name(_)) => *r,
+        e => e,
+    }
+}
+
 pub fn is_target_typed(e: &Expr) -> bool {
     matches!(e, Expr::Call { name, .. } if name == "collect")
 }

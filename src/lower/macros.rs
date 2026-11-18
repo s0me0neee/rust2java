@@ -49,21 +49,7 @@ pub fn lower_macro_expr(cx: &mut Cx, m: &ast::MacroExpr, out: &mut Vec<Stmt>) ->
                         return Expr::call(Expr::raw(stream), method, vec![]);
                     }
                     // print/println take any value, so a lone `String.valueOf(x)` is noise.
-                    let s = match s {
-                        Expr::Call {
-                            recv: Some(r),
-                            name,
-                            mut args,
-                        } if matches!(r.as_ref(), Expr::Raw(c) if c == "String")
-                            && name == "valueOf"
-                            && args.len() == 1
-                            && !fmt::is_target_typed(&args[0]) =>
-                        {
-                            args.remove(0)
-                        }
-                        s => s,
-                    };
-                    Expr::call(Expr::raw(stream), method, vec![s])
+                    Expr::call(Expr::raw(stream), method, vec![fmt::as_any_value(s)])
                 }
                 None if newline => Expr::call(Expr::raw(stream), "println", vec![]),
                 None => cx.unsupported(mc.syntax(), "print! without arguments"),
@@ -182,7 +168,9 @@ fn lower_write(cx: &mut Cx, mc: &ast::MacroCall, out: &mut Vec<Stmt>) -> Expr {
         Some(fa) => fmt::lower_format(cx, &fa, out),
         None => Expr::str_lit(""),
     };
-    let write = if target_ty.is_str() {
+    let write = if let Some(b) = cx.builder_path(&target) {
+        Expr::call(Expr::name(b), "append", vec![fmt::as_any_value(text)])
+    } else if target_ty.is_str() {
         if !matches!(target, ast::Expr::PathExpr(_)) {
             return cx.unsupported(mc.syntax(), "write! non-local String target");
         }

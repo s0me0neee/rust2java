@@ -21,7 +21,7 @@ A source-to-source transpiler that turns Rust (1.95+, edition 2021/2024) into re
 ### Non-goals
 
 - Exact integer type fidelity. `u8` is `int`, and the other unsigned types map to the same-width signed Java type (§6.1). Values outside the Java type's range, or `u8` arithmetic past 255, are allowed to behave differently.
-- Memory layout, performance, allocation, and `Drop` timing.
+- Memory layout, allocation, and `Drop` timing. Constant-factor performance is not a goal, but the Java must not be asymptotically slower than the Rust (§12.1): competitive-programming input must still finish in time.
 - `unsafe`, raw pointers, FFI, `async`, `static mut`, `catch_unwind`, proc macros other than std derives, and external crates.
 - `HashMap`/`HashSet` iteration order. Rust randomises it per run, so programs whose output depends on it are already nondeterministic.
 - Byte-exact stderr. Only the panic exit code (101) is guaranteed. The panic message text is best-effort; Java exceptions keep their Java messages.
@@ -493,6 +493,18 @@ When a program reads stdin, one shared reader is declared on the file's last lin
 | `io::stdout().flush()` | `System.out.flush()` |
 
 Checked exceptions never leave the line that caused them, so generated method signatures never need `throws`.
+
+### 12.1 Strings without quadratic copies
+
+Rust slices and appends are O(1) amortized; the naive Java (`substring`, `s += x`, `s.chars()...get(i)`) copies.
+- `let mut s = String..` appended to in a loop (`push`, `push_str`, `+=`, `write!`) is a `StringBuilder`; appends,
+  `clear`, `len`, `is_empty` and reassignment use it directly, every other use reads `s.toString()`
+  (`Cx::binding_is_builder`). Strings borrowed `&mut`, captured by closures or changed by other methods stay `String`.
+- A `&str` local that is always a suffix of one string (`&s[k..]`, `.trim_start()`, a cursor `rest = &rest[k..]`) is
+  kept as the base string plus `int <name>_start` (`lower::views`). `len`/`is_empty`/`find`/`rfind`/`starts_with`/slices
+  work from the offset; other uses read `base.substring(start)`. It applies when no use needs the copy, or when the
+  local is a cursor moved inside a loop, so ordinary slicing still reads like plain Java.
+- `s.as_bytes()[i]` is `(int) s.charAt(i)` and `s.as_bytes().len()` is `s.length()`.
 
 ---
 

@@ -399,6 +399,12 @@ pub fn lower_path_expr(cx: &mut Cx, p: &ast::PathExpr) -> Expr {
                 };
             }
             let name = cx.lookup(local.name(cx.db).as_str());
+            if let Some(view) = cx.views.get(&local) {
+                return super::views::view_read(view);
+            }
+            if cx.builders.contains(&local) {
+                return Expr::call(Expr::name(name), "toString", vec![]);
+            }
             if cx.cell_handles.contains(&local) {
                 Expr::name(name)
             } else if cx.cells.contains(&local) {
@@ -647,6 +653,12 @@ fn lower_assign(
     if let Some(e) = std_map::lower_entry_assign(cx, lhs, op, rhs, out) {
         return e;
     }
+    if op.is_none()
+        && let Some(view) = cx.view_of(lhs)
+        && let Some(e) = super::views::view_assign(cx, &view, rhs, out)
+    {
+        return e;
+    }
     let lt = cx.ty(lhs);
     let r = lower_expr_as(cx, rhs, &lt, out);
     let sym: &'static str = match op {
@@ -681,6 +693,27 @@ pub fn place_assign(
     r: Expr,
     out: &mut Vec<Stmt>,
 ) -> Expr {
+    if let Some(b) = cx.builder_path(lhs) {
+        return match sym {
+            "+=" => Expr::call(Expr::name(b), "append", vec![super::fmt::as_any_value(r)]),
+            "=" => {
+                let args = if is_empty_string_expr(&r) {
+                    vec![]
+                } else {
+                    vec![r]
+                };
+                let fresh = Expr::New {
+                    ty: "StringBuilder".into(),
+                    args,
+                };
+                Expr::Assign(Box::new(Expr::name(b)), "=", Box::new(fresh))
+            }
+            _ => cx.unsupported(
+                lhs.syntax(),
+                "compound assignment to a StringBuilder string",
+            ),
+        };
+    }
     let alias_place = match lhs {
         ast::Expr::PrefixExpr(p) if p.op_kind() == Some(ast::UnaryOp::Deref) => p.expr(),
         ast::Expr::PathExpr(_) => Some(lhs.clone()),
@@ -838,6 +871,14 @@ fn lower_prefix(cx: &mut Cx, p: &ast::PrefixExpr, out: &mut Vec<Stmt>) -> Expr {
             }
         }
         Some(ast::UnaryOp::Not) => {
+            // `!view.is_empty()` on int offsets: `start < length` reads better than `!(start >= length)`.
+            if let ast::Expr::MethodCallExpr(m) = super::strip_parens(&inner)
+                && m.name_ref().is_some_and(|n| n.text() == "is_empty")
+                && m.receiver().is_some_and(|r| cx.view_of(&r).is_some())
+                && let Expr::Binary(a, ">=", b) = v
+            {
+                return Expr::Binary(a, "<", b);
+            }
             if ty.strip_refs() == &Ty::Bool {
                 Expr::Unary("!", Box::new(v))
             } else if matches!(ty.strip_refs(), Ty::Adt { .. }) {
@@ -953,11 +994,35 @@ fn last_index(base: &ast::Expr, index: &ast::Expr) -> bool {
             .is_some_and(|r| r.syntax().text().to_string() == base.syntax().text().to_string())
 }
 
+pub fn is_empty_string_expr(e: &Expr) -> bool {
+    matches!(e, Expr::Raw(s) if s == "\"\"")
+}
+
+// The string `s` of an `s.as_bytes()` expression (bytes and Java char codes agree for ASCII).
+pub fn as_bytes_receiver(cx: &Cx, e: &ast::Expr) -> Option<ast::Expr> {
+    let ast::Expr::MethodCallExpr(m) = super::strip_parens(e) else {
+        return None;
+    };
+    let recv = m.receiver()?;
+    (m.name_ref()?.text() == "as_bytes" && cx.ty(&recv).is_str()).then_some(recv)
+}
+
 fn lower_index(cx: &mut Cx, i: &ast::IndexExpr, out: &mut Vec<Stmt>) -> Expr {
     let (Some(base), Some(index)) = (i.base(), i.index()) else {
         return cx.unsupported(i.syntax(), "index expression");
     };
     let bt = cx.ty(&base);
+    if let (ast::Expr::RangeExpr(r), Some(view)) = (&index, cx.view_of(&base)) {
+        return super::views::view_slice(cx, &view, r, out);
+    }
+    // `s.as_bytes()[i]` reads one char code instead of copying the string into a list.
+    if !matches!(index, ast::Expr::RangeExpr(_))
+        && let Some(s) = as_bytes_receiver(cx, &base)
+    {
+        let s = lower_expr(cx, &s, out);
+        let ix = lower_expr(cx, &index, out);
+        return Expr::Cast("int".into(), Box::new(Expr::call(s, "charAt", vec![ix])));
+    }
     // `v[v.len() - 1]` is the last element, which Java 21 spells `getLast()`.
     if last_index(&base, &index) && matches!(bt.strip_refs(), Ty::Vec(_) | Ty::Deque(_)) {
         let b = lower_expr(cx, &base, out);

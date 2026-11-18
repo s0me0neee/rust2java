@@ -1,6 +1,6 @@
 // Differential tests: every tests/cases/NAME.rs must print the same stdout and exit with the same
 // code under rustc and after transpiling to Java.
-//   CASE=substr      run only matching cases
+//   CASE=a,b         run only cases whose name contains a or b
 //   UPDATE_EXPECTED=1 regenerate NAME.expected / NAME.exit from rustc
 
 use std::path::{Path, PathBuf};
@@ -28,7 +28,11 @@ fn cases() -> Vec<Case> {
                 src,
             }
         })
-        .filter(|c| filter.as_ref().is_none_or(|f| c.name.contains(f.as_str())))
+        .filter(|c| {
+            filter
+                .as_ref()
+                .is_none_or(|f| f.split(',').any(|p| c.name.contains(p)))
+        })
         // `*_needs_<area>` cases wait on another workstream; NEEDS=1 runs them too.
         .filter(|c| !c.name.contains("_needs_") || std::env::var("NEEDS").is_ok())
         .collect();

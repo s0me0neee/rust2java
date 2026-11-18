@@ -10,6 +10,7 @@ pub mod pat;
 pub mod std_map;
 pub mod stmt;
 pub mod traits;
+pub mod views;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -63,6 +64,10 @@ pub struct Cx<'a, 'db> {
     pub switch_depth: u32,
     // Locals stored in one-element arrays (`int[] n = {0}`): `&mut` targets and closure-mutated vars.
     pub cells: HashSet<ra_ap_hir::Local<'db>>,
+    // `String` locals appended to in a loop, held in a `StringBuilder`.
+    pub builders: HashSet<ra_ap_hir::Local<'db>>,
+    // `&str` locals kept as (base, start offset); see `views`.
+    pub views: HashMap<ra_ap_hir::Local<'db>, views::View>,
     // Locals that *are* a one-element array: `Cell<i32>`/`RefCell<i32>` handles (`int[] c = {0}`).
     pub cell_handles: HashSet<ra_ap_hir::Local<'db>>,
     // >0 while lowering a closure body: statements hoisted to `out` would run only once, outside it.
@@ -169,6 +174,8 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         loops: Vec::new(),
         switch_depth: 0,
         cells: HashSet::new(),
+        builders: HashSet::new(),
+        views: HashMap::new(),
         cell_handles: HashSet::new(),
         lambda_depth: 0,
         pulled_iters: HashMap::new(),
@@ -343,6 +350,8 @@ impl<'a, 'db> Cx<'a, 'db> {
         self.method_names.clear();
         self.tmp_counter = 0;
         self.cells.clear();
+        self.builders.clear();
+        self.views.clear();
         self.cell_handles.clear();
         self.pulled_iters.clear();
         self.elem_aliases.clear();
@@ -403,6 +412,145 @@ impl<'a, 'db> Cx<'a, 'db> {
             }
         }
         false
+    }
+
+    // A `let mut s = String..` appended to inside a loop: Java `+=` would copy the whole string
+    // per append, so it becomes a `StringBuilder`. Only appends, `clear`, `len`, `is_empty` and
+    // reassignment touch the builder; every other use reads `s.toString()`.
+    pub fn binding_is_builder(&self, ip: &ast::IdentPat) -> bool {
+        if ip.mut_token().is_none() || ip.ref_token().is_some() {
+            return false;
+        }
+        let is_string = self
+            .sema
+            .type_of_pat(&ast::Pat::IdentPat(ip.clone()))
+            .and_then(|t| t.original.as_adt())
+            .is_some_and(|a| a.name(self.db).as_str() == "String");
+        let (Some(local), Some(scope)) = (self.sema.to_def(ip), self.enclosing_fn(ip.syntax()))
+        else {
+            return false;
+        };
+        if !is_string {
+            return false;
+        }
+        let Some(home) = ip.syntax().ancestors().find_map(ast::StmtList::cast) else {
+            return false;
+        };
+        let mut appended_in_loop = false;
+        for pe in self
+            .expanded_descendants(&scope)
+            .into_iter()
+            .filter_map(ast::PathExpr::cast)
+        {
+            let Some(path) = pe.path() else { continue };
+            if !matches!(self.sema.resolve_path(&path), Some(ra_ap_hir::PathResolution::Local(l)) if l == local)
+            {
+                continue;
+            }
+            let ancestors: Vec<SyntaxNode> = self
+                .sema
+                .ancestors_with_macros(pe.syntax().clone())
+                .skip(1)
+                .take_while(|n| n != home.syntax())
+                .collect();
+            if ancestors
+                .iter()
+                .any(|n| ast::ClosureExpr::can_cast(n.kind()))
+            {
+                return false;
+            }
+            // Look through `&mut s` / `(s)` to the expression using the string.
+            let mut user = pe.syntax().clone();
+            let mut via_mut_ref = false;
+            while let Some(parent) = user.parent() {
+                if let Some(r) = ast::RefExpr::cast(parent.clone()) {
+                    via_mut_ref |= r.mut_token().is_some();
+                } else if !ast::ParenExpr::can_cast(parent.kind()) {
+                    break;
+                }
+                user = parent;
+            }
+            let parent = user.parent();
+            let method = parent
+                .clone()
+                .and_then(ast::MethodCallExpr::cast)
+                .filter(|m| m.receiver().is_some_and(|r| r.syntax() == &user))
+                .and_then(|m| m.name_ref())
+                .map(|n| n.text().to_string());
+            let compound = parent.clone().and_then(ast::BinExpr::cast).filter(|b| {
+                b.lhs().is_some_and(|l| l.syntax() == &user)
+                    && b.op_kind()
+                        .is_some_and(|op| matches!(op, ast::BinaryOp::Assignment { .. }))
+            });
+            let append = match (&method, &compound) {
+                (Some(m), _)
+                    if matches!(m.as_str(), "push" | "push_str" | "write_fmt" | "write_str") =>
+                {
+                    true
+                }
+                (Some(m), _) if matches!(m.as_str(), "clear" | "len" | "is_empty") => false,
+                // Other `&mut self` methods (pop, insert, truncate, ..) would need the String.
+                (Some(m), _) if self.mutating_str_method(m) => return false,
+                (_, Some(b)) => match b.op_kind() {
+                    Some(ast::BinaryOp::Assignment {
+                        op: Some(ast::ArithOp::Add),
+                    }) => true,
+                    Some(ast::BinaryOp::Assignment { op: None }) => false,
+                    _ => return false,
+                },
+                _ if via_mut_ref => return false,
+                _ => false,
+            };
+            if append
+                && ancestors.iter().any(|n| {
+                    ast::ForExpr::can_cast(n.kind())
+                        || ast::WhileExpr::can_cast(n.kind())
+                        || ast::LoopExpr::can_cast(n.kind())
+                })
+            {
+                appended_in_loop = true;
+            }
+        }
+        appended_in_loop
+    }
+
+    fn mutating_str_method(&self, name: &str) -> bool {
+        matches!(
+            name,
+            "pop"
+                | "insert"
+                | "insert_str"
+                | "remove"
+                | "retain"
+                | "truncate"
+                | "drain"
+                | "extend"
+                | "replace_range"
+                | "make_ascii_uppercase"
+                | "make_ascii_lowercase"
+                | "split_off"
+                | "reserve"
+                | "shrink_to_fit"
+                | "as_mut_str"
+        )
+    }
+
+    pub fn view_of(&self, e: &ast::Expr) -> Option<views::View> {
+        self.local_of_path(e)
+            .and_then(|l| self.views.get(&l).cloned())
+    }
+
+    // Java name of the `StringBuilder` if `e` is a path to a builder local.
+    pub fn builder_path(&self, e: &ast::Expr) -> Option<String> {
+        let ast::Expr::PathExpr(pe) = strip_parens(e) else {
+            return None;
+        };
+        match self.sema.resolve_path(&pe.path()?) {
+            Some(ra_ap_hir::PathResolution::Local(l)) if self.builders.contains(&l) => {
+                Some(self.lookup(l.name(self.db).as_str()))
+            }
+            _ => None,
+        }
     }
 
     // An immutable binding whose value is only read (method receiver, `&x`, `x[i]`, `for .. in x`)
