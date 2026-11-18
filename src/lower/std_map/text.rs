@@ -61,6 +61,32 @@ pub(super) fn path(cx: &mut Cx, _path: &ast::Path, def: ModuleDef) -> Option<Exp
                 ))),
             }
         }
+        "str::trim" => Expr::raw("String::strip"),
+        "str::trim_start" => Expr::raw("String::stripLeading"),
+        "str::trim_end" => Expr::raw("String::stripTrailing"),
+        "str::len" | "String::len" => Expr::raw("String::length"),
+        "str::is_empty" | "String::is_empty" => Expr::raw("String::isEmpty"),
+        "str::to_uppercase"
+        | "str::to_ascii_uppercase"
+        | "str::to_lowercase"
+        | "str::to_ascii_lowercase" => {
+            let s = cx.fresh_param("s");
+            cx.release_param(&s);
+            let f = if key.contains("upper") {
+                "toUpperCase"
+            } else {
+                "toLowerCase"
+            };
+            Expr::Lambda {
+                params: vec![s.clone()],
+                body: LambdaBody::Expr(Box::new(Expr::call(
+                    Expr::name(s),
+                    f,
+                    vec![Expr::raw("Locale.ROOT")],
+                ))),
+            }
+        }
+        "String::as_str" | "str::as_ref" | "String::as_ref" => Expr::raw("String::valueOf"),
         k if k.starts_with("char::is_") => {
             let c = cx.fresh("c");
             let body = lower_small_method(
@@ -173,6 +199,41 @@ pub(super) fn method(
         && let Some(e) = crate::lower::fmt::lower_debug_builder(cx, m, out)
     {
         return Some(e);
+    }
+    // `c.to_uppercase().collect::<String>()` / `.to_string()`: the case-mapped text directly.
+    if matches!(name, "collect" | "to_string")
+        && let Some(ast::Expr::MethodCallExpr(inner)) = m.receiver().map(|r| strip_parens(&r))
+        && matches!(
+            method_name(&inner).as_str(),
+            "to_uppercase" | "to_lowercase"
+        )
+        && let Some(c) = inner.receiver()
+        && cx.ty(&c).strip_refs() == &Ty::Char
+        && cx.ty(&ast::Expr::MethodCallExpr(m.clone())).is_str()
+    {
+        let f = if method_name(&inner) == "to_uppercase" {
+            "toUpperCase"
+        } else {
+            "toLowerCase"
+        };
+        let c = expr::lower_expr(cx, &c, out);
+        return Some(Expr::call(
+            Expr::call(Expr::raw("String"), "valueOf", vec![c]),
+            f,
+            vec![Expr::raw("Locale.ROOT")],
+        ));
+    }
+    // The Formatter is the `StringBuilder` a Display impl writes into; like `write!`, the
+    // `fmt::Result` is dropped.
+    if matches!(key, "Formatter::write_str" | "Formatter::write_char") && cx.in_display {
+        let f = expr::lower_expr(cx, &m.receiver()?, out);
+        let arg = expr::lower_expr(cx, &arg_asts(m).into_iter().next()?, out);
+        let line = cx.line(m.syntax());
+        out.push(Stmt::new(
+            line,
+            StmtKind::Expr(Expr::call(f, "append", vec![arg])),
+        ));
+        return Some(Expr::raw("null"));
     }
     if let Some(view) = m.receiver().and_then(|r| cx.view_of(&r))
         && let Some(e) = view_method(cx, m, name, &view, out)

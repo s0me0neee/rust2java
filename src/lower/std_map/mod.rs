@@ -87,7 +87,7 @@ fn narrow(v: Expr, i: Int) -> Expr {
     }
 }
 
-fn push_local(
+pub(crate) fn push_local(
     cx: &mut Cx,
     line: u32,
     ty: String,
@@ -278,41 +278,7 @@ fn clone_expr(e: Expr, ty: &Ty) -> Expr {
 
 // Zero value for `Default::default` / `unwrap_or_default` / `or_default`.
 fn default_value_cx(cx: &mut Cx, ty: &Ty) -> Expr {
-    ordered_new(cx, ty).unwrap_or_else(|| default_value(ty))
-}
-
-fn default_value(ty: &Ty) -> Expr {
-    match ty.strip_refs() {
-        Ty::Bool => Expr::raw("false"),
-        Ty::Char => Expr::raw("'\\0'"),
-        Ty::Int(i) => Expr::raw(if i.is_long() { "0L" } else { "0" }),
-        Ty::F32 => Expr::raw("0.0f"),
-        Ty::F64 => Expr::raw("0.0"),
-        Ty::Str => Expr::str_lit(""),
-        Ty::Vec(_) => Expr::New {
-            ty: "ArrayList<>".into(),
-            args: vec![],
-        },
-        Ty::Map { ordered, .. } => Expr::New {
-            ty: if *ordered { "TreeMap<>" } else { "HashMap<>" }.into(),
-            args: vec![],
-        },
-        Ty::Set { ordered, .. } => Expr::New {
-            ty: if *ordered { "TreeSet<>" } else { "HashSet<>" }.into(),
-            args: vec![],
-        },
-        Ty::Deque(_) => Expr::New {
-            ty: "ArrayDeque<>".into(),
-            args: vec![],
-        },
-        Ty::Heap(_) => Expr::New {
-            ty: "PriorityQueue<>".into(),
-            args: vec![],
-        },
-        Ty::Option(_) => Expr::raw("Optional.empty()"),
-        Ty::Result(..) => Expr::raw("null"),
-        _ => Expr::raw("null"),
-    }
+    Expr::raw(crate::lower::items::default_value(cx, ty))
 }
 
 // Declares (once) the shared stdin reader on the file's last line.
@@ -329,6 +295,84 @@ pub fn need_stdin(cx: &mut Cx) {
 }
 
 // ---- std free functions ----------------------------------------------------------------------
+
+// `std::iter` sources: `repeat`, `once`, `empty`, `from_fn`, `repeat_with`, `successors`.
+fn iter_fn(
+    cx: &mut Cx,
+    c: &ast::CallExpr,
+    key: &str,
+    ret: &Ty,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) -> Option<Expr> {
+    let Ty::Iter(item) = ret else { return None };
+    let t = item.boxed();
+    let stream = || Expr::raw("Stream");
+    Some(match key {
+        "empty::empty" => Expr::raw(format!("Stream.<{t}>empty()")),
+        "once::once" => Expr::call(stream(), "of", expr::call_args(cx, c, out)),
+        "repeat::repeat" => {
+            let first = c.arg_list()?.args().next()?;
+            let v = expr::lower_expr(cx, &first, out);
+            // The supplier captures the value, so it must be a constant or a fresh final local.
+            let v = if matches!(first, ast::Expr::Literal(_)) {
+                v
+            } else {
+                let tmp = cx.fresh("item");
+                out.push(Stmt::new(
+                    line,
+                    StmtKind::Local {
+                        ty: crate::lower::stmt::decl_type(item),
+                        name: tmp.clone(),
+                        init: Some(v),
+                    },
+                ));
+                Expr::name(tmp)
+            };
+            Expr::call(
+                stream(),
+                "generate",
+                vec![Expr::Lambda {
+                    params: vec![],
+                    body: LambdaBody::Expr(Box::new(v)),
+                }],
+            )
+        }
+        // Explicit type arguments: a block lambda's `Optional.empty()` branch infers `? extends Object`.
+        "repeat_with::repeat_with" => Expr::call(
+            stream(),
+            &format!("<{t}>generate"),
+            expr::call_args(cx, c, out),
+        ),
+        "from_fn::from_fn" => {
+            let f = expr::call_args(cx, c, out).into_iter().next()?;
+            let generated = Expr::call(stream(), &format!("<Optional<{t}>>generate"), vec![f]);
+            let present = Expr::call(
+                generated,
+                "takeWhile",
+                vec![Expr::raw("Optional::isPresent")],
+            );
+            Expr::call(present, "map", vec![Expr::raw("Optional::get")])
+        }
+        "successors::successors" => {
+            let mut args = expr::call_args(cx, c, out).into_iter();
+            let (first, f) = (args.next()?, args.next()?);
+            let o = cx.fresh_param("o");
+            cx.release_param(&o);
+            let step = Expr::Lambda {
+                params: vec![o.clone()],
+                body: LambdaBody::Expr(Box::new(Expr::call(Expr::name(o), "flatMap", vec![f]))),
+            };
+            let it = Expr::call(
+                stream(),
+                "iterate",
+                vec![first, Expr::raw("Optional::isPresent"), step],
+            );
+            Expr::call(it, "map", vec![Expr::raw("Optional::get")])
+        }
+        _ => return None,
+    })
+}
 
 pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Vec<Stmt>) -> Expr {
     let line = cx.line(c.syntax());
@@ -347,6 +391,9 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
         if let Some(e) = hook(cx, c, key, &ret, out) {
             return e;
         }
+    }
+    if let Some(e) = iter_fn(cx, c, key, &ret, line, out) {
+        return e;
     }
     match key {
         "mem::swap" => return mem_swap(cx, c, out),
@@ -529,6 +576,10 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
                 ));
                 Expr::name(name)
             }
+        }
+        // Java can't produce a value from a type parameter (no static dispatch on `T`).
+        "Default::default" if matches!(ret.strip_refs(), Ty::Param(_)) => {
+            cx.unsupported(c.syntax(), "`T::default()` for a generic type parameter")
         }
         "Default::default" => default_value_cx(cx, &ret),
         k if k.ends_with("::default")

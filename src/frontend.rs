@@ -286,7 +286,15 @@ pub fn convert(sema: &Semantics<'_, RootDatabase>, from: Module, ty: &ra_ap_hir:
                 .collect(),
         );
     }
-    if let Some(p) = ty.as_type_param(db) {
+    // `f: impl Fn(A) -> B` is an unnamed parameter; it maps like the bound it stands for.
+    // `F: Fn(i32) -> bool` is used as its functional interface (`Predicate<Integer>`) too.
+    if let Some(p) = ty.as_type_param(db)
+        && !p.is_implicit(db)
+        && !(ty.as_callable(db).is_some()
+            && p.trait_bounds(db)
+                .iter()
+                .any(|t| matches!(t.name(db).as_str(), "Fn" | "FnMut" | "FnOnce")))
+    {
         return Ty::Param(p.name(db).as_str().to_string());
     }
     // `dyn Trait` / `impl Trait` of a crate trait become its interface; std traits (Fn*, Iterator)

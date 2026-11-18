@@ -1,0 +1,16 @@
+event  4 failed: 'war and peace' has no copies left
+event  5 failed: cid is not a member
+event  6 failed: no book with isbn 999
+event  7 failed: 'the guns of august' has no copies left
+event  9 failed: book was not borrowed
+5 errors; log: +ann; +bob; ann took the rust programming language; bob took war and peace; ann took war and peace
+ann: ["111", "333"] fine=0
+bob: [] fine=75
+Fiction |war and peace
+Science |a brief history of time / the rust programming language
+History |the guns of august
+oldest: war and peace (1869) WAP
+111x1,222x1
+Some(Borrow { member: "ann", isbn: "333" })
+true
+The Rust Programming Language

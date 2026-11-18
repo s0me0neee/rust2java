@@ -1,0 +1,11 @@
+name           n      mean       min       max
+----------------------------------------------
+alice          2      6.88      3.50     10.25
+bob            2     52.00      4.00    100.00
+carol          1     -2.50     -2.50     -2.50
+total 5 values, mean 23.050
+line 6: bad value for carol: invalid float literal
+line 7: too many fields
+line 8: missing name
+line 10: missing value for dave
+best: bob 52.0

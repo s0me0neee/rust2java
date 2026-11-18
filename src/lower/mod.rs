@@ -71,6 +71,8 @@ pub struct Cx<'a, 'db> {
     pub views: HashMap<ra_ap_hir::Local<'db>, views::View>,
     // Struct/array types changed in place somewhere in the crate (computed on first use; see `values`).
     pub mutated: Option<values::Mutated>,
+    // `(trait, const)` pairs read through a type parameter or `Self` (computed on first use).
+    pub generic_consts: Option<HashSet<(String, String)>>,
     // The statement-level call whose `&mut field` arguments may use a temporary cell, and the
     // write-backs that must follow that statement.
     pub write_back_call: Option<SyntaxNode>,
@@ -128,7 +130,8 @@ pub enum ElemAliasKind {
 pub struct LoopFrame {
     pub rust_label: Option<String>,
     pub java_label: Option<String>,
-    pub value_var: Option<String>,
+    // Where `break value` sends the value (a local, or the method's return).
+    pub value_dest: Option<stmt::Dest>,
     // `cx.switch_depth` when the loop was entered.
     pub switch_depth: u32,
     // Labeled block rather than a loop (unlabeled `break` skips it).
@@ -187,6 +190,7 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         builders: HashSet::new(),
         views: HashMap::new(),
         mutated: None,
+        generic_consts: None,
         write_back_call: None,
         write_backs: Vec::new(),
         stmt_lambda_names: HashSet::new(),

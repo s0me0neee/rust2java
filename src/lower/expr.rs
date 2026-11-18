@@ -1424,14 +1424,25 @@ fn reassigned_snapshots(
         .filter_map(|n| ast::IdentPat::cast(n.clone()))
         .filter_map(|p| cx.sema.to_def(&p))
         .collect();
+    // `s.push(c)` on a String (or any `&mut self` call on a Java-immutable value) reassigns it.
     let assigned = |cx: &Cx, root: &ra_ap_syntax::SyntaxNode, local: ra_ap_hir::Local| {
-        cx.expanded_descendants(root)
-            .into_iter()
-            .filter_map(ast::BinExpr::cast)
-            .any(|b| {
-                matches!(b.op_kind(), Some(ast::BinaryOp::Assignment { .. }))
-                    && b.lhs().is_some_and(|l| cx.local_of_path(&l) == Some(local))
-            })
+        cx.expanded_descendants(root).into_iter().any(|n| {
+            if let Some(b) = ast::BinExpr::cast(n.clone()) {
+                return matches!(b.op_kind(), Some(ast::BinaryOp::Assignment { .. }))
+                    && b.lhs().is_some_and(|l| cx.local_of_path(&l) == Some(local));
+            }
+            ast::MethodCallExpr::cast(n)
+                .and_then(|m| m.receiver())
+                .is_some_and(|r| {
+                    cx.local_of_path(&r) == Some(local)
+                        && !cx.builders.contains(&local)
+                        && super::is_mut_ref_cell_ty(&cx.ty(&r))
+                        && cx
+                            .sema
+                            .type_of_expr(&r)
+                            .is_some_and(|t| t.adjusted().is_mutable_reference())
+                })
+        })
     };
     let mut seen = std::collections::HashSet::new();
     let mut copies = Vec::new();
@@ -1555,9 +1566,41 @@ pub fn lower_args(
             return Expr::name(cell);
         }
         let want = cx.adjusted_ty(&a);
-        lower_expr_as(cx, &a, &want, out)
+        let v = lower_expr_as(cx, &a, &want, out);
+        // Java only narrows int constants on assignment, not when passing an argument to a
+        // method of the program (std calls are lowered to expressions, not Java calls).
+        match (&v, want.strip_refs()) {
+            (Expr::Raw(s), Ty::Int(i))
+                if matches!(i.java(), "byte" | "short")
+                    && calls_local_fn(cx, &a)
+                    && s.trim_start_matches('-')
+                        .chars()
+                        .all(|c| c.is_ascii_digit()) =>
+            {
+                Expr::Cast(i.java().into(), Box::new(v))
+            }
+            _ => v,
+        }
     })
     .collect()
+}
+
+// Whether argument `a` is passed to a function defined in the transpiled crate.
+fn calls_local_fn(cx: &Cx, a: &ast::Expr) -> bool {
+    let Some(call) = a.syntax().parent().and_then(|p| p.parent()) else {
+        return false;
+    };
+    let f = if let Some(m) = ast::MethodCallExpr::cast(call.clone()) {
+        cx.sema.resolve_method_call(&m)
+    } else if let Some(ast::Expr::PathExpr(p)) = ast::CallExpr::cast(call).and_then(|c| c.expr()) {
+        match p.path().and_then(|p| cx.sema.resolve_path(&p)) {
+            Some(ra_ap_hir::PathResolution::Def(ra_ap_hir::ModuleDef::Function(f))) => Some(f),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    f.is_some_and(|f| f.module(cx.db).krate(cx.db).origin(cx.db).is_local())
 }
 
 pub fn call_args(cx: &mut Cx, c: &impl HasArgList, out: &mut Vec<Stmt>) -> Vec<Expr> {

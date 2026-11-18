@@ -1970,7 +1970,7 @@ fn try_option(
 
 // --- helpers --------------------------------------------------------------------------------
 
-fn place(cx: &mut Cx, e: &ast::Expr, out: &mut Vec<Stmt>) -> Expr {
+pub(crate) fn place(cx: &mut Cx, e: &ast::Expr, out: &mut Vec<Stmt>) -> Expr {
     let line = cx.line(e.syntax());
     let ty = cx.ty(e);
     if ty.is_unit() {

@@ -208,6 +208,9 @@ pub fn lower_let(cx: &mut Cx, l: &ast::LetStmt, out: &mut Vec<Stmt>) {
     if let Some(inner) = super::std_map::ptr::ref_mut_pat(cx, ip)
         && !l.initializer().is_some_and(|i| option_ref_init(cx, &i))
     {
+        if lower_slot_let(cx, l, ip, &inner, out) {
+            return;
+        }
         lower_ref_let(cx, l, ip, &rust_name, &inner, out);
         return;
     }
@@ -377,6 +380,92 @@ fn option_ref_init(cx: &Cx, init: &ast::Expr) -> bool {
             .is_some_and(|r| matches!(cx.ty(&r).strip_refs(), Ty::Option(_)))
 }
 
+// `let c = m.entry(k).or_insert(0);` / `let d = m.get_mut(&k).unwrap();` where Java can't point
+// into the value (a number, String, Option): the binding names the map slot, so reads become
+// `m.get(k)` and writes `m.put(k, ..)` (see `ElemAliasKind::Map`).
+fn lower_slot_let(
+    cx: &mut Cx,
+    l: &ast::LetStmt,
+    ip: &ast::IdentPat,
+    inner: &Ty,
+    out: &mut Vec<Stmt>,
+) -> bool {
+    use ast::HasArgList;
+    if !super::is_mut_ref_cell_ty(inner) {
+        return false;
+    }
+    let (Some(init), Some(local)) = (l.initializer(), cx.sema.to_def(ip)) else {
+        return false;
+    };
+    let ast::Expr::MethodCallExpr(outer) = super::strip_parens(&init) else {
+        return false;
+    };
+    let Some(ast::Expr::MethodCallExpr(call)) = outer.receiver().map(|r| super::strip_parens(&r))
+    else {
+        return false;
+    };
+    let (outer_name, call_name) = (
+        super::iter::method_name(&outer),
+        super::iter::method_name(&call),
+    );
+    let fill = match (call_name.as_str(), outer_name.as_str()) {
+        ("entry", "or_insert" | "or_default" | "or_insert_with") => Some(outer_name.as_str()),
+        ("get_mut", "unwrap" | "expect") => None,
+        _ => return false,
+    };
+    let (Some(map_ast), Some(key_ast)) = (
+        call.receiver(),
+        call.arg_list().and_then(|a| a.args().next()),
+    ) else {
+        return false;
+    };
+    if !matches!(cx.ty(&map_ast).strip_refs(), Ty::Map { .. }) {
+        return false;
+    }
+    let key_ast = match super::strip_parens(&key_ast) {
+        ast::Expr::RefExpr(r) => r.expr().unwrap_or(key_ast),
+        k => k,
+    };
+    let arg = outer.arg_list().and_then(|a| a.args().next());
+    let line = cx.line(l.syntax());
+    let map = super::pat::place(cx, &map_ast, out);
+    let key = super::pat::place(cx, &key_ast, out);
+    let ensure = match fill {
+        Some("or_insert") => {
+            let Some(v) = arg else { return false };
+            let v = expr::lower_expr_as(cx, &v, inner, out);
+            Some(Expr::call(map.clone(), "putIfAbsent", vec![key.clone(), v]))
+        }
+        Some("or_default") => {
+            let v = Expr::raw(super::items::default_value(cx, inner.strip_refs()));
+            Some(Expr::call(map.clone(), "putIfAbsent", vec![key.clone(), v]))
+        }
+        Some(_) => match arg.map(|f| expr::lower_expr(cx, &f, out)) {
+            Some(Expr::Lambda { params, body }) if params.is_empty() => {
+                let f = Expr::Lambda {
+                    params: vec!["unused".into()],
+                    body,
+                };
+                Some(Expr::call(
+                    map.clone(),
+                    "computeIfAbsent",
+                    vec![key.clone(), f],
+                ))
+            }
+            _ => return false,
+        },
+        None => None,
+    };
+    if let Some(e) = ensure {
+        out.push(Stmt::new(line, StmtKind::Expr(e)));
+    }
+    cx.elem_aliases.insert(
+        local,
+        (render(&map), render(&key), super::ElemAliasKind::Map),
+    );
+    true
+}
+
 // `let r = &mut x;` names the array `x` lives in, like a `&mut` parameter.
 fn lower_ref_let(
     cx: &mut Cx,
@@ -502,10 +591,7 @@ pub fn lower_to_dest(cx: &mut Cx, e: &ast::Expr, dest: &Dest, out: &mut Vec<Stmt
                 cx.loops.push(LoopFrame {
                     rust_label,
                     java_label: java_label.clone(),
-                    value_var: match dest {
-                        Dest::Assign(v) => Some(v.clone()),
-                        _ => None,
-                    },
+                    value_dest: break_dest(dest),
                     switch_depth: cx.switch_depth,
                     is_block: true,
                 });
@@ -688,14 +774,18 @@ fn push_loop(cx: &mut Cx, label: Option<ast::Label>, dest: &Dest) {
     let frame = LoopFrame {
         java_label: rust_label.as_deref().map(java_label_name),
         rust_label,
-        value_var: match dest {
-            Dest::Assign(v) => Some(v.clone()),
-            _ => None,
-        },
+        value_dest: break_dest(dest),
         switch_depth: cx.switch_depth,
         is_block: false,
     };
     cx.loops.push(frame);
+}
+
+fn break_dest(dest: &Dest) -> Option<Dest> {
+    match dest {
+        Dest::Discard => None,
+        d => Some(d.clone()),
+    }
 }
 
 fn lower_break(cx: &mut Cx, b: &ast::BreakExpr, out: &mut Vec<Stmt>) {
@@ -709,8 +799,10 @@ fn lower_break(cx: &mut Cx, b: &ast::BreakExpr, out: &mut Vec<Stmt>) {
         None => cx.loops.iter().rposition(|f| !f.is_block),
     };
     if let Some(v) = b.expr() {
-        match idx.and_then(|i| cx.loops[i].value_var.clone()) {
-            Some(var) => lower_to_dest(cx, &v, &Dest::Assign(var), out),
+        match idx.and_then(|i| cx.loops[i].value_dest.clone()) {
+            // `return v;` / `yield v;` already leave the loop.
+            Some(d @ (Dest::Return | Dest::Yield)) => return lower_to_dest(cx, &v, &d, out),
+            Some(d) => lower_to_dest(cx, &v, &d, out),
             None => lower_to_dest(cx, &v, &Dest::Discard, out),
         }
     }

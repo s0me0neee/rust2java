@@ -298,7 +298,7 @@ fn lower_struct(cx: &mut Cx, s: &ast::Struct, adt: Option<Adt>, impls: Vec<&ast:
         .iter()
         .map(|f| Member::Field {
             line: f.line,
-            text: format!("{}{} {};", f.vis, f.ty.java(), f.name),
+            text: format!("{}{} {};", f.vis, field_java(&f.ty), f.name),
         })
         .collect();
     let mut implements = Vec::new();
@@ -351,10 +351,19 @@ fn adt_java_name_opt(cx: &Cx, adt: Option<Adt>, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
+// An iterator kept in a field is pulled step by step (`self.chars.next()`), so it is a
+// `ListIterator` over the materialized items rather than a one-shot `Stream`.
+fn field_java(ty: &Ty) -> String {
+    match ty {
+        Ty::Iter(t) => format!("ListIterator<{}>", t.boxed()),
+        t => t.java(),
+    }
+}
+
 fn canonical_ctor(name: &str, fields: &[FieldInfo]) -> String {
     let params: Vec<String> = fields
         .iter()
-        .map(|f| format!("{} {}", f.ty.java(), f.name))
+        .map(|f| format!("{} {}", field_java(&f.ty), f.name))
         .collect();
     let body: Vec<String> = fields
         .iter()
@@ -859,6 +868,7 @@ fn lower_trait(cx: &mut Cx, t: &ast::Trait) -> Option<Member> {
                     if let Some(m) = lower_const(cx, c.name(), c.ty(), c.body(), c.syntax()) {
                         members.push(m);
                     }
+                    members.extend(const_accessor(cx, &c, &name, true));
                 }
                 _ => {}
             }
@@ -1008,6 +1018,7 @@ fn lower_impls(cx: &mut Cx, impls: &[&ast::Impl], target: &Target) -> (Vec<Membe
                     if let Some(m) = lower_const(cx, c.name(), c.ty(), c.body(), c.syntax()) {
                         members.push(m);
                     }
+                    members.extend(const_accessor(cx, &c, &tname, false));
                 }
                 _ => {}
             }
@@ -1236,29 +1247,6 @@ fn index_mut_setter(cx: &mut Cx, f: &ast::Fn, target: &Target) -> Option<Method>
         cx.unsupported(f.syntax(), "impl IndexMut whose body is not `&mut <place>`");
         return None;
     };
-    let mut params: Vec<(String, String)> = Vec::new();
-    if let Some(pl) = f.param_list() {
-        for p in pl.params() {
-            let ty = p
-                .ty()
-                .map(|t| cx.type_ref(&t))
-                .unwrap_or(Ty::Other("?".into()));
-            let jty = param_type(cx, &ty);
-            match p.pat() {
-                Some(ast::Pat::IdentPat(ip)) if ip.pat().is_none() => {
-                    let n = ip
-                        .name()
-                        .map(|n| n.text().to_string())
-                        .unwrap_or_else(|| "_".into());
-                    params.push((jty, n));
-                }
-                _ => {
-                    cx.unsupported(f.syntax(), "impl IndexMut with a destructuring parameter");
-                    return None;
-                }
-            }
-        }
-    }
     let out_ty = cx
         .sema
         .to_fn_def(f)
@@ -1269,13 +1257,32 @@ fn index_mut_setter(cx: &mut Cx, f: &ast::Fn, target: &Target) -> Option<Method>
     let saved = cx.save_method_state();
     cx.enter_method();
     let mut jparams: Vec<String> = Vec::new();
-    for (jty, rust) in &params {
-        let name = cx.declare(rust);
-        jparams.push(format!("{jty} {name}"));
+    let mut prelude = Vec::new();
+    for p in f.param_list().into_iter().flat_map(|pl| pl.params()) {
+        let ty = p
+            .ty()
+            .map(|t| cx.type_ref(&t))
+            .unwrap_or(Ty::Other("?".into()));
+        let jty = param_type(cx, &ty);
+        match p.pat() {
+            Some(ast::Pat::IdentPat(ip)) if ip.pat().is_none() => {
+                let n = ip
+                    .name()
+                    .map(|n| n.text().to_string())
+                    .unwrap_or_else(|| "_".into());
+                jparams.push(format!("{jty} {}", cx.declare(&n)));
+            }
+            // `(r, c): (usize, usize)`: bound from the parameter like an ordinary fn's.
+            Some(other) => {
+                let tmp = cx.fresh("arg");
+                jparams.push(format!("{jty} {tmp}"));
+                super::pat::bind_pattern(cx, &other, Expr::name(tmp), &mut prelude);
+            }
+            None => {}
+        }
     }
     let value = cx.fresh("value");
     jparams.push(format!("{out_ty} {value}"));
-    let mut prelude = Vec::new();
     let assign = expr::place_assign(cx, &place, "=", Expr::name(value), &mut prelude);
     cx.restore_method_state(saved);
     cx.self_ty_java = saved_self;
@@ -1715,13 +1722,17 @@ pub fn lower_record_expr(cx: &mut Cx, r: &ast::RecordExpr, out: &mut Vec<Stmt>) 
     let mut args = Vec::new();
     for (idx, f) in fields.iter().enumerate() {
         let want = cx.convert(&f.ty(cx.db));
+        let field_value = |v: Expr| match &want {
+            Ty::Iter(_) => Expr::call(Expr::call(v, "toList", vec![]), "listIterator", vec![]),
+            _ => v,
+        };
         if let Some((_, v)) = hoisted.iter().find(|(i, _)| *i == idx) {
-            args.push(v.clone());
+            args.push(field_value(v.clone()));
         } else if let Some((_, e, pname)) = provided.iter().find(|(i, _, _)| *i == idx) {
-            args.push(match e {
+            args.push(field_value(match e {
                 Some(e) => expr::lower_expr_as(cx, e, &want, out),
                 None => Expr::name(cx.lookup(pname)),
-            });
+            }));
         } else if let Some(b) = &base {
             args.push(Expr::Field(Box::new(b.clone()), names[idx].clone()));
         } else {
@@ -1805,6 +1816,9 @@ pub fn lower_def_path(cx: &mut Cx, path: &ast::Path, def: ModuleDef) -> Expr {
                         return Expr::raw(format!("{owner}.{n}"));
                     }
                     AssocItemContainer::Trait(tr) => {
+                        if let Some(e) = trait_const_via_value(cx, path, &n) {
+                            return e;
+                        }
                         return Expr::raw(format!("{}.{n}", trait_java_name(db, cx.module, tr)));
                     }
                 }
@@ -2007,6 +2021,98 @@ pub fn is_cell(cx: &Cx, e: &ast::Expr) -> bool {
 }
 
 // --- consts ------------------------------------------------------------------------------
+
+// A trait's associated const read through a type parameter (`A::LEGS`) has no static owner in
+// Java, so the trait declares an accessor method of the same name that each impl answers.
+fn const_accessor(cx: &mut Cx, c: &ast::Const, trait_name: &str, in_trait: bool) -> Option<Member> {
+    let rust_name = c.name()?.text().to_string();
+    if cx.generic_consts.is_none() {
+        cx.generic_consts = Some(generic_const_reads(cx));
+    }
+    if !cx
+        .generic_consts
+        .as_ref()
+        .unwrap()
+        .contains(&(trait_name.to_string(), rust_name.clone()))
+    {
+        return None;
+    }
+    let name = escape_keyword(&rust_name);
+    let ty = cx.type_ref(&c.ty()?).java();
+    let text = match (in_trait, c.body().is_some()) {
+        (true, false) => format!("{ty} {name}();"),
+        (true, true) => format!("default {ty} {name}() {{ return {name}; }}"),
+        (false, _) => format!("public {ty} {name}() {{ return {name}; }}"),
+    };
+    Some(Member::Raw {
+        line: cx.line(c.syntax()),
+        text,
+    })
+}
+
+// Trait consts some code reads as `A::NAME` / `Self::NAME`, as `(trait, const)` names.
+fn generic_const_reads(cx: &Cx) -> std::collections::HashSet<(String, String)> {
+    use ra_ap_hir::PathResolution;
+    let mut found = std::collections::HashSet::new();
+    let krate = cx.module.krate(cx.db);
+    for module in krate.modules(cx.db) {
+        let src = module.definition_source(cx.db);
+        if !matches!(src.value, ra_ap_hir::ModuleSource::SourceFile(_)) {
+            continue;
+        }
+        let root = cx.sema.parse(src.file_id.original_file(cx.db));
+        // Expanded: the read is often a `format!` argument.
+        for path in cx
+            .expanded_descendants(root.syntax())
+            .into_iter()
+            .filter_map(ast::Path::cast)
+        {
+            let Some(q) = path.qualifier() else { continue };
+            if !matches!(
+                cx.sema.resolve_path(&q),
+                Some(PathResolution::TypeParam(_) | PathResolution::SelfType(_))
+            ) {
+                continue;
+            }
+            if let Some(PathResolution::Def(ModuleDef::Const(c))) = cx.sema.resolve_path(&path)
+                && let Some(assoc) = c.as_assoc_item(cx.db)
+                && let AssocItemContainer::Trait(tr) = assoc.container(cx.db)
+                && let Some(n) = c.name(cx.db)
+            {
+                found.insert((tr.name(cx.db).as_str().to_string(), n.as_str().to_string()));
+            }
+        }
+    }
+    found
+}
+
+// `A::LEGS` / `Self::LEGS` for a trait const: the accessor on a value of that type in scope.
+fn trait_const_via_value(cx: &Cx, path: &ast::Path, name: &str) -> Option<Expr> {
+    use ra_ap_hir::PathResolution;
+    let qualifier = path.qualifier()?;
+    match cx.sema.resolve_path(&qualifier)? {
+        // Inside the trait, `Self` is its implicit type parameter.
+        PathResolution::TypeParam(tp) if tp.name(cx.db).as_str() == "Self" => {
+            Some(Expr::raw(format!("this.{name}()")))
+        }
+        PathResolution::TypeParam(tp) => {
+            let f = cx.enclosing_fn(path.syntax())?;
+            let f = ast::Fn::cast(f)?;
+            let wanted = tp.name(cx.db).as_str().to_string();
+            for p in f.param_list()?.params() {
+                if let Some(ast::Pat::IdentPat(ip)) = p.pat()
+                    && matches!(cx.pat_ty(&ast::Pat::IdentPat(ip.clone())).strip_refs(), Ty::Param(n) if *n == wanted)
+                {
+                    let java = cx.lookup(ip.name()?.text().as_ref());
+                    return Some(Expr::raw(format!("{java}.{name}()")));
+                }
+            }
+            None
+        }
+        PathResolution::SelfType(_) => Some(Expr::raw(format!("this.{name}()"))),
+        _ => None,
+    }
+}
 
 fn lower_const(
     cx: &mut Cx,
@@ -2730,7 +2836,7 @@ fn default_method(
     )
 }
 
-fn default_value(cx: &mut Cx, ty: &Ty) -> String {
+pub(crate) fn default_value(cx: &mut Cx, ty: &Ty) -> String {
     // Ordered collections of keys Java can't compare need the Rust `Ord` comparator.
     if let Some(e) = super::std_map::ordered_new(cx, ty) {
         return crate::emit::render_expr(&e);
@@ -2757,6 +2863,7 @@ fn default_value(cx: &mut Cx, ty: &Ty) -> String {
         }
         .into(),
         Ty::Deque(_) => "new ArrayDeque<>()".into(),
+        Ty::Heap(_) => "new PriorityQueue<>()".into(),
         Ty::Option(_) => "Optional.empty()".into(),
         Ty::Adt { java, .. } => format!("{java}.default_()"),
         Ty::Tuple(ts) if ts.len() == 2 => {

@@ -1,0 +1,11 @@
+# name, value
+Alice, 3.5
+bob,4
+alice, 10.25
+
+carol, x
+bob, 7, 9
+, 3
+Carol, -2.5
+dave
+bob, 1e2

@@ -1,6 +1,7 @@
 // Std Vec/slices/arrays, HashMap/BTreeMap, sets, VecDeque, BinaryHeap, entry API.
 
 use super::*;
+use crate::lower::strip_parens;
 
 // Hook for std free functions (`key` as built by `calls::std_fn_key`, e.g. `Rc::new`).
 pub(super) fn fn_call(
@@ -85,24 +86,8 @@ pub(crate) fn ord_comparator(cx: &mut Cx, ty: &Ty) -> Option<String> {
         Ty::Int(Int::U32) => Some("Integer::compareUnsigned".into()),
         Ty::Int(Int::U64 | Int::U128) => Some("Long::compareUnsigned".into()),
         Ty::Tuple(fields) if fields.len() >= 2 => {
-            let p = cx.fresh("p");
-            let mut chain = String::new();
-            for (n, field) in fields.iter().enumerate() {
-                let get = match fields.len() {
-                    2 => ["getKey()", "getValue()"][n].to_string(),
-                    _ => format!("_{n}()"),
-                };
-                let key = match n {
-                    0 => format!("Comparator.comparing(({boxed} {p}) -> {p}.{get}"),
-                    _ => format!(".thenComparing({p} -> {p}.{get}"),
-                };
-                chain += &key;
-                if let Some(c) = ord_comparator(cx, field) {
-                    chain += &format!(", {c}");
-                }
-                chain += ")";
-            }
-            Some(chain)
+            let cmps = fields.iter().map(|f| ord_comparator(cx, f)).collect();
+            Some(tuple_comparator(cx, ty, cmps))
         }
         Ty::Option(inner) => {
             let o = cx.fresh("o");
@@ -194,6 +179,61 @@ pub(crate) fn ord_pick(
 }
 
 // `cmp` reversed, for max-heaps.
+// Field by field, each with its own comparator (`None`: Java's natural order).
+fn tuple_comparator(cx: &mut Cx, ty: &Ty, cmps: Vec<Option<String>>) -> String {
+    let boxed = ty.boxed();
+    let p = cx.fresh("p");
+    let n_fields = cmps.len();
+    let mut chain = String::new();
+    for (n, cmp) in cmps.into_iter().enumerate() {
+        let get = match n_fields {
+            2 => ["getKey()", "getValue()"][n].to_string(),
+            _ => format!("_{n}()"),
+        };
+        chain += &match n {
+            0 => format!("Comparator.comparing(({boxed} {p}) -> {p}.{get}"),
+            _ => format!(".thenComparing({p} -> {p}.{get}"),
+        };
+        if let Some(c) = cmp {
+            chain += &format!(", {c}");
+        }
+        chain += ")";
+    }
+    chain
+}
+
+fn is_reverse_call(e: &ast::Expr) -> bool {
+    matches!(strip_parens(e), ast::Expr::CallExpr(c)
+        if matches!(c.expr(), Some(ast::Expr::PathExpr(p))
+            if p.path().and_then(|p| p.segment()).is_some_and(|s| s.syntax().text() == "Reverse")))
+}
+
+// Comparator for the key a closure body builds. Types erase `Reverse(..)`, so its order comes
+// from the expression's shape: `Reverse(k)`, `(Reverse(a), b)`.
+pub(crate) fn key_comparator(cx: &mut Cx, body: &ast::Expr, ty: &Ty) -> Option<String> {
+    match strip_parens(body) {
+        ast::Expr::CallExpr(c) if is_reverse_call(body) => {
+            let inner = c.arg_list()?.args().next()?;
+            Some(reversed_comparator(key_comparator(cx, &inner, ty)))
+        }
+        ast::Expr::BlockExpr(b) if b.stmt_list()?.statements().next().is_none() => {
+            key_comparator(cx, &b.tail_expr()?, ty)
+        }
+        ast::Expr::TupleExpr(t) => match ty.strip_refs() {
+            Ty::Tuple(fields) if t.fields().count() == fields.len() && fields.len() >= 2 => {
+                let cmps = t
+                    .fields()
+                    .zip(fields.iter())
+                    .map(|(e, f)| key_comparator(cx, &e, f))
+                    .collect();
+                Some(tuple_comparator(cx, ty, cmps))
+            }
+            _ => ord_comparator(cx, ty),
+        },
+        _ => ord_comparator(cx, ty),
+    }
+}
+
 pub(crate) fn reversed_comparator(cmp: Option<String>) -> String {
     match cmp {
         None => "Comparator.reverseOrder()".into(),
@@ -223,6 +263,41 @@ pub(crate) fn clone_list(cx: &mut Cx, value: Expr, elem: &Ty) -> Expr {
         ty: "ArrayList<>".into(),
         args: vec![value],
     }
+}
+
+// `v.clone()` / `v.to_vec()`: struct elements are mutable Java objects, so each is cloned too.
+fn clone_elems(cx: &mut Cx, m: &ast::MethodCallExpr, recv: Expr, elem: &Ty) -> Expr {
+    let struct_elems = m
+        .receiver()
+        .and_then(|r| cx.sema.type_of_expr(&r))
+        .map(|t| t.original.strip_references())
+        .and_then(|t| match t.as_array(cx.db) {
+            Some((e, _)) => Some(e),
+            None => t.as_slice().or_else(|| t.type_arguments().next()),
+        })
+        .and_then(|e| match e.as_adt() {
+            Some(ra_ap_hir::Adt::Struct(st)) => Some(st),
+            _ => None,
+        })
+        .is_some_and(|st| st.module(cx.db).krate(cx.db).origin(cx.db).is_local());
+    if !struct_elems {
+        return clone_list(cx, recv, elem);
+    }
+    let item = cx.fresh_param("item");
+    cx.release_param(&item);
+    let copied = Expr::call(
+        Expr::call(recv, "stream", vec![]),
+        "map",
+        vec![Expr::Lambda {
+            params: vec![item.clone()],
+            body: LambdaBody::Expr(Box::new(Expr::call(Expr::name(item), "clone", vec![]))),
+        }],
+    );
+    Expr::call(
+        copied,
+        "collect",
+        vec![Expr::raw("Collectors.toCollection(ArrayList::new)")],
+    )
 }
 
 // Hook for std methods, before the receiver is lowered (`key` like `RefCell::borrow`).
@@ -994,6 +1069,20 @@ pub(super) fn lower_vec_method(
                 Some(ast::Expr::ClosureExpr(c)) => c.body().map(|b| cx.ty(&b)),
                 _ => None,
             };
+            let body = match arg_asts.first() {
+                Some(ast::Expr::ClosureExpr(c)) => c.body(),
+                _ => None,
+            };
+            if let (Some(body), Some(t)) = (&body, &key_ty)
+                && let Some(order) = key_comparator(cx, body, t)
+            {
+                let f = Expr::call(
+                    Expr::raw("Comparator"),
+                    "comparing",
+                    vec![typed_lambda(b0, elem), Expr::raw(order)],
+                );
+                return Some(Expr::call(recv, "sort", vec![f]));
+            }
             let cmp = match key_ty.as_ref().map(|t| t.strip_refs().clone()) {
                 Some(Ty::Int(i)) if i.is_long() => "comparingLong",
                 Some(Ty::Int(_)) => "comparingInt",
@@ -1086,7 +1175,7 @@ pub(super) fn lower_vec_method(
                 ret,
             ))
         }
-        "to_vec" | "to_owned" => Some(clone_list(cx, recv, elem)),
+        "to_vec" | "to_owned" => Some(clone_elems(cx, m, recv, elem)),
         "concat" if matches!(elem.strip_refs(), Ty::Vec(t) if super::super::is_cell_value_ty(t)) => {
             let flat = Expr::call(
                 Expr::call(recv, "stream", vec![]),
@@ -1147,7 +1236,7 @@ pub(super) fn lower_vec_method(
             );
             Some(Expr::raw("null"))
         }
-        "clone" => Some(clone_list(cx, recv, elem)),
+        "clone" => Some(clone_elems(cx, m, recv, elem)),
         "as_slice" | "as_mut" | "as_mut_slice" | "into_boxed_slice" => Some(recv),
         "reserve" | "shrink_to_fit" => Some(Expr::raw("null")),
         _ => {
@@ -1549,10 +1638,17 @@ pub fn lower_array_expr(cx: &mut Cx, a: &ast::ArrayExpr, out: &mut Vec<Stmt>) ->
             .collect();
     }
     if items.is_empty() {
-        return Expr::New {
-            ty: "ArrayList<>".into(),
-            args: vec![],
+        // `f::<f64>(&[])`: an argument position gives the diamond nothing to infer from.
+        let ty = match cx.ty(&ast::Expr::ArrayExpr(a.clone())).strip_refs() {
+            Ty::Vec(t)
+                if t.is_nameable()
+                    && matches!(a.syntax().parent(), Some(p) if ast::ArgList::can_cast(p.kind()) || ast::RefExpr::can_cast(p.kind())) =>
+            {
+                format!("ArrayList<{}>", t.boxed())
+            }
+            _ => "ArrayList<>".into(),
         };
+        return Expr::New { ty, args: vec![] };
     }
     // `()` elements are `null` in Java, which `List.of` rejects.
     let factory = if exprs.iter().any(|e| cx.ty(e).is_unit()) {

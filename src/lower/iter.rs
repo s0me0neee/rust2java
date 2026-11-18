@@ -26,7 +26,7 @@ pub fn lower_for(cx: &mut Cx, f: &ast::ForExpr, out: &mut Vec<Stmt>) {
     cx.loops.push(LoopFrame {
         java_label: rust_label.as_deref().map(stmt::java_label_name),
         rust_label,
-        value_var: None,
+        value_dest: None,
         switch_depth: cx.switch_depth,
         is_block: false,
     });
@@ -527,7 +527,7 @@ fn simple_ident(p: &ast::Pat) -> Option<String> {
     }
 }
 
-fn method_name(m: &ast::MethodCallExpr) -> String {
+pub(crate) fn method_name(m: &ast::MethodCallExpr) -> String {
     m.name_ref()
         .map(|n| n.text().to_string())
         .unwrap_or_default()
@@ -705,7 +705,18 @@ pub fn lower_iter_method(
     if let Some(local) = cx.local_of_path(&recv_ast)
         && let Some(items) = cx.pulled_iters.get(&local).cloned()
     {
-        return Some(lower_pulled(cx, m, &name, &recv_ast, &items, recv_ty, out));
+        return Some(lower_pulled(
+            cx,
+            m,
+            &name,
+            &recv_ast,
+            Some(&items),
+            recv_ty,
+            out,
+        ));
+    }
+    if is_iter_field(cx, &recv_ast) {
+        return Some(lower_pulled(cx, m, &name, &recv_ast, None, recv_ty, out));
     }
     // Set algebra streams: std_map builds the stream from the two sets.
     if matches!(recv_ty.strip_refs(), Ty::Set { .. })
@@ -873,6 +884,25 @@ fn lower_source(
             )
         }
         (Ty::Str, "bytes") => boxed(Expr::call(recv, "chars", vec![])),
+        // `c.to_uppercase()` iterates the (possibly several) chars of the case mapping.
+        (Ty::Char, "to_uppercase" | "to_lowercase") => {
+            let c = cx.fresh("c");
+            let f = if name == "to_uppercase" {
+                "toUpperCase"
+            } else {
+                "toLowerCase"
+            };
+            let text = Expr::call(
+                Expr::call(Expr::raw("String"), "valueOf", vec![recv]),
+                f,
+                vec![Expr::raw("Locale.ROOT")],
+            );
+            Expr::call(
+                Expr::call(text, "chars", vec![]),
+                "mapToObj",
+                vec![Expr::raw(format!("{c} -> (char) {c}"))],
+            )
+        }
         (Ty::Str, "char_indices") => {
             let s = ensure_simple(cx, recv.clone(), &recv_ty, line, out);
             let i = cx.fresh("i");
@@ -1306,20 +1336,36 @@ fn lower_adaptor_core(
                     "step_by() on a non-range iterator inside a closure",
                 );
             }
-            let tmp = cx.fresh("stepped");
-            out.push(Stmt::new(
+            // A counter keeps it lazy: the source may be endless (`Fib.step_by(2).take(5)`).
+            let k = if matches!(&k, Expr::Raw(r) if r.chars().all(|c| c.is_ascii_digit())) {
+                k
+            } else {
+                Expr::name(super::std_map::push_local(
+                    cx,
+                    line,
+                    "int".into(),
+                    Some(k),
+                    out,
+                    "step",
+                ))
+            };
+            let seen = super::std_map::push_local(
+                cx,
                 line,
-                StmtKind::Local {
-                    ty: format!("List<{}>", item.boxed()),
-                    name: tmp.clone(),
-                    init: Some(call("toList", vec![])),
-                },
-            ));
-            let i = cx.fresh("i");
-            Expr::raw(format!(
-                "IntStream.iterate(0, {i} -> {i} < {tmp}.size(), {i} -> {i} + {}).mapToObj({tmp}::get)",
-                render(&k)
-            ))
+                "int[]".into(),
+                Some(Expr::raw("{0}")),
+                out,
+                "seen",
+            );
+            let x = cx.fresh_param("x");
+            cx.release_param(&x);
+            call(
+                "filter",
+                vec![Expr::raw(format!(
+                    "{x} -> {seen}[0]++ % {} == 0",
+                    render(&k)
+                ))],
+            )
         }
         "chain" => {
             let other_ty = cx.ty(&args[0]);
@@ -1350,7 +1396,17 @@ fn lower_adaptor_core(
         }
         "min_by_key" | "max_by_key" => {
             let f = typed_lambda(cx, &args[0], &item, out);
-            let cmp = format!("Comparator.comparing({})", render(&f));
+            let order = match strip_parens(&args[0]) {
+                ast::Expr::ClosureExpr(c) => c.body().and_then(|b| {
+                    let t = cx.ty(&b);
+                    super::std_map::coll::key_comparator(cx, &b, &t)
+                }),
+                _ => None,
+            };
+            let cmp = match order {
+                Some(o) => format!("Comparator.comparing({}, {o})", render(&f)),
+                None => format!("Comparator.comparing({})", render(&f)),
+            };
             if name == "min_by_key" {
                 call("min", vec![Expr::raw(cmp)])
             } else {
@@ -1648,8 +1704,10 @@ fn lower_collect(
             let cmp = super::std_map::coll::reversed_comparator(
                 super::std_map::coll::ord_comparator(cx, t),
             );
+            // Explicit element type: `reverseOrder()` gives the diamond nothing to infer from.
             collect(format!(
-                "Collectors.toCollection(() -> new PriorityQueue<>({cmp}))"
+                "Collectors.toCollection(() -> new PriorityQueue<{}>({cmp}))",
+                t.boxed()
             ))
         }
         Ty::Result(ok, err) if matches!(ok.strip_refs(), Ty::Vec(_)) => {
@@ -1722,12 +1780,20 @@ fn collected_read_only(cx: &Cx, m: &ast::MethodCallExpr) -> bool {
     })
 }
 
+// `self.chars`: an iterator stored in a struct field, which is a `ListIterator` (see items).
+fn is_iter_field(cx: &Cx, e: &ast::Expr) -> bool {
+    matches!(strip_parens(e), ast::Expr::FieldExpr(_))
+        && matches!(cx.ty(e).strip_refs(), Ty::Iter(_))
+}
+
 // `it.next().unwrap()` on a pulled iterator: `ListIterator.next()` already throws when empty.
 pub fn is_unwrapped_next(cx: &Cx, m: &ast::MethodCallExpr) -> bool {
     method_name(m) == "next"
-        && m.receiver()
-            .and_then(|r| cx.local_of_path(&r))
-            .is_some_and(|l| cx.pulled_iters.contains_key(&l))
+        && m.receiver().is_some_and(|r| {
+            cx.local_of_path(&r)
+                .is_some_and(|l| cx.pulled_iters.contains_key(&l))
+                || is_iter_field(cx, &r)
+        })
         && m.syntax()
             .parent()
             .and_then(ast::MethodCallExpr::cast)
@@ -1743,7 +1809,7 @@ fn lower_pulled(
     m: &ast::MethodCallExpr,
     name: &str,
     recv_ast: &ast::Expr,
-    items: &str,
+    items: Option<&str>,
     recv_ty: &Ty,
     out: &mut Vec<Stmt>,
 ) -> Expr {
@@ -1751,8 +1817,42 @@ fn lower_pulled(
     let item = item_of(recv_ty);
     // Explicit type arguments: the `?:` has no target type at a call's receiver.
     let t = item.boxed();
-    let peeked = format!("{items}.get({it}.nextIndex())");
     let args = arg_exprs(m);
+    // `it.next();` only skips an item: a guarded call, not a discarded Optional.
+    if name == "next"
+        && m.syntax()
+            .parent()
+            .is_some_and(|p| ast::ExprStmt::can_cast(p.kind()))
+    {
+        let line = cx.line(m.syntax());
+        out.push(Stmt::new(
+            line,
+            StmtKind::Raw(format!("if ({it}.hasNext()) {it}.next();")),
+        ));
+        return Expr::raw("");
+    }
+    // A field's ListIterator has no backing list in scope: step forward and back to peek.
+    let Some(items) = items else {
+        return match name {
+            "next" if is_unwrapped_next(cx, m) => Expr::call(Expr::raw(it), "next", vec![]),
+            "next" => Expr::raw(format!(
+                "({it}.hasNext() ? Optional.<{t}>of({it}.next()) : Optional.<{t}>empty())"
+            )),
+            "peek" => {
+                let x = cx.fresh_param("x");
+                cx.release_param(&x);
+                Expr::raw(format!(
+                    "({it}.hasNext() ? Optional.<{t}>of({it}.next()).map({x} -> {it}.previous()) : Optional.<{t}>empty())"
+                ))
+            }
+            "by_ref" | "peekable" => Expr::raw(it),
+            _ => cx.unsupported(
+                m.syntax(),
+                &format!("`{name}` on an iterator kept in a struct field"),
+            ),
+        };
+    };
+    let peeked = format!("{items}.get({it}.nextIndex())");
     match name {
         "next" if is_unwrapped_next(cx, m) => Expr::call(Expr::raw(it), "next", vec![]),
         "next" => Expr::raw(format!(
@@ -1783,6 +1883,10 @@ fn lower_pulled(
             m.syntax(),
             &format!("`{name}` on an iterator that is also pulled with next()"),
         ),
+        // `chars.as_str()`: the text not yet pulled.
+        "as_str" => Expr::raw(format!(
+            "{items}.subList({it}.nextIndex(), {items}.size()).stream().map(String::valueOf).collect(Collectors.joining())"
+        )),
         // By-value methods consume the iterator: stream what is left of the backing list.
         _ => {
             let rest = Expr::raw(format!("{items}.subList({it}.nextIndex(), {items}.size())"));

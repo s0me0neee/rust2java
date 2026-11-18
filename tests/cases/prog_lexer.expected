@@ -1,0 +1,10 @@
+[1] x = 3 => 3
+[2] y = x * (2 + 4.5) => 19.5
+[3] y / 2 - -1 => 10.75
+[4] z + 1 => error: unknown variable 'z'
+[5] 10 / (x - 3) => error: division by zero
+[6] 7 % 4 + 2 * 3 => 9
+[7] (1 + 2 => error: syntax error: expected ')', got None
+[8] 4 $ 4 => error: syntax error: unexpected '$'
+[("x", 3.0), ("y", 19.5)]
+Neg(Bin(Var("a"), '+', Num(1.0)))

@@ -1,0 +1,15 @@
+<job#3> <job#2> <job#1> <job#5> <job#4>
+shortest: 3 (2)
+[(2, 3), (4, 2), (7, 4)]
+topo: Some([1, 5, 2, 3, 4])
+cyclic topo: None
+largest duration Some(10), largest of none None
+largest float Some(9.25)
+[3, 2, 1, 5, 4]
+[4, 5, 1, 2, 3]
+max Some(3)
+min by duration Some("job#3")
+total 26 deps [1, 2, 3]
+first leaf idx Some(3)
+false
+Less

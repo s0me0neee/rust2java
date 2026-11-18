@@ -1,0 +1,12 @@
+dog (4 legs) says woof
+bird (2 legs) says tweettweet
+Some("c") peek=Some("b") len=2
+Stack { items: ["a", "b"] }
+3 2
+18 16
+[16, 3, 27]
+[1.5][2.25] [x][y]
+fib(80)=23416728348467685 memo=79
+[1, 2, 3, 4, 5, 7, 8, 9] depth=4
+Node(Node(Leaf, 'a', Leaf), 'm', Leaf)
+false
