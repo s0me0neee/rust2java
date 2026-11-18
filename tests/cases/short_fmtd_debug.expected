@@ -1,0 +1,18 @@
+[1, 2, 3]
+[true, false]
+[[1, 2], []]
+[[true], [false]]
+{1, 2, 3}
+{1: 2, 3: 4}
+[(1, 'x'), (2, 'y')]
+[Some(1), None]
+Some(7) None
+Some((1, "two"))
+Some([1, 2])
+Some(Some(1))
+Some(1.5)
+Ok(1) Err("bad")
+[Pair { a: 2, b: false }]
+Pair { a: 1, b: true }
+[Some(     1)] [[0001, 0002]] [Some(1.2)]
+[(     1,      2)] (3, "x")
