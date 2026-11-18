@@ -1532,20 +1532,6 @@ pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
             parts.push(Expr::str_lit(")"));
             concat(parts)
         }
-        Ty::Ordering => {
-            // Rust names the variants; the Java value only keeps its sign.
-            let less = Expr::bin(v.clone(), "<", Expr::raw("0"));
-            let greater = Expr::bin(v, ">", Expr::raw("0"));
-            Expr::Ternary(
-                Box::new(less),
-                Box::new(Expr::str_lit("Less")),
-                Box::new(Expr::Ternary(
-                    Box::new(greater),
-                    Box::new(Expr::str_lit("Greater")),
-                    Box::new(Expr::str_lit("Equal")),
-                )),
-            )
-        }
         Ty::Int(i) if unsigned_display(*i) => unsigned_string(*i, v.clone()).unwrap_or(v),
         Ty::Adt { .. } => Expr::call(v, "debug", vec![]),
         // `Ordering` is an int; only its sign matters.
