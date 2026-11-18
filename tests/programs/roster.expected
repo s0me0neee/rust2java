@@ -1,0 +1,13 @@
+#1 ada     dev     total  24 avg 8.00 best Some(9)
+#2 grace   ops     total  16 avg 8.00 best Some(10)
+#3 linus   dev     total  20 avg 5.00 best Some(5)
+#4 mira    design  total   9 avg 9.00 best Some(9)
+#5 zoe     ops     total   0 avg 0.00 best None
+role     count   total   best     mean
+dev          2      44      9    22.00
+ops          2      16     10     8.00
+design       1       9      9     9.00
+all                 69
+strongest: ada with 24
+69 points across 4 scored members
+roster: ada, grace, linus, mira, zoe

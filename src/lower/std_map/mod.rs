@@ -1088,7 +1088,7 @@ pub fn lower_std_method(
         (t, "to_string") if t.is_primitive() => {
             Expr::call(Expr::raw("String"), "valueOf", vec![recv])
         }
-        (Ty::Adt { .. }, "to_string") => Expr::call(recv, "toString", vec![]),
+        (Ty::Adt { .. } | Ty::Param(_), "to_string") => Expr::call(recv, "toString", vec![]),
         (Ty::Adt { .. }, "eq") => Expr::call(recv, "equals", args),
         (Ty::Adt { .. }, "ne") => Expr::Unary("!", Box::new(Expr::call(recv, "equals", args))),
         (Ty::Option(_) | Ty::Result(..), "to_string") => Expr::call(recv, "toString", vec![]),

@@ -1,0 +1,31 @@
+opened 1 for alice
+opened 2 for bob
+cannot open 3: invalid amount: -5.00
+opened 4 for dave
+ok: balance 125.00
+ok: balance 95.00
+ok: moved 20.00 from 2 to 1
+error: need 500.00 but only 30.00 available
+ok: fee charged
+error: account 9 not found
+error: account 9 not found
+error: invalid amount: -3.00
+Err(Frozen(4))
+id   owner         balance  status
+--------------------------------------
+1    alice          115.00  open
+2    bob             30.00  open
+4    dave             8.75  frozen
+total holdings: 153.75
+deposit         2 entries,     45.00
+fee             1 entries,      1.25
+transfer-in     1 entries,     20.00
+transfer-out    1 entries,     20.00
+withdraw        2 entries,     50.00
+largest: withdraw 30.00 on account 1
+  deposit         25.00 ->   125.00
+  withdraw        30.00 ->    95.00
+  deposit         20.00 ->   115.00
+  transfer-in     20.00 ->   115.00
+Some(NotFound(42))
+zero: need 0.00 but only -0.00 available

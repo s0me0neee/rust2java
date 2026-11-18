@@ -622,21 +622,20 @@ fn lower_switch_stmt(
         });
     }
     cx.switch_depth -= 1;
-    // javac does not treat an all-constant enum switch as exhaustive: it needs a way out.
+    // A switch statement may fall through; when the destination must be set, a throw arm ends it.
     let needs_escape = matches!(dest, Dest::Assign(_))
         || matches!(dest, Dest::Return) && cx.ret_ty.as_ref().is_some_and(|t| !t.is_unit());
-    let constants_only = jarms
-        .iter()
-        .all(|a| a.label != "default" && !a.label.contains('('));
-    let escape = (needs_escape && constants_only).then(|| {
-        Stmt::new(
+    let has_default = jarms.iter().any(|a| a.label == "default");
+    if needs_escape && !has_default {
+        jarms.push(Arm {
             line,
-            StmtKind::Throw(Expr::New {
+            label: "default".to_string(),
+            body: ArmBody::Throw(Expr::New {
                 ty: "IllegalStateException".into(),
                 args: vec![Expr::str_lit("unreachable")],
             }),
-        )
-    });
+        });
+    }
     out.push(Stmt::new(
         line,
         StmtKind::Switch {
@@ -644,9 +643,6 @@ fn lower_switch_stmt(
             arms: jarms,
         },
     ));
-    if let Some(e) = escape {
-        out.push(e);
-    }
 }
 
 // Single irrefutable arm: bindings, then the body.

@@ -1,0 +1,31 @@
+[3, 1, 4, 1, 5, 9, 2, 6]
+len 8 empty false
+peek Some(6)
+pop Some(6)
+after pop: stack of 7 ([3, 1, 4, 1, 5, 9, 2])
+sum 25 max Some(9)
+[alpha, beta, gamma]
+stack of 3 ([alpha, beta, gamma])
+popped word: Some("gamma")
+empty summary: stack of 0 ([])
+drained Some(42) then None
+sorted smallest Some(1) largest Some(9)
+contains 8: true, contains 7: false
+words: Some("apple")
+largest: Some(9)
+count even: 3
+doubled: [2, 4, 6]
+labels: ["#1", "#2"]
+zip: ["a=1", "b=2"]
++----------+
+| scores |
+| alice 10 |
+| bob 7 |
++----------+
++--------+
+| nums |
+| 1 |
+| 22 |
+| 333 |
++--------+
+[1.5, 2.25]

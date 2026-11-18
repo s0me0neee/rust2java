@@ -1,0 +1,23 @@
+1 + 2 * 3 = 7 (depth 3, nodes 5)
+(1 + 2) * 3 = 9 (depth 3, nodes 5)
+x = 10; = 10 (depth 2, nodes 2)
+y = x * x - 4 = 96 (depth 4, nodes 6)
+z = (x + y) / 2 % 7 = 4 (depth 5, nodes 8)
+total = x + y + z; = 110 (depth 4, nodes 6)
+total = 110 (depth 1, nodes 1)
+missing + 1: eval error: undefined variable `missing`
+1 / 0: eval error: division by zero
+2 % 0: eval error: division by zero
+-(-5) + 3 = 8 (depth 4, nodes 5)
+1 + (2 * (3 + 4)) = 15 (depth 4, nodes 7)
+12 $ 4: token error: unexpected character '$' at 3
+999999999999999999999999: token error: number too large: 999999999999999999999999
+(((7))) = 7 (depth 1, nodes 1)
+x = y = 42; = 42 (depth 3, nodes 3)
+x + y = 84 (depth 2, nodes 3)
+---
+total = 110
+x = 42
+y = 42
+z = 4
+sum of variables: 198

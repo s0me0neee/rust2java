@@ -1,0 +1,71 @@
+> look
+== Grand Hall ==
+A chandelier hangs above a cracked marble floor.
+Exits: north, south
+> go north
+Shelves sag under the weight of forgotten books.
+You move carefully.
+> take brass key
+Taken: brass key
+> take old book
+Taken: old book
+> take lamp
+Taken: lamp
+> take lamp
+You already have the lamp.
+> inventory
+You carry: brass key, lamp, old book
+> go down
+It is pitch black down there. I need light.
+> use lamp
+The lamp flickers to life.
+> go down
+Barrels line the walls; something skitters in the dark.
+You move carefully.
+> go east
+Gold coins gleam in the lamplight.
+You found the treasure!
+> look
+== Sealed Vault ==
+Gold coins gleam in the lamplight.
+Exits: west
+> go west
+Barrels line the walls; something skitters in the dark.
+You move carefully.
+> go up
+Shelves sag under the weight of forgotten books.
+You move carefully.
+> go south
+A chandelier hangs above a cracked marble floor.
+You move carefully.
+> take rose
+There is no rose here.
+> use rose
+You aren't carrying a rose.
+> use brass key
+Nothing to unlock here.
+> go north
+Shelves sag under the weight of forgotten books.
+You move carefully.
+> go north
+You can't go north from here.
+> go down
+Barrels line the walls; something skitters in the dark.
+You move carefully.
+> go east
+Gold coins gleam in the lamplight.
+You move carefully.
+> dance
+I don't know how to `dance`
+> 
+say something
+> inventory
+You carry: brass key, lamp, old book
+> quit
+Farewell, adventurer.
+---
+moves: 24, score: 69
+flag: lamp_lit
+flag: vault_seen
+final room: Sealed Vault (Vault)
+collected: ["brass key", "old book", "lamp"]
