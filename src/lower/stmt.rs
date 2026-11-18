@@ -81,6 +81,16 @@ pub fn lower_let(cx: &mut Cx, l: &ast::LetStmt, out: &mut Vec<Stmt>) {
     if matches!(ty, Ty::Iter(_)) && super::iter::lower_iter_let(cx, l, ip, &rust_name, &ty, out) {
         return;
     }
+    if let Some(inner) = super::std_map::ptr::array_cell_pat(cx, ip) {
+        lower_handle_let(cx, l, ip, &rust_name, &inner, out);
+        return;
+    }
+    if let Some(inner) = super::std_map::ptr::ref_mut_pat(cx, ip)
+        && !l.initializer().is_some_and(|i| option_ref_init(cx, &i))
+    {
+        lower_ref_let(cx, l, ip, &rust_name, &inner, out);
+        return;
+    }
     if cx.binding_needs_cell(ip, &ty) {
         lower_cell_let(cx, l, ip, &rust_name, &ty, out);
         return;
@@ -168,6 +178,97 @@ fn lower_cell_let(
             ));
             if let Some(init) = init {
                 lower_to_dest(cx, &init, &Dest::Assign(format!("{name}[0]")), out);
+            }
+        }
+    }
+}
+
+// `o.as_mut()` / `o.get_or_insert(..)` / `o.insert(..)`: the binding aliases the Option itself
+// (see `expr::option_ref_place`), so it must not become a cell array.
+fn option_ref_init(cx: &Cx, init: &ast::Expr) -> bool {
+    let ast::Expr::MethodCallExpr(mc) = super::strip_parens(init) else {
+        return false;
+    };
+    let named = mc.name_ref().is_some_and(|n| {
+        matches!(
+            &*n.text(),
+            "as_mut" | "get_or_insert" | "get_or_insert_with" | "insert"
+        )
+    });
+    named
+        && mc
+            .receiver()
+            .is_some_and(|r| matches!(cx.ty(&r).strip_refs(), Ty::Option(_)))
+}
+
+// `let r = &mut x;` names the array `x` lives in, like a `&mut` parameter.
+fn lower_ref_let(
+    cx: &mut Cx,
+    l: &ast::LetStmt,
+    ip: &ast::IdentPat,
+    rust_name: &str,
+    inner: &Ty,
+    out: &mut Vec<Stmt>,
+) {
+    let line = cx.line(l.syntax());
+    let init = l
+        .initializer()
+        .map(|init| match super::strip_parens(&init) {
+            // Re-borrowing another cell passes the array itself.
+            p if cx.cell_path(&p).is_some() => Expr::name(cx.cell_path(&p).unwrap()),
+            _ => expr::lower_expr(cx, &init, out),
+        });
+    let name = cx.declare(rust_name);
+    cx.mark_cell(ip);
+    out.push(Stmt::new(
+        line,
+        StmtKind::Local {
+            ty: format!("{}[]", inner.java()),
+            name,
+            init,
+        },
+    ));
+}
+
+// `let c = Cell::new(0);` -> `int[] c = {0};`: the handle is the array, `c.get()` is `c[0]`.
+fn lower_handle_let(
+    cx: &mut Cx,
+    l: &ast::LetStmt,
+    ip: &ast::IdentPat,
+    rust_name: &str,
+    inner: &Ty,
+    out: &mut Vec<Stmt>,
+) {
+    let line = cx.line(l.syntax());
+    let arr = format!("{}[]", inner.java());
+    match l.initializer() {
+        Some(init) if !is_control_flow(&init) => {
+            let v = expr::lower_expr(cx, &init, out);
+            let v = super::std_map::ptr::as_handle(cx, &init, v, inner);
+            let name = cx.declare(rust_name);
+            cx.mark_cell_handle(ip);
+            out.push(Stmt::new(
+                line,
+                StmtKind::Local {
+                    ty: arr,
+                    name,
+                    init: Some(v),
+                },
+            ));
+        }
+        init => {
+            let name = cx.declare(rust_name);
+            cx.mark_cell_handle(ip);
+            out.push(Stmt::new(
+                line,
+                StmtKind::Local {
+                    ty: arr,
+                    name,
+                    init: None,
+                },
+            ));
+            if let Some(init) = init {
+                cx.unsupported(init.syntax(), "control-flow initializer for a cell handle");
             }
         }
     }
@@ -296,6 +397,11 @@ pub fn lower_to_dest(cx: &mut Cx, e: &ast::Expr, dest: &Dest, out: &mut Vec<Stmt
                     } else {
                         let ret = cx.ret_ty.clone().unwrap();
                         let v = expr::lower_expr_as(cx, e, &ret, out);
+                        // A `Cell<i32>` return value is the one-element array, not its contents.
+                        let v = match super::std_map::ptr::is_array(cx, e) {
+                            Some(inner) => super::std_map::ptr::as_handle(cx, e, v, &inner),
+                            None => v,
+                        };
                         out.push(Stmt::new(line, StmtKind::Return(Some(v))));
                     }
                 }

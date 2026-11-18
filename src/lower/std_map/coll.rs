@@ -241,7 +241,7 @@ pub(super) fn method(
             ),
         )
     });
-    let predicate = expr::lower_closure(cx, &closure);
+    let predicate = expr::lower_closure(cx, &closure, out);
     if let Some(local) = local {
         if let Some(previous) = saved {
             cx.elem_aliases.insert(local, previous);
@@ -320,7 +320,7 @@ fn mutable_vec_predicate(
             super::super::ElemAliasKind::List,
         ),
     );
-    let current_fn = expr::lower_closure(cx, &closure);
+    let current_fn = expr::lower_closure(cx, &closure, out);
     let previous_fn = if is_dedup {
         cx.elem_aliases.insert(
             local,
@@ -330,7 +330,7 @@ fn mutable_vec_predicate(
                 super::super::ElemAliasKind::List,
             ),
         );
-        Some(expr::lower_closure(cx, &closure))
+        Some(expr::lower_closure(cx, &closure, out))
     } else {
         None
     };
@@ -577,7 +577,7 @@ pub fn lower_entry_assign(
                 Expr::call(
                     Expr::Cast(
                         format!("Supplier<{}>", v_ty.boxed()),
-                        Box::new(expr::lower_closure(cx, &closure)),
+                        Box::new(expr::lower_closure(cx, &closure, out)),
                     ),
                     "get",
                     vec![],

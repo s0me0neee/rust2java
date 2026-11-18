@@ -340,7 +340,8 @@ pub fn convert(sema: &Semantics<'_, RootDatabase>, from: Module, ty: &ra_ap_hir:
                 "BinaryHeap" => return Ty::Heap(arg(0)),
                 "Option" => return Ty::Option(arg(0)),
                 "Result" => return Ty::Result(arg(0), arg(1)),
-                "Box" | "Rc" | "Arc" | "RefCell" | "Cell" | "Reverse" | "Wrapping" => {
+                "Box" | "Rc" | "Arc" | "RefCell" | "Cell" | "Reverse" | "Wrapping" | "Ref"
+                | "RefMut" | "Pin" | "ManuallyDrop" => {
                     return *arg(0);
                 }
                 "Ordering" => return Ty::Ordering,
