@@ -1,0 +1,26 @@
+42 false 42 big
+i64 42
+42
+7 false 7 small
+i64 7
+7
+x true 0 bad
+-0.5
+ true 0 bad
+-0.5
+99999999999999999999 true 0 bad
+100000000000000000000
+[1, -1, 3]
+Some(16)
+None
+9223372036854775807
+Err(ParseIntError { kind: PosOverflow })
+true
+18446744073709551615
+radix 18446744073709551615
+f32 9.5
+-0.5
+None
+f64 250
+0
+invalid digit found in string ParseIntError { kind: InvalidDigit }

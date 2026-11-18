@@ -52,6 +52,11 @@ fn result_types(cx: &Cx, e: &ast::Expr) -> Option<(Ty, Ty)> {
     }
 }
 
+fn is_parse_error(ty: &Ty) -> bool {
+    matches!(ty.strip_refs(), Ty::Other(n)
+        if n.contains("ParseIntError") || n.contains("ParseFloatError"))
+}
+
 // ---- Option ----------------------------------------------------------------------------------
 
 pub(super) fn lower_option_method(
@@ -340,6 +345,9 @@ pub(super) fn lower_result_method(
         "is_err" => Some(Expr::call(recv, "is_err", vec![])),
         "ok" => Some(Expr::call(recv, "ok", vec![])),
         "err" => Some(Expr::call(recv, "err", vec![])),
+        // The added Debug text lands on stderr only, so a parse error can use the plain overload.
+        "unwrap" if is_parse_error(&err_ty) => Some(Expr::call(recv, "unwrap", vec![])),
+        "expect" if is_parse_error(&err_ty) => Some(Expr::call(recv, "expect", vec![b0])),
         "unwrap" => Some(Expr::call(
             recv,
             "unwrap",
@@ -483,18 +491,76 @@ pub(super) fn is_unwrapped_source(cx: &Cx, recv_ast: &ast::Expr) -> bool {
 // ---- parse errors ----------------------------------------------------------------------------
 
 // Parses into the Rust error text, so `{}` matches rustc; `{:?}` maps it back to the kind.
-// `.ok()`, `.is_ok()`, `.unwrap_or(..)` never look at the error, so its Rust text isn't built.
+// `.ok()`, `.unwrap_or(..)`, `if let Ok(x)`, `Err(_)` arms and `|_|` closures never read the error.
 fn error_discarded(m: &ast::MethodCallExpr) -> bool {
-    m.syntax()
-        .parent()
-        .and_then(ast::MethodCallExpr::cast)
-        .is_some_and(|p| {
-            p.receiver().is_some_and(|r| r.syntax() == m.syntax())
-                && matches!(
-                    method_name(&p).as_str(),
-                    "ok" | "is_ok" | "is_err" | "unwrap_or" | "unwrap_or_default"
-                )
-        })
+    let Some(parent) = m.syntax().parent() else {
+        return false;
+    };
+    if let Some(p) = ast::MethodCallExpr::cast(parent.clone()) {
+        return p.receiver().is_some_and(|r| r.syntax() == m.syntax())
+            && match method_name(&p).as_str() {
+                "ok" | "is_ok" | "is_err" | "unwrap_or" | "unwrap_or_default" => true,
+                "map_err" | "unwrap_or_else" => closure_ignores_arg(&p),
+                _ => false,
+            };
+    }
+    if let Some(le) = ast::LetExpr::cast(parent.clone()) {
+        return le
+            .pat()
+            .is_some_and(|p| match tuple_struct_name(&p).as_deref() {
+                Some("Ok") => true,
+                Some("Err") => pat_binds_nothing(&p),
+                _ => false,
+            });
+    }
+    ast::MatchExpr::cast(parent).is_some_and(|me| match_discards_error(&me))
+}
+
+// The first arm that can match `Err` decides whether the error value is ever read.
+fn match_discards_error(me: &ast::MatchExpr) -> bool {
+    let Some(list) = me.match_arm_list() else {
+        return false;
+    };
+    for arm in list.arms() {
+        let Some(p) = arm.pat() else {
+            return false;
+        };
+        if tuple_struct_name(&p).as_deref() == Some("Ok") {
+            continue;
+        }
+        return arm.guard().is_none()
+            && tuple_struct_name(&p).as_deref() == Some("Err")
+            && pat_binds_nothing(&p);
+    }
+    false
+}
+
+fn tuple_struct_name(p: &ast::Pat) -> Option<String> {
+    let ast::Pat::TupleStructPat(tp) = p else {
+        return None;
+    };
+    let path = tp.path()?;
+    path.segment()?.name_ref().map(|n| n.text().to_string())
+}
+
+fn pat_binds_nothing(p: &ast::Pat) -> bool {
+    match p {
+        ast::Pat::TupleStructPat(tp) => tp
+            .fields()
+            .all(|f| matches!(f, ast::Pat::WildcardPat(_) | ast::Pat::RestPat(_))),
+        ast::Pat::WildcardPat(_) | ast::Pat::RestPat(_) => true,
+        _ => false,
+    }
+}
+
+fn closure_ignores_arg(m: &ast::MethodCallExpr) -> bool {
+    let Some(ast::Expr::ClosureExpr(c)) = m.arg_list().and_then(|l| l.args().next()) else {
+        return false;
+    };
+    c.param_list()
+        .and_then(|pl| pl.params().next())
+        .and_then(|p| p.pat())
+        .is_some_and(|p| matches!(p, ast::Pat::WildcardPat(_)))
 }
 
 pub(super) fn parse_result(
@@ -511,9 +577,15 @@ pub(super) fn parse_result(
             let exact = !error_discarded(m);
             parse_int(cx, input, ret, *i, None, exact, line, out)
         }
-        Ty::F32 | Ty::F64 => {
-            parse_float(cx, input, ret, target.strip_refs() == &Ty::F32, line, out)
-        }
+        Ty::F32 | Ty::F64 => parse_float(
+            cx,
+            input,
+            ret,
+            target.strip_refs() == &Ty::F32,
+            !error_discarded(m),
+            line,
+            out,
+        ),
         Ty::Bool => {
             cx.needs_result = true;
             let ty = result_java(ret);
@@ -584,23 +656,26 @@ pub(super) fn parse_int(
     let res = cx.fresh("res");
     let raw = cx.fresh("num");
     let ex = cx.fresh("ex");
-    let parsed = match &radix {
-        Some(r) => format!("Long.parseLong({s}, {})", render(r)),
-        None if matches!(i, Int::U64 | Int::U128) => format!("Long.parseUnsignedLong({s})"),
-        None => format!("Long.parseLong({s})"),
+    let parsed = match (&radix, i) {
+        (Some(r), Int::U64 | Int::U128) => format!("Long.parseUnsignedLong({s}, {})", render(r)),
+        (Some(r), _) => format!("Long.parseLong({s}, {})", render(r)),
+        (None, Int::U64 | Int::U128) => format!("Long.parseUnsignedLong({s})"),
+        (None, _) => format!("Long.parseLong({s})"),
     };
+    // These parsers already reject everything outside Java's long, so no range check is needed.
+    let full_long = matches!(i, Int::I64 | Int::I128 | Int::U64 | Int::U128);
     let (min, max, unsigned) = int_range(i);
     let value = if i.is_long() {
         narrow(Expr::raw(raw.clone()), i)
     } else {
         Expr::Cast(i.java().into(), Box::new(Expr::raw(raw.clone())))
     };
-    let ok = if matches!(i, Int::U64 | Int::U128) && radix.is_none() {
-        "true".to_string()
+    let ok = if full_long {
+        None
     } else if unsigned {
-        format!("{raw} >= 0 && {raw} <= {max}")
+        Some(format!("{raw} >= 0 && {raw} <= {max}"))
     } else {
-        format!("{raw} >= {min} && {raw} <= {max}")
+        Some(format!("{raw} >= {min} && {raw} <= {max}"))
     };
     let radix_val = radix.as_ref().and_then(|r| match r {
         Expr::Raw(text) => text
@@ -615,13 +690,18 @@ pub(super) fn parse_int(
     } else {
         String::new()
     };
+    let body = match &ok {
+        Some(cond) => format!(
+            "long {raw} = {parsed}; if ({cond}) {{ {res} = new Ok<>({}); }} else {{ {res} = new Err<>(new NumberFormatException({failure})); }}",
+            render(&value)
+        ),
+        None => format!("{res} = new Ok<>({parsed});"),
+    };
     push_raw(
         out,
         line,
         format!(
-            "{ty} {res}; try {{ long {raw} = {parsed}; if ({ok}) {{ {res} = new Ok<>({}); }} else {{ {res} = new Err<>(new NumberFormatException({failure})); }} }} \
-             catch (NumberFormatException {ex}) {{ {res} = new Err<>(new NumberFormatException({failure})); }}",
-            render(&value)
+            "{ty} {res}; try {{ {body} }} catch (NumberFormatException {ex}) {{ {res} = new Err<>(new NumberFormatException({failure})); }}"
         ),
     );
     Expr::name(res)
@@ -632,10 +712,30 @@ pub(super) fn parse_float(
     input: Expr,
     ret: &Ty,
     f32: bool,
+    exact: bool,
     line: u32,
     out: &mut Vec<Stmt>,
 ) -> Expr {
     cx.needs_result = true;
+    let ty = result_java(ret);
+    let res = cx.fresh("res");
+    let ex = cx.fresh("ex");
+    let parser = if f32 {
+        "Float.parseFloat"
+    } else {
+        "Double.parseDouble"
+    };
+    if !exact {
+        push_raw(
+            out,
+            line,
+            format!(
+                "{ty} {res}; try {{ {res} = new Ok<>({parser}({})); }} catch (NumberFormatException {ex}) {{ {res} = new Err<>({ex}); }}",
+                render(&input)
+            ),
+        );
+        return Expr::name(res);
+    }
     let s = cx.fresh("text");
     out.push(Stmt::new(
         line,
@@ -645,10 +745,6 @@ pub(super) fn parse_float(
             init: Some(input),
         },
     ));
-    let ty = result_java(ret);
-    let res = cx.fresh("res");
-    let ex = cx.fresh("ex");
-    let cls = if f32 { "Float" } else { "Double" };
     let failure = format!(
         "({s}.isEmpty() ? \"cannot parse float from empty string\" : \"invalid float literal\")"
     );
@@ -656,8 +752,7 @@ pub(super) fn parse_float(
         out,
         line,
         format!(
-            "{ty} {res}; try {{ {res} = new Ok<>({cls}.parse{}({s})); }} catch (NumberFormatException {ex}) {{ {res} = new Err<>(new NumberFormatException({failure})); }}",
-            if f32 { "Float" } else { "Double" }
+            "{ty} {res}; try {{ {res} = new Ok<>({parser}({s})); }} catch (NumberFormatException {ex}) {{ {res} = new Err<>(new NumberFormatException({failure})); }}"
         ),
     );
     Expr::name(res)
