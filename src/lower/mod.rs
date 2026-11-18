@@ -83,6 +83,8 @@ pub struct Cx<'a, 'db> {
     pub stdin_lines: bool,
     // The array literal being lowered initializes a binding that is only ever read: `List.of`.
     pub read_only_literal: bool,
+    // Every identifier in the Rust file: generated names never take one of these.
+    file_idents: HashSet<String>,
 }
 
 // Per-method state saved around lowering a nested method (a macro method generated mid-body).
@@ -175,6 +177,13 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         uses_args: false,
         stdin_lines: false,
         read_only_literal: false,
+        file_idents: file
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| t.kind() == SyntaxKind::IDENT)
+            .map(|t| t.text().to_string())
+            .collect(),
     };
     cx.stdin_lines = !std_map::io::has_byte_reads(&cx, file.syntax());
     let comments = collect_comments(&cx, file.syntax());
@@ -573,10 +582,19 @@ impl<'a, 'db> Cx<'a, 'db> {
     pub fn declare(&mut self, rust: &str) -> String {
         let base = escape_keyword(rust);
         let mut name = base.clone();
-        let mut n = 1;
+        let mut n = 2;
+        // A shadowed `x` becomes `x2`, skipping names the Rust file uses itself.
+        let sep = if base.ends_with(|c: char| c.is_ascii_digit()) {
+            "_"
+        } else {
+            ""
+        };
         while self.method_names.contains(&name) {
-            name = format!("{base}_{n}");
+            name = format!("{base}{sep}{n}");
             n += 1;
+            if self.file_idents.contains(&name) {
+                name = base.clone();
+            }
         }
         self.method_names.insert(name.clone());
         if let Some(s) = self.scopes.last_mut() {
@@ -607,11 +625,24 @@ impl<'a, 'db> Cx<'a, 'db> {
     }
 
     // Fresh temporary name, e.g. `tmp_1`.
+    // A generated local: a plain word (`item`, `text`, then `text2`, ...) that no Rust identifier in
+    // the file, no hard-coded name in generated code and no Java keyword uses.
     pub fn fresh(&mut self, base: &str) -> String {
+        let base = natural_name(base);
+        let mut n = 1;
         loop {
-            self.tmp_counter += 1;
-            let name = format!("{base}_{}", self.tmp_counter);
-            if !self.method_names.contains(&name) {
+            let name = match n {
+                1 => base.to_string(),
+                _ if base.ends_with(|c: char| c.is_ascii_digit()) => format!("{base}_{n}"),
+                _ => format!("{base}{n}"),
+            };
+            n += 1;
+            if !self.method_names.contains(&name)
+                && !self.file_idents.contains(&name)
+                && !RESERVED_NAMES.contains(&name.as_str())
+                && escape_keyword(&name) == name
+            {
+                self.tmp_counter += 1;
                 self.method_names.insert(name.clone());
                 return name;
             }
@@ -655,6 +686,31 @@ fn is_inline_read_arg(r: &ast::RefExpr) -> bool {
         .and_then(ast::MethodCallExpr::cast)
         .and_then(|m| m.name_ref())
         .is_some_and(|n| matches!(&*n.text(), "read_line" | "read_to_string"))
+}
+
+// Names written literally into generated Java (`Ok(var v)`, `equals(Object o)`, `l -> l + "\n"`, ...).
+const RESERVED_NAMES: &[&str] = &[
+    "v", "e", "o", "other", "l", "x0", "args", "ARGS", "STDIN", "this", "it", "_",
+];
+
+// Generator-internal base names -> the word a person would write.
+fn natural_name(base: &str) -> &str {
+    match base {
+        "fmt_some" | "some_value" | "ok_value" | "try_value" | "vec_value" | "val"
+        | "dbg_value" => "value",
+        "fmt_item" | "vec_item" => "item",
+        "fmt_entry" => "entry",
+        "fmt_char" => "ch",
+        "fmt_text" => "text",
+        "fmt_arg" => "arg",
+        "fmt_f" => "f",
+        "err_value" => "err",
+        "vec_index" => "index",
+        "res" => "result",
+        "tmp" => "tmp",
+        "unused" | "ignored" => "unused",
+        other => other,
+    }
 }
 
 pub fn strip_parens(e: &ast::Expr) -> ast::Expr {
