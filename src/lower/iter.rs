@@ -182,10 +182,64 @@ fn lower_for_kind(
         let header = format!("int {idx} = 0; {idx} < {}.size(); {idx}++", render(&list));
         let _ = cx.declare(&name);
         if let Some(local) = cx.sema.to_def(ip) {
-            cx.elem_aliases.insert(local, (render(&list), idx));
+            cx.elem_aliases
+                .insert(local, (render(&list), idx, super::ElemAliasKind::List));
         }
         let body = loop_body(cx, f);
         return ForStmt::Counted { header, body };
+    }
+
+    if let ast::Expr::MethodCallExpr(call) = iterable
+        && matches!(method_name(call).as_str(), "values_mut" | "iter_mut")
+        && let Some(map_ast) = call.receiver()
+        && matches!(cx.ty(&map_ast).strip_refs(), Ty::Map { .. })
+    {
+        let name = method_name(call);
+        let (key_pat, value_pat) = if name == "iter_mut" {
+            let ast::Pat::TuplePat(tuple) = p else {
+                return unsupported_for(cx, f, "map iter_mut pattern");
+            };
+            let fields: Vec<_> = tuple.fields().collect();
+            if fields.len() != 2 {
+                return unsupported_for(cx, f, "map iter_mut pattern");
+            }
+            (Some(fields[0].clone()), fields[1].clone())
+        } else {
+            (None, p.clone())
+        };
+        let ast::Pat::IdentPat(value) = &value_pat else {
+            return unsupported_for(cx, f, "map mutable value pattern");
+        };
+        let Some(local) = cx.sema.to_def(value) else {
+            return unsupported_for(cx, f, "map mutable value binding");
+        };
+        let map = expr::lower_expr(cx, &map_ast, out);
+        let entry = cx.fresh("entry");
+        let mut binds = Vec::new();
+        if let Some(key) = key_pat {
+            super::pat::bind_pattern(
+                cx,
+                &key,
+                Expr::call(Expr::name(entry.clone()), "getKey", vec![]),
+                &mut binds,
+            );
+        }
+        if let Some(name) = simple_ident(&value_pat) {
+            cx.declare(&name);
+        }
+        cx.elem_aliases.insert(
+            local,
+            (entry.clone(), String::new(), super::ElemAliasKind::Entry),
+        );
+        let mut body = loop_body(cx, f);
+        binds.append(&mut body.stmts);
+        body.stmts = binds;
+        return ForStmt::Each {
+            ty: "var".into(),
+            name: entry,
+            iter: Expr::call(map, "entrySet", vec![]),
+            body,
+        };
     }
 
     let elem_ty = cx.pat_ty(p);
@@ -208,6 +262,16 @@ fn lower_for_kind(
         name,
         iter,
         body,
+    }
+}
+
+fn unsupported_for(cx: &mut Cx, f: &ast::ForExpr, reason: &str) -> ForStmt {
+    let value = cx.unsupported(f.syntax(), reason);
+    ForStmt::Each {
+        ty: "var".into(),
+        name: cx.fresh("unsupported"),
+        iter: value,
+        body: Block::default(),
     }
 }
 
@@ -570,6 +634,33 @@ fn lower_source(
     let recv = expr::lower_expr(cx, recv_ast, out);
     let args = arg_exprs(m);
     match (recv_ty.strip_refs(), name) {
+        (Ty::Map { ordered: true, .. }, "range") => {
+            use ast::RangeItem;
+            let Some(ast::Expr::RangeExpr(range)) = args.first().map(strip_parens) else {
+                return cx.unsupported(m.syntax(), "BTreeMap range bounds");
+            };
+            let start = range.start().map(|e| lower_arg(cx, &e, out));
+            let end = range.end().map(|e| lower_arg(cx, &e, out));
+            let inclusive = range.op_kind() == Some(ast::RangeOp::Inclusive);
+            let bounds = match (start, end) {
+                (Some(start), Some(end)) => Expr::call(
+                    recv,
+                    "subMap",
+                    vec![
+                        start,
+                        Expr::raw("true"),
+                        end,
+                        Expr::raw(inclusive.to_string()),
+                    ],
+                ),
+                (Some(start), None) => Expr::call(recv, "tailMap", vec![start, Expr::raw("true")]),
+                (None, Some(end)) => {
+                    Expr::call(recv, "headMap", vec![end, Expr::raw(inclusive.to_string())])
+                }
+                (None, None) => recv,
+            };
+            Expr::call(Expr::call(bounds, "entrySet", vec![]), "stream", vec![])
+        }
         (Ty::Map { .. }, "iter" | "into_iter" | "iter_mut") => {
             Expr::call(Expr::call(recv, "entrySet", vec![]), "stream", vec![])
         }
@@ -756,6 +847,40 @@ fn lower_adaptor(
     {
         let v = expr::lower_expr(cx, list_ast, out);
         return Expr::call(Expr::call(v, "reversed", vec![]), "stream", vec![]);
+    }
+    if name == "next_back"
+        && let ast::Expr::MethodCallExpr(source_call) = strip_parens(recv_ast)
+        && let Some(source) = source_call.receiver()
+    {
+        let source_name = method_name(&source_call);
+        let source_ty = cx.ty(&source);
+        let view = match (source_ty.strip_refs(), source_name.as_str()) {
+            (Ty::Map { ordered: true, .. }, "iter" | "keys" | "values") => {
+                let map = expr::lower_expr(cx, &source, out);
+                let map = Expr::call(map, "descendingMap", vec![]);
+                Some(Expr::call(
+                    map,
+                    match source_name.as_str() {
+                        "keys" => "keySet",
+                        "values" => "values",
+                        _ => "entrySet",
+                    },
+                    vec![],
+                ))
+            }
+            (Ty::Set { ordered: true, .. }, "iter") => {
+                let set = expr::lower_expr(cx, &source, out);
+                Some(Expr::call(set, "descendingSet", vec![]))
+            }
+            (Ty::Vec(_), "iter" | "into_iter") => {
+                let list = expr::lower_expr(cx, &source, out);
+                Some(Expr::call(list, "reversed", vec![]))
+            }
+            _ => None,
+        };
+        if let Some(view) = view {
+            return Expr::call(Expr::call(view, "stream", vec![]), "findFirst", vec![]);
+        }
     }
     // `v.iter().enumerate()` on a list: index stream.
     if name == "enumerate"

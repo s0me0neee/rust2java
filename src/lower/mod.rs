@@ -65,7 +65,14 @@ pub struct Cx<'a, 'db> {
     // Iterator locals pulled with `next()`/`peek()`: Java `ListIterator` + the backing list's name.
     pub pulled_iters: HashMap<ra_ap_hir::Local<'db>, String>,
     // `for x in v.iter_mut()` over immutable values: `x` stands for `list.get(idx)`.
-    pub elem_aliases: HashMap<ra_ap_hir::Local<'db>, (String, String)>,
+    pub elem_aliases: HashMap<ra_ap_hir::Local<'db>, (String, String, ElemAliasKind)>,
+}
+
+#[derive(Clone, Copy)]
+pub enum ElemAliasKind {
+    List,
+    Map,
+    Entry,
 }
 
 #[derive(Clone, Debug)]

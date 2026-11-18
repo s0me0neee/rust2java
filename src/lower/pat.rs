@@ -75,7 +75,12 @@ pub fn lower_condition(
             continue;
         }
         let first = i == 0;
-        let value = chain_value(cx, &init, first, out, &mut tests);
+        let value = if first {
+            mut_element_condition(cx, &p, &init, out)
+                .unwrap_or_else(|| chain_value(cx, &init, first, out, &mut tests))
+        } else {
+            chain_value(cx, &init, first, out, &mut tests)
+        };
         let mut lowered = PatLowering::default();
         let c = lower_pat(cx, &p, value, mode, &mut lowered);
         tests.extend(c);
@@ -95,6 +100,128 @@ pub fn lower_condition(
     }
     emit_binds(&all, binds);
     and(tests).unwrap_or(Expr::raw("true"))
+}
+
+fn mut_element_condition(
+    cx: &mut Cx,
+    pat: &ast::Pat,
+    init: &ast::Expr,
+    out: &mut Vec<Stmt>,
+) -> Option<Expr> {
+    use ra_ap_syntax::ast::HasArgList;
+    let ast::Pat::TupleStructPat(some) = pat else {
+        return None;
+    };
+    if some
+        .path()?
+        .syntax()
+        .text()
+        .to_string()
+        .rsplit("::")
+        .next()?
+        != "Some"
+    {
+        return None;
+    }
+    let ast::Pat::IdentPat(binding) = some.fields().next()? else {
+        return None;
+    };
+    let Ty::Ref {
+        mutable: true,
+        inner,
+    } = cx.pat_ty(&ast::Pat::IdentPat(binding.clone()))
+    else {
+        return None;
+    };
+    if !super::is_cell_value_ty(&inner) {
+        return None;
+    }
+    let ast::Expr::MethodCallExpr(call) = super::strip_parens(init) else {
+        return None;
+    };
+    let name = call.name_ref()?.text().to_string();
+    let source = call.receiver()?;
+    let map = matches!(cx.ty(&source).strip_refs(), Ty::Map { .. });
+    if !matches!(cx.ty(&source).strip_refs(), Ty::Vec(_) | Ty::Map { .. })
+        || !matches!(name.as_str(), "get_mut" | "first_mut" | "last_mut")
+        || (map && name != "get_mut")
+    {
+        return None;
+    }
+    let local = cx.sema.to_def(&binding)?;
+    let index_ast = if name == "get_mut" {
+        let index = call.arg_list()?.args().next()?;
+        if !map && !matches!(cx.ty(&index).strip_refs(), Ty::Int(_)) {
+            return None;
+        }
+        Some(index)
+    } else {
+        None
+    };
+    let source = place(cx, &source, out);
+    let index = if let Some(index) = index_ast {
+        place(cx, &index, out)
+    } else {
+        let value = if name == "first_mut" {
+            Expr::raw("0")
+        } else {
+            Expr::bin(
+                Expr::call(source.clone(), "size", vec![]),
+                "-",
+                Expr::raw("1"),
+            )
+        };
+        let index = cx.fresh("index");
+        out.push(Stmt::new(
+            cx.line(init.syntax()),
+            StmtKind::Local {
+                ty: "int".into(),
+                name: index.clone(),
+                init: Some(value),
+            },
+        ));
+        Expr::name(index)
+    };
+    let get = Expr::call(source.clone(), "get", vec![index.clone()]);
+    let value = if map {
+        Expr::call(Expr::raw("Optional"), "ofNullable", vec![get])
+    } else {
+        Expr::Ternary(
+            Box::new(Expr::bin(
+                Expr::bin(index.clone(), ">=", Expr::raw("0")),
+                "&&",
+                Expr::bin(
+                    index.clone(),
+                    "<",
+                    Expr::call(source.clone(), "size", vec![]),
+                ),
+            )),
+            Box::new(Expr::call(Expr::raw("Optional"), "of", vec![get])),
+            Box::new(Expr::raw(format!("Optional.<{}>empty()", inner.boxed()))),
+        )
+    };
+    let temp = cx.fresh("value");
+    out.push(Stmt::new(
+        cx.line(init.syntax()),
+        StmtKind::Local {
+            ty: format!("Optional<{}>", inner.boxed()),
+            name: temp.clone(),
+            init: Some(value),
+        },
+    ));
+    cx.elem_aliases.insert(
+        local,
+        (
+            crate::emit::render_expr(&source),
+            crate::emit::render_expr(&index),
+            if map {
+                super::ElemAliasKind::Map
+            } else {
+                super::ElemAliasKind::List
+            },
+        ),
+    );
+    Some(Expr::name(temp))
 }
 
 // Value for one `let` component of a chain, evaluated exactly once.
@@ -1189,6 +1316,13 @@ fn tuple_struct_pat(
             variant_pat(cx, p, v, &pats, value, mode, out)
         }
         Some(PathResolution::Def(ModuleDef::Adt(Adt::Struct(s)))) => {
+            if s.name(cx.db).as_str() == "Reverse" && !local(cx, s.module(cx.db)) {
+                return tp
+                    .fields()
+                    .next()
+                    .map(|inner| lower_pat(cx, &inner, value, mode, out))
+                    .unwrap_or_default();
+            }
             let names = items::java_field_names(cx, &s.fields(cx.db));
             let owner = items::adt_java_name(cx, Adt::Struct(s));
             let mut conds = Vec::new();
