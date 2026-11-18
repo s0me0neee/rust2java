@@ -159,6 +159,19 @@ pub fn lower_method_call(cx: &mut Cx, m: &ast::MethodCallExpr, out: &mut Vec<Stm
         }
         let recv = expr::lower_expr(cx, &recv_ast, out);
         let args = expr::call_args(cx, m, out);
+        // Derived comparison impls have no Rust-named method in Java: derives emit compareTo/equals.
+        if is_derived(cx, f) {
+            match name.as_str() {
+                "cmp" => return Expr::call(recv, "compareTo", args),
+                "partial_cmp" => {
+                    let cmp = Expr::call(recv, "compareTo", args);
+                    return Expr::call(Expr::raw("Optional"), "of", vec![cmp]);
+                }
+                "eq" => return Expr::call(recv, "equals", args),
+                "ne" => return Expr::Unary("!", Box::new(Expr::call(recv, "equals", args))),
+                _ => {}
+            }
+        }
         return Expr::call(recv, escape_keyword(&name), args);
     }
     // A field holding a closure, called as `(self.f)(x)`, is a CallExpr; here it's a real method.
@@ -170,6 +183,13 @@ pub fn lower_method_call(cx: &mut Cx, m: &ast::MethodCallExpr, out: &mut Vec<Stm
         return e;
     }
     std_map::lower_std_method(cx, m, &recv_ty, &key, out)
+}
+
+// Built-in derive methods have a range (the derive attribute) but no `fn` syntax node.
+fn is_derived(cx: &Cx, f: Function) -> bool {
+    use ra_ap_hir::HasSource;
+    f.source_with_range(cx.db)
+        .is_some_and(|src| src.value.1.is_none())
 }
 
 // `*x`: references are transparent in Java; `&mut` cells (one-element arrays) read `[0]`.

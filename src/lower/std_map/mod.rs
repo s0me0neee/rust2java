@@ -1015,12 +1015,35 @@ pub fn lower_std_method(
         }
         return clone_expr(recv, &ret);
     }
+    // `Ord` provided methods on user types: Rust's max keeps `other` on ties, min keeps `self`.
+    if matches!(recv_ty.strip_refs(), Ty::Adt { .. })
+        && matches!(name.as_str(), "max" | "min" | "clamp")
+    {
+        let a = simple(cx, recv, recv_ty, line, out);
+        let mut args = args.into_iter().map(|b| simple(cx, b, recv_ty, line, out));
+        let (Some(b), c) = (args.next(), args.next()) else {
+            return cx.unsupported(m.syntax(), &format!("std method `{key}`"));
+        };
+        let cmp = |x: &Expr, y: &Expr| Expr::call(x.clone(), "compareTo", vec![y.clone()]);
+        return match (name.as_str(), c) {
+            ("max", _) => conditional(Expr::bin(cmp(&a, &b), ">", Expr::raw("0")), a, b),
+            ("min", _) => conditional(Expr::bin(cmp(&a, &b), "<=", Expr::raw("0")), a, b),
+            (_, Some(hi)) => conditional(
+                Expr::bin(cmp(&a, &b), "<", Expr::raw("0")),
+                b,
+                conditional(Expr::bin(cmp(&a, &hi), ">", Expr::raw("0")), hi, a),
+            ),
+            _ => cx.unsupported(m.syntax(), "clamp"),
+        };
+    }
     match (recv_ty.strip_refs(), name.as_str()) {
         (t, "to_string") if t.is_str() => recv,
         (t, "to_string") if t.is_primitive() => {
             Expr::call(Expr::raw("String"), "valueOf", vec![recv])
         }
         (Ty::Adt { .. }, "to_string") => Expr::call(recv, "toString", vec![]),
+        (Ty::Adt { .. }, "eq") => Expr::call(recv, "equals", args),
+        (Ty::Adt { .. }, "ne") => Expr::Unary("!", Box::new(Expr::call(recv, "equals", args))),
         (Ty::Option(_) | Ty::Result(..), "to_string") => Expr::call(recv, "toString", vec![]),
         _ => cx.unsupported(m.syntax(), &format!("std method `{key}` on {recv_ty:?}")),
     }

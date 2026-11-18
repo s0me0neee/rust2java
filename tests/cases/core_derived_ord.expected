@@ -1,0 +1,7 @@
+Greater Some(Greater)
+Greater
+true
+false true
+Card { rank: 3, suit: 'h' } Low
+Mid Low
+[Card { rank: 3, suit: 'h' }, Card { rank: 3, suit: 'c' }]
