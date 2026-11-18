@@ -1157,6 +1157,10 @@ fn debug_with_spec(
     counts: &Counts,
     out: &mut Vec<Stmt>,
 ) -> Expr {
+    // No width/precision/flags: the plain `debug` form is already the shortest.
+    if !has_flags(spec) && spec.align.is_none() {
+        return debug(cx, value, ty);
+    }
     match ty.strip_refs() {
         Ty::Vec(inner) | Ty::Deque(inner) | Ty::Set { t: inner, .. } => {
             let name = cx.fresh("fmt_item");
@@ -1202,7 +1206,7 @@ fn debug_with_spec(
                 counts,
                 &mut pre,
             );
-            let item = Expr::bin(Expr::bin(key, "+", Expr::str_lit(": ")), "+", val);
+            let item = concat(vec![key, Expr::str_lit(": "), val]);
             let mapper = debug_lambda(cx, node, name, item, pre);
             let stream = Expr::call(Expr::call(value, "entrySet", vec![]), "stream", vec![]);
             let mapped = Expr::call(stream, "map", vec![mapper]);
@@ -1217,11 +1221,7 @@ fn debug_with_spec(
             let name = cx.fresh("fmt_some");
             let mut pre = Vec::new();
             let item = format_one(cx, node, Expr::name(&name), inner, spec, counts, &mut pre);
-            let some = Expr::bin(
-                Expr::bin(Expr::str_lit("Some("), "+", item),
-                "+",
-                Expr::str_lit(")"),
-            );
+            let some = concat(vec![Expr::str_lit("Some("), item, Expr::str_lit(")")]);
             let mapper = debug_lambda(cx, node, name, some, pre);
             Expr::call(
                 Expr::call(value, "map", vec![mapper]),
@@ -1250,11 +1250,11 @@ fn debug_with_spec(
                 let name = cx.fresh("fmt_value");
                 let mut pre = Vec::new();
                 let item = format_one(cx, node, Expr::name(&name), inner, spec, counts, &mut pre);
-                let text = Expr::bin(
-                    Expr::bin(Expr::str_lit(&format!("{variant}(")), "+", item),
-                    "+",
+                let text = concat(vec![
+                    Expr::str_lit(&format!("{variant}(")),
+                    item,
                     Expr::str_lit(")"),
-                );
+                ]);
                 let body = if pre.is_empty() {
                     ArmBody::Expr(text)
                 } else {
@@ -1290,6 +1290,22 @@ fn lambda(name: String, body: Expr) -> Expr {
     }
 }
 
+// The `map` step for a sequence element: a method reference reads best when the element's Debug
+// text is just Java's `toString` or the user type's generated `debug()`.
+fn debug_mapper(cx: &mut Cx, ty: &Ty) -> Expr {
+    if debug_is_to_string(ty) {
+        return Expr::raw("String::valueOf");
+    }
+    if let Ty::Adt { java, args, .. } = ty.strip_refs()
+        && args.iter().all(Ty::is_nameable)
+    {
+        return Expr::raw(format!("{java}::debug"));
+    }
+    let name = cx.fresh("fmt_item");
+    let item = debug(cx, Expr::name(&name), ty);
+    lambda(name, item)
+}
+
 // Rust's `{:?}` escaping for str/char, emitted once per file as `debug_str` on the trailer line.
 fn debug_quote(cx: &mut Cx, value: Expr, quote: char) -> Expr {
     let helper = "static String debug_str(String s, char q) { StringBuilder b = new StringBuilder().append(q); \
@@ -1306,10 +1322,8 @@ fn debug_quote(cx: &mut Cx, value: Expr, quote: char) -> Expr {
 }
 
 fn debug_sequence(cx: &mut Cx, v: Expr, inner: &Ty, open: &str, close: &str) -> Expr {
-    let name = cx.fresh("fmt_item");
-    let item = debug(cx, Expr::name(&name), inner);
     let stream = Expr::call(v, "stream", vec![]);
-    let mapped = Expr::call(stream, "map", vec![lambda(name, item)]);
+    let mapped = Expr::call(stream, "map", vec![debug_mapper(cx, inner)]);
     let joining = Expr::call(
         Expr::raw("Collectors"),
         "joining",
@@ -1360,7 +1374,7 @@ pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
             let name = cx.fresh("fmt_entry");
             let key = debug_operand(cx, Expr::call(Expr::name(&name), "getKey", vec![]), k);
             let val = debug_operand(cx, Expr::call(Expr::name(&name), "getValue", vec![]), value);
-            let entry = Expr::bin(Expr::bin(key, "+", Expr::str_lit(": ")), "+", val);
+            let entry = concat(vec![key, Expr::str_lit(": "), val]);
             let stream = Expr::call(Expr::call(v, "entrySet", vec![]), "stream", vec![]);
             let mapped = Expr::call(stream, "map", vec![lambda(name, entry)]);
             let joining = Expr::call(
@@ -1373,11 +1387,7 @@ pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
         Ty::Option(inner) => {
             let name = cx.fresh("fmt_some");
             let value = debug_operand(cx, Expr::name(&name), inner);
-            let some = Expr::bin(
-                Expr::bin(Expr::str_lit("Some("), "+", value),
-                "+",
-                Expr::str_lit(")"),
-            );
+            let some = concat(vec![Expr::str_lit("Some("), value, Expr::str_lit(")")]);
             Expr::call(
                 Expr::call(v, "map", vec![lambda(name, some)]),
                 "orElse",
@@ -1390,11 +1400,11 @@ pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
             let ok_value = debug_operand(cx, Expr::name(&ok_name), ok);
             let err_value = debug_operand(cx, Expr::name(&err_name), err);
             let wrap = |name: &str, value| {
-                Expr::bin(
-                    Expr::bin(Expr::str_lit(&format!("{name}(")), "+", value),
-                    "+",
+                concat(vec![
+                    Expr::str_lit(&format!("{name}(")),
+                    value,
                     Expr::str_lit(")"),
-                )
+                ])
             };
             Expr::Switch {
                 scrut: Box::new(v),
@@ -1458,10 +1468,16 @@ pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
     }
 }
 
-// Joins pieces with `+`, making sure Java treats the chain as string concatenation.
+// Joins pieces with `+`, making sure Java treats the chain as string concatenation. Nested
+// concatenations and adjacent literals are spliced so `"Some(" + ("(" + x + ")") + ")"` comes out
+// as `"Some((" + x + "))"`.
 fn concat(parts: Vec<Expr>) -> Expr {
+    let mut flat = Vec::new();
+    for p in parts {
+        flatten_concat(p, &mut flat);
+    }
     concat_typed(
-        parts
+        merge_literals(flat)
             .into_iter()
             .map(|p| {
                 let s = is_string_lit(&p);
@@ -1469,6 +1485,44 @@ fn concat(parts: Vec<Expr>) -> Expr {
             })
             .collect(),
     )
+}
+
+// Only a chain whose leftmost operand is a String can be spliced into a longer concatenation
+// without changing a numeric `+`.
+fn flatten_concat(e: Expr, out: &mut Vec<Expr>) {
+    match e {
+        Expr::Binary(l, "+", r) if starts_with_literal(&l) => {
+            flatten_concat(*l, out);
+            flatten_concat(*r, out);
+        }
+        other => out.push(other),
+    }
+}
+
+fn starts_with_literal(e: &Expr) -> bool {
+    match e {
+        Expr::Binary(l, _, _) => starts_with_literal(l),
+        _ => is_string_lit(e),
+    }
+}
+
+fn merge_literals(parts: Vec<Expr>) -> Vec<Expr> {
+    let mut out: Vec<Expr> = Vec::new();
+    for p in parts {
+        if let (Some(Expr::Raw(last)), Expr::Raw(next)) = (out.last_mut(), &p)
+            && let (Some(a), Some(b)) = (literal_body(last), literal_body(next))
+        {
+            *last = format!("\"{a}{b}\"");
+            continue;
+        }
+        out.push(p);
+    }
+    out
+}
+
+// The body of a plain Java string literal, e.g. `Some(` for `"Some("`.
+fn literal_body(s: &str) -> Option<&str> {
+    s.strip_prefix('"')?.strip_suffix('"')
 }
 
 // `a + b + ...` is String concatenation once either of the first two operands is a String.
