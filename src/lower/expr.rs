@@ -629,6 +629,9 @@ pub fn place_assign(
                 };
                 return Expr::call(b, "index_mut_set", vec![i, value]);
             }
+            if matches!(bt.strip_refs(), Ty::Deque(_)) {
+                return cx.unsupported(lhs.syntax(), "assigning through `VecDeque` index");
+            }
             let setter = if matches!(bt.strip_refs(), Ty::Map { .. }) {
                 "put"
             } else {

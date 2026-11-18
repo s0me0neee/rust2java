@@ -1556,6 +1556,21 @@ fn collected_into_immutable_let(m: &ast::MethodCallExpr) -> bool {
     matches!(l.pat(), Some(ast::Pat::IdentPat(ip)) if ip.mut_token().is_none())
 }
 
+// `it.next().unwrap()` on a pulled iterator: `ListIterator.next()` already throws when empty.
+pub fn is_unwrapped_next(cx: &Cx, m: &ast::MethodCallExpr) -> bool {
+    method_name(m) == "next"
+        && m.receiver()
+            .and_then(|r| cx.local_of_path(&r))
+            .is_some_and(|l| cx.pulled_iters.contains_key(&l))
+        && m.syntax()
+            .parent()
+            .and_then(ast::MethodCallExpr::cast)
+            .is_some_and(|p| {
+                matches!(method_name(&p).as_str(), "unwrap" | "expect")
+                    && p.receiver().is_some_and(|r| r.syntax() == m.syntax())
+            })
+}
+
 // Methods on an iterator materialized as `ListIterator` (`items` is the backing list).
 fn lower_pulled(
     cx: &mut Cx,
@@ -1573,6 +1588,7 @@ fn lower_pulled(
     let peeked = format!("{items}.get({it}.nextIndex())");
     let args = arg_exprs(m);
     match name {
+        "next" if is_unwrapped_next(cx, m) => Expr::call(Expr::raw(it), "next", vec![]),
         "next" => Expr::raw(format!(
             "({it}.hasNext() ? Optional.<{t}>of({it}.next()) : Optional.<{t}>empty())"
         )),
@@ -1595,9 +1611,19 @@ fn lower_pulled(
                 "({it}.hasNext() && ({p}).test({peeked}) ? Optional.<{t}>of({it}.next()) : Optional.<{t}>empty())"
             ))
         }
-        _ => cx.unsupported(
+        // These take `&mut self` and leave the rest of the iterator usable afterwards.
+        "nth" | "any" | "all" | "find" | "find_map" | "position" | "try_fold" | "try_for_each"
+        | "by_ref" => cx.unsupported(
             m.syntax(),
             &format!("`{name}` on an iterator that is also pulled with next()"),
         ),
+        // By-value methods consume the iterator: stream what is left of the backing list.
+        _ => {
+            let rest = Expr::raw(format!("{items}.subList({it}.nextIndex(), {items}.size())"));
+            let src = Expr::call(rest, "stream", vec![]);
+            let ret_ty = cx.ty(&ast::Expr::MethodCallExpr(m.clone()));
+            let line = cx.line(m.syntax());
+            lower_adaptor_core(cx, m, name, src, item, &ret_ty, line, out)
+        }
     }
 }

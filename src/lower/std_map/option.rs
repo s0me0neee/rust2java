@@ -67,20 +67,16 @@ pub(super) fn lower_option_method(
 ) -> Option<Expr> {
     let b0 = args.first().cloned().unwrap_or_else(|| Expr::raw("null"));
     let inner = opt_inner_from_recv(m, cx);
+    if matches!(name, "unwrap" | "expect")
+        && let ast::Expr::MethodCallExpr(next) = recv_ast
+        && crate::lower::iter::is_unwrapped_next(cx, next)
+    {
+        return Some(recv);
+    }
     match name {
         "is_some" => Some(Expr::call(recv, "isPresent", vec![])),
         "is_none" => Some(Expr::call(recv, "isEmpty", vec![])),
-        "unwrap" | "unwrap_unchecked" => Some(Expr::call(
-            recv,
-            "orElseThrow",
-            vec![Expr::Lambda {
-                params: vec![],
-                body: LambdaBody::Expr(Box::new(Expr::New {
-                    ty: "RuntimeException".into(),
-                    args: vec![Expr::str_lit("called `Option::unwrap()` on a `None` value")],
-                })),
-            }],
-        )),
+        "unwrap" | "unwrap_unchecked" => Some(Expr::call(recv, "orElseThrow", vec![])),
         "expect" => {
             let msg = Expr::New {
                 ty: "RuntimeException".into(),
@@ -444,12 +440,13 @@ fn transpose(cx: &mut Cx, recv: Expr, ret: &Ty, line: u32, out: &mut Vec<Stmt>) 
 }
 
 pub(super) fn is_unwrapped_source(cx: &Cx, recv_ast: &ast::Expr) -> bool {
-    let _ = cx;
     match recv_ast {
-        ast::Expr::MethodCallExpr(mc) => matches!(
-            method_name(mc).as_str(),
-            "read_line" | "read_to_string" | "read_to_end" | "write_all" | "write" | "flush"
-        ),
+        ast::Expr::MethodCallExpr(mc) => {
+            matches!(
+                method_name(mc).as_str(),
+                "read_line" | "read_to_string" | "read_to_end" | "write_all" | "write" | "flush"
+            ) || (method_name(mc) == "parse" && super::text::direct_parse(cx, mc).is_some())
+        }
         // `write!`/`writeln!` perform the write and hand back a dummy `Ok`.
         ast::Expr::MacroExpr(m) => m.macro_call().is_some_and(|mc| {
             matches!(

@@ -596,6 +596,29 @@ fn str_get_range(
     conditional(bounds, opt_of(sub), opt_empty(opt_inner(ret).as_ref()))
 }
 
+// `s.parse::<T>().unwrap()`: a Java parser that throws exactly where Rust's parse fails, so the
+// panic (exit 101) survives without building the Result.
+pub(super) fn direct_parse(cx: &Cx, m: &ast::MethodCallExpr) -> Option<&'static str> {
+    let parent = ast::MethodCallExpr::cast(m.syntax().parent()?)?;
+    if !matches!(method_name(&parent).as_str(), "unwrap" | "expect")
+        || parent.receiver()?.syntax() != m.syntax()
+    {
+        return None;
+    }
+    let Ty::Result(t, _) = cx.ty(&ast::Expr::MethodCallExpr(m.clone())) else {
+        return None;
+    };
+    Some(match t.strip_refs() {
+        Ty::Int(Int::I8) => "Byte.parseByte",
+        Ty::Int(Int::I16) => "Short.parseShort",
+        Ty::Int(Int::I32) => "Integer.parseInt",
+        Ty::Int(Int::I64) => "Long.parseLong",
+        Ty::Int(Int::U32 | Int::Usize) => "Integer.parseUnsignedInt",
+        Ty::Int(Int::U64) => "Long.parseUnsignedLong",
+        _ => return None,
+    })
+}
+
 pub(super) fn parse_expr(
     cx: &mut Cx,
     m: &ast::MethodCallExpr,
@@ -611,6 +634,9 @@ pub(super) fn parse_expr(
     // A user `FromStr` already returns the Result; the caller's unwrap/expect/? applies to it.
     if let Ty::Adt { java, .. } = target.strip_refs() {
         return Expr::static_call(format!("{java}.from_str"), vec![recv]);
+    }
+    if let Some(f) = direct_parse(cx, m) {
+        return Expr::static_call(f, vec![recv]);
     }
     super::option::parse_result(cx, m, recv, ret, &target, line, out)
 }

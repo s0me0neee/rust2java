@@ -318,10 +318,14 @@ fn pop_idiom(cx: &mut Cx, p: &ast::Pat, init: &ast::Expr) -> Option<(Expr, Optio
     };
     let recv_ast = m.receiver()?;
     let rty = cx.ty(&recv_ast);
+    let pulled = cx
+        .local_of_path(&recv_ast)
+        .is_some_and(|l| cx.pulled_iters.contains_key(&l));
     let pop = match (rty.strip_refs(), m.name_ref()?.text().to_string().as_str()) {
         (Ty::Vec(_), "pop") => "removeLast",
         (Ty::Deque(_), "pop_back") => "pollLast",
         (Ty::Deque(_), "pop_front") => "pollFirst",
+        (_, "next") if pulled => "next",
         _ => return None,
     };
     let mut pre = Vec::new();
@@ -329,7 +333,11 @@ fn pop_idiom(cx: &mut Cx, p: &ast::Pat, init: &ast::Expr) -> Option<(Expr, Optio
     if !pre.is_empty() || !is_place(&recv) {
         return None;
     }
-    let cond = Expr::Unary("!", Box::new(Expr::call(recv.clone(), "isEmpty", vec![])));
+    let cond = if pulled {
+        Expr::call(recv.clone(), "hasNext", vec![])
+    } else {
+        Expr::Unary("!", Box::new(Expr::call(recv.clone(), "isEmpty", vec![])))
+    };
     let bind = match &inner {
         ast::Pat::IdentPat(ip) if ip.pat().is_none() && bind_pat_def(cx, ip).is_none() => {
             let line = cx.line(ip.syntax());
