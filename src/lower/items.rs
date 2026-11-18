@@ -23,6 +23,8 @@ struct FieldInfo {
     ty: Ty,
     vis: String,
     plain_enum: bool,
+    // Safe to share (not copy) when cloning: Java records are immutable, containers are not.
+    shallow_clone: bool,
 }
 
 // The Java type an impl block's items belong to.
@@ -346,6 +348,66 @@ fn ty_is_plain_enum(cx: &Cx, t: &ast::Type) -> bool {
         .all(|v| v.kind(cx.db) == StructKind::Unit)
 }
 
+// Whether a clone of a value of this type may share the Java object instead of copying it.
+// A data-enum variant is a Java record, so it is shareable once all its fields are.
+fn clone_is_shallow(cx: &Cx, t: &ast::Type) -> bool {
+    cx.sema
+        .resolve_type(t)
+        .is_some_and(|ty| shallow_clone_ty(cx, &ty, 0))
+}
+
+fn shallow_clone_ty(cx: &Cx, ty: &ra_ap_hir::Type<'_>, depth: usize) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    if ty.is_unit() || ty.is_never() || ty.is_bool() || ty.is_char() || ty.is_str() {
+        return true;
+    }
+    // Cloning a reference copies the reference, which the Java field already holds.
+    if ty.is_reference() {
+        return true;
+    }
+    if let Some(b) = ty.as_builtin() {
+        let name = b.name();
+        let name = name.as_str();
+        return crate::ty::Int::from_name(name).is_some() || matches!(name, "f32" | "f64");
+    }
+    if ty.as_slice().is_some() || ty.as_array(cx.db).is_some() {
+        return false;
+    }
+    if ty.is_tuple() {
+        return ty
+            .tuple_fields(cx.db)
+            .iter()
+            .all(|t| shallow_clone_ty(cx, t, depth + 1));
+    }
+    if ty.as_type_param(cx.db).is_some() {
+        return false;
+    }
+    let Some(adt) = ty.as_adt() else {
+        return false;
+    };
+    if !adt.module(cx.db).krate(cx.db).origin(cx.db).is_local() {
+        return match adt.name(cx.db).as_str() {
+            "String" => true,
+            // Cloning these shares the pointee in Rust too.
+            "Rc" | "Arc" => true,
+            "Option" | "Result" => ty
+                .type_arguments()
+                .all(|t| shallow_clone_ty(cx, &t, depth + 1)),
+            _ => false,
+        };
+    }
+    let Adt::Enum(e) = adt else {
+        return false;
+    };
+    e.variants(cx.db).iter().all(|v| {
+        v.fields(cx.db)
+            .iter()
+            .all(|f| shallow_clone_ty(cx, &f.ty(cx.db), depth + 1))
+    })
+}
+
 fn field_list_info(cx: &mut Cx, list: Option<ast::FieldList>) -> Vec<FieldInfo> {
     let mut out = Vec::new();
     match list {
@@ -364,12 +426,14 @@ fn field_list_info(cx: &mut Cx, list: Option<ast::FieldList>) -> Vec<FieldInfo> 
                 };
                 super::std_map::ptr::note_fn(cx, f.syntax(), &ty);
                 let plain_enum = f.ty().is_some_and(|t| ty_is_plain_enum(cx, &t));
+                let shallow_clone = f.ty().is_some_and(|t| clone_is_shallow(cx, &t));
                 out.push(FieldInfo {
                     line: cx.line(f.syntax()),
                     name,
                     ty,
                     vis,
                     plain_enum,
+                    shallow_clone,
                 });
             }
         }
@@ -385,12 +449,14 @@ fn field_list_info(cx: &mut Cx, list: Option<ast::FieldList>) -> Vec<FieldInfo> 
                     String::new()
                 };
                 let plain_enum = f.ty().is_some_and(|t| ty_is_plain_enum(cx, &t));
+                let shallow_clone = f.ty().is_some_and(|t| clone_is_shallow(cx, &t));
                 out.push(FieldInfo {
                     line: cx.line(f.syntax()),
                     name: format!("_{i}"),
                     ty,
                     vis,
                     plain_enum,
+                    shallow_clone,
                 });
             }
         }
@@ -2040,20 +2106,26 @@ fn derive_methods(
     kind: StructKind,
     fields: &[FieldInfo],
     derives: &[String],
-    unit_struct: bool,
+    is_struct: bool,
 ) -> Vec<String> {
     let mut out = Vec::new();
     let has = |d: &str| derives.iter().any(|x| x == d);
+    // Data-enum variants are Java records: their implicit equals/hashCode is component-wise,
+    // which matches Rust's derive unless a component is a float (records compare bits).
+    let record = !is_struct;
+    let record_safe = record && fields.iter().all(|f| !f.ty.is_float());
     if has("Debug") {
         out.push(debug_method(cx, name, kind, fields));
     }
     if has("Clone") {
         let generics = wrap_generics(generic_decls);
         out.push(match kind {
-            StructKind::Unit if unit_struct => {
+            StructKind::Unit if is_struct => {
                 format!("public {name} clone() {{ return INSTANCE; }}")
             }
-            StructKind::Unit => format!("public {name} clone() {{ return this; }}"),
+            _ if record && fields.iter().all(|f| f.shallow_clone) => {
+                format!("public {name}{generics} clone() {{ return this; }}")
+            }
             _ => {
                 let args: Vec<String> = fields
                     .iter()
@@ -2072,10 +2144,10 @@ fn derive_methods(
             }
         });
     }
-    if has("PartialEq") || has("Eq") {
+    if (has("PartialEq") || has("Eq")) && !record_safe {
         out.push(equals_method(name, fields));
     }
-    if has("Hash") {
+    if has("Hash") && !record_safe {
         out.push(hash_method(fields));
     }
     if has("Ord") || has("PartialOrd") {
@@ -2274,16 +2346,22 @@ fn equals_method(name: &str, fields: &[FieldInfo]) -> String {
     let body = if fields.is_empty() {
         format!("return o instanceof {name};")
     } else {
-        let conds: Vec<String> = fields
-            .iter()
-            .map(|f| format!("Objects.equals(this.{0}, other.{0})", f.name))
-            .collect();
+        let conds: Vec<String> = fields.iter().map(field_eq).collect();
         format!(
-            "if (!(o instanceof {name} other)) return false; return {};",
+            "return o instanceof {name} other && {};",
             conds.join(" && ")
         )
     };
     format!("public boolean equals(Object o) {{ {body} }}")
+}
+
+// Rust's derive(PartialEq) uses `==` on primitives (floats included); references use equals.
+fn field_eq(f: &FieldInfo) -> String {
+    if f.ty.is_primitive() || f.ty.strip_refs() == &Ty::Ordering {
+        format!("this.{0} == other.{0}", f.name)
+    } else {
+        format!("Objects.equals(this.{0}, other.{0})", f.name)
+    }
 }
 
 fn hash_method(fields: &[FieldInfo]) -> String {

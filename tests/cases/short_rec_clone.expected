@@ -1,0 +1,4 @@
+true true Word("hi")
+Items([1, 2]) Items([1, 2, 3]) false
+true Wrapped { tag: Num(4), id: 1 }
+true
