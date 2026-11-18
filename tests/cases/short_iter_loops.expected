@@ -1,0 +1,24 @@
+ann=30
+bob=40
+cid=50
+0: ann
+1: bob
+2: cid
+2.cid
+1.bob
+0.ann
+a => 1
+b => 2
+value 1
+value 2
+<a>
+<b>
+<>
+<c>
+z
+y
+x
+4
+3
+2
+1
