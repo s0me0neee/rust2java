@@ -70,7 +70,9 @@ fn transpile(args: &Args, project: &frontend::Project) -> Result<ExitCode> {
         );
         let dir = args.out.join("src").join(&unit.package);
         std::fs::create_dir_all(&dir)?;
-        std::fs::write(dir.join(format!("{}.java", unit.class_name)), java)?;
+        let java_path = dir.join(format!("{}.java", unit.class_name));
+        std::fs::write(&java_path, java)?;
+        eprintln!("wrote {}", java_path.display());
         let lines =
             serde_json::json!({ "rust": unit.path, "stmts": report.stmts, "drift": report.drift });
         std::fs::write(
