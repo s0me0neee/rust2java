@@ -409,9 +409,12 @@ fn boxed(e: Expr) -> Expr {
 fn ensure_simple(cx: &mut Cx, e: Expr, ty: &Ty, line: u32, out: &mut Vec<Stmt>) -> Expr {
     let simple = match &e {
         Expr::Name(_) => true,
-        Expr::Raw(s) => s
-            .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '[' | ']')),
+        Expr::Raw(s) => {
+            s.starts_with('"')
+                || s.starts_with('\'')
+                || s.chars()
+                    .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '[' | ']'))
+        }
         _ => false,
     };
     if simple || cx.lambda_depth > 0 {
@@ -678,8 +681,19 @@ fn lower_source(
             } else {
                 (Expr::raw("-1"), args[0].clone())
             };
+            // `&['-', '_']` is a set of separators, i.e. one regex character class.
+            if let Some(chars) = char_set(&pat_ast) {
+                let class = Expr::str_lit(&char_class(&chars));
+                let parts = Expr::call(recv, "split", vec![class, limit]);
+                return Expr::call(Expr::raw("Arrays"), "stream", vec![parts]);
+            }
             let pat_ty = cx.ty(&pat_ast);
+            let by_pred = matches!(strip_parens(&pat_ast), ast::Expr::ClosureExpr(_))
+                || matches!(pat_ty.strip_refs(), Ty::Fn { .. });
             let p = lower_arg(cx, &pat_ast, out);
+            if by_pred {
+                return split_predicate(cx, m, recv, p, limit, line, out);
+            }
             let pat = match pat_ty.strip_refs() {
                 Ty::Str => p,
                 Ty::Char => Expr::call(Expr::raw("String"), "valueOf", vec![p]),
@@ -698,6 +712,100 @@ fn lower_source(
             &format!("iterator source `{name}` on {recv_ty:?}"),
         ),
     }
+}
+
+// Literal chars of `&['-', '_']` / `['-', '_']` / `&['-', '_'][..]`, if it is one.
+fn char_set(e: &ast::Expr) -> Option<Vec<char>> {
+    use ast::RangeItem;
+    let e = match strip_parens(e) {
+        ast::Expr::RefExpr(r) => r.expr()?,
+        other => other,
+    };
+    let array = match strip_parens(&e) {
+        ast::Expr::IndexExpr(ix) => match ix.index().map(|i| strip_parens(&i)) {
+            Some(ast::Expr::RangeExpr(r)) if r.start().is_none() && r.end().is_none() => {
+                ix.base()?
+            }
+            _ => return None,
+        },
+        other => other,
+    };
+    let ast::Expr::ArrayExpr(array) = array else {
+        return None;
+    };
+    let mut chars = Vec::new();
+    for item in array.exprs() {
+        let ast::Expr::Literal(lit) = strip_parens(&item) else {
+            return None;
+        };
+        let ast::LiteralKind::Char(c) = lit.kind() else {
+            return None;
+        };
+        chars.push(c.value().ok()?);
+    }
+    (!chars.is_empty()).then_some(chars)
+}
+
+// Regex character class matching any of `chars`.
+fn char_class(chars: &[char]) -> String {
+    let mut text = String::from("[");
+    for c in chars {
+        match c {
+            '\\' | ']' | '^' | '-' => {
+                text.push('\\');
+                text.push(*c);
+            }
+            '\n' => text.push_str("\\n"),
+            '\r' => text.push_str("\\r"),
+            '\t' => text.push_str("\\t"),
+            c if (*c as u32) < 0x20 => text.push_str(&format!("\\x{:02x}", *c as u32)),
+            c => text.push(*c),
+        }
+    }
+    text.push(']');
+    text
+}
+
+// `s.split(|c| ...)`: cut the string wherever the predicate holds (no regex for that).
+fn split_predicate(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    recv: Expr,
+    pred: Expr,
+    limit: Expr,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) -> Expr {
+    if cx.lambda_depth > 0 {
+        return cx.unsupported(m.syntax(), "split by a predicate inside a closure");
+    }
+    let s = ensure_simple(cx, recv, &Ty::Str, line, out);
+    let parts = cx.fresh("parts");
+    let from = cx.fresh("from");
+    let i = cx.fresh("i");
+    let sv = render(&s);
+    let pv = format!("((Predicate<Character>) {})", render(&pred));
+    // `splitn` keeps the rest of the string in its last element.
+    let cap = if matches!(&limit, Expr::Raw(l) if l == "-1") {
+        String::new()
+    } else {
+        let n = ensure_simple(cx, limit, &Ty::Int(Int::Usize), line, out);
+        format!(" && {parts}.size() < {} - 1", render(&n))
+    };
+    out.push(Stmt::new(
+        line,
+        StmtKind::Raw(format!(
+            "List<String> {parts} = new ArrayList<>(); int {from} = 0;"
+        )),
+    ));
+    out.push(Stmt::new(line, StmtKind::Raw(format!(
+        "for (int {i} = 0; {i} < {sv}.length(){cap}; {i}++) if ({pv}.test({sv}.charAt({i}))) {{ {parts}.add({sv}.substring({from}, {i})); {from} = {i} + 1; }}"
+    ))));
+    out.push(Stmt::new(
+        line,
+        StmtKind::Raw(format!("{parts}.add({sv}.substring({from}));")),
+    ));
+    Expr::call(Expr::name(parts), "stream", vec![])
 }
 
 fn item_of(t: &Ty) -> Ty {

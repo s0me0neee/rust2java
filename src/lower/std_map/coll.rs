@@ -684,7 +684,7 @@ pub fn lower_repeat(
     )
 }
 
-// `&v[a..b]`, `&s[a..]` -> subList / substring.
+// `&v[a..b]`, `&s[a..]` -> subList / substring (Rust slices by byte, we by Java char).
 pub fn lower_slice_range(
     cx: &mut Cx,
     base: Expr,
@@ -707,13 +707,10 @@ pub fn lower_slice_range(
     let base = simple(cx, base, base_ty, line, out);
     let from = start.unwrap_or_else(|| Expr::raw("0"));
     match base_ty.strip_refs() {
-        Ty::Str => {
-            let to = match end {
-                Some(e) => e,
-                None => Expr::call(base.clone(), "length", vec![]),
-            };
-            Expr::call(base, "substring", vec![from, to])
-        }
+        Ty::Str => match end {
+            Some(to) => Expr::call(base, "substring", vec![from, to]),
+            None => Expr::call(base, "substring", vec![from]),
+        },
         Ty::Vec(_) => {
             let to = match end {
                 Some(e) => e,

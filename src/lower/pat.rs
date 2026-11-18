@@ -1387,6 +1387,14 @@ fn def_pat(cx: &mut Cx, p: &ast::Pat, def: ModuleDef, value: Expr) -> Vec<Expr> 
                     Box::new(value),
                     escape_keyword(v.name(cx.db).as_str()),
                 )]
+            } else if e.name(cx.db).as_str() == "Ordering" {
+                // `compareTo` may return any difference: test the sign.
+                let (op, zero) = match v.name(cx.db).as_str() {
+                    "Less" => ("<", "0"),
+                    "Equal" => ("==", "0"),
+                    _ => (">", "0"),
+                };
+                vec![Expr::bin(value, op, Expr::raw(zero))]
             } else {
                 cx.unsupported(p.syntax(), "pattern on a non-local enum");
                 Vec::new()
