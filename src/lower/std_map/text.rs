@@ -29,10 +29,12 @@ pub(super) fn fn_call(
         "char::from" => {
             let args = expr::call_args(cx, c, out);
             let b = args.into_iter().next()?;
-            Some(Expr::Cast(
-                "char".into(),
-                Box::new(Expr::Cast("int".into(), Box::new(b))),
-            ))
+            let code = match &b {
+                // A literal is already a plain int; a bound name may be a boxed `Integer`.
+                Expr::Raw(_) => b,
+                _ => Expr::Cast("int".into(), Box::new(b)),
+            };
+            Some(Expr::Cast("char".into(), Box::new(code)))
         }
         _ => None,
     }
@@ -88,8 +90,42 @@ pub(super) fn method(
     key: &str,
     out: &mut Vec<Stmt>,
 ) -> Option<Expr> {
-    let _ = (cx, m, recv_ty, key, out);
-    None
+    let name = key.rsplit("::").next().unwrap_or(key);
+    if !matches!(name, "unwrap" | "expect") || !matches!(recv_ty.strip_refs(), Ty::Option(_)) {
+        return None;
+    }
+    let ast::Expr::MethodCallExpr(inner) = m.receiver()? else {
+        return None;
+    };
+    if method_name(&inner) != "to_digit" || !matches!(cx.ty(&inner.receiver()?), Ty::Char) {
+        return None;
+    }
+    let line = cx.line(m.syntax());
+    let c = expr::lower_expr(cx, &inner.receiver()?, out);
+    let radix = match inner.arg_list().and_then(|al| al.args().next()) {
+        Some(a) => expr::lower_expr(cx, &a, out),
+        None => Expr::raw("10"),
+    };
+    if name == "expect"
+        && let Some(arg) = m.arg_list().and_then(|al| al.args().next())
+    {
+        // The message is always evaluated in Rust, so keep it; only the panic text is Java's.
+        let msg = expr::lower_expr(cx, &arg, out);
+        if !matches!(&msg, Expr::Raw(s) if s.starts_with('"')) {
+            push_local(cx, line, "String".into(), Some(msg), out, "msg");
+        }
+    }
+    let d = cx.fresh("digit");
+    push_raw(
+        out,
+        line,
+        format!(
+            "int {d} = Character.digit({}, {}); if ({d} < 0) throw new NumberFormatException();",
+            render(&c),
+            render(&radix)
+        ),
+    );
+    Some(Expr::name(d))
 }
 
 // ---- bool / char -----------------------------------------------------------------------------
@@ -326,12 +362,15 @@ pub(super) fn lower_str_method(
             return Some(Expr::raw("null"));
         }
         "contains" => {
-            let arg = if matches!(arg0_ty.strip_refs(), Ty::Char) {
-                Expr::call(Expr::raw("String"), "valueOf", vec![b0])
-            } else {
-                b0
-            };
-            return Some(Expr::call(recv, "contains", vec![arg]));
+            if matches!(arg0_ty.strip_refs(), Ty::Char) {
+                // No `contains(char)` in Java; `indexOf(int)` takes the char directly.
+                return Some(Expr::bin(
+                    Expr::call(recv, "indexOf", vec![b0]),
+                    ">=",
+                    Expr::raw("0"),
+                ));
+            }
+            return Some(Expr::call(recv, "contains", vec![b0]));
         }
         "starts_with" => {
             let arg = if matches!(arg0_ty.strip_refs(), Ty::Char) {

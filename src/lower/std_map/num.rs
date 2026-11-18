@@ -79,6 +79,81 @@ pub(super) fn method(
 
 // ---- numeric conversions ---------------------------------------------------------------------
 
+// The value of an integer/char literal expression, if it is one: plain/underscored numbers with
+// an optional Java cast in front, or a char literal.
+fn literal_value(e: &Expr) -> Option<i128> {
+    let Expr::Raw(text) = e else {
+        return None;
+    };
+    literal_text(text.trim())
+}
+
+fn literal_text(s: &str) -> Option<i128> {
+    if let Some(rest) = s.strip_prefix('(') {
+        // `(int) 65`, `(short) 0x1234`: read the cast, then the literal behind it.
+        let end = rest.find(')')?;
+        if !matches!(&rest[..end], "int" | "long" | "short" | "byte" | "char") {
+            return None;
+        }
+        return literal_text(rest[end + 1..].trim());
+    }
+    if let Some(c) = char_literal(s) {
+        return Some(c as i128);
+    }
+    let digits = s.strip_suffix(['L', 'l']).unwrap_or(s).replace('_', "");
+    let (radix, body) = if let Some(h) = digits.strip_prefix("0x") {
+        (16, h)
+    } else if let Some(b) = digits.strip_prefix("0b") {
+        (2, b)
+    } else if let Some(o) = digits.strip_prefix("0o") {
+        (8, o)
+    } else {
+        // A leading zero is Java's octal only for `0` itself; Rust has no octal prefix.
+        (10, digits.as_str())
+    };
+    i128::from_str_radix(body, radix).ok()
+}
+
+fn char_literal(s: &str) -> Option<char> {
+    let body = s.strip_prefix('\'')?.strip_suffix('\'')?;
+    let mut chars = body.chars();
+    match chars.next()? {
+        '\\' => match chars.next()? {
+            'n' => Some('\n'),
+            'r' => Some('\r'),
+            't' => Some('\t'),
+            '0' => Some('\0'),
+            '\'' => Some('\''),
+            '\\' => Some('\\'),
+            'u' => {
+                let hex: String = chars.take(4).collect();
+                u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32)
+            }
+            _ => None,
+        },
+        c if chars.next().is_none() => Some(c),
+        _ => None,
+    }
+}
+
+// A mask that cannot change the value: a positive literal that already fits the Java signed
+// representation, or a value that is masked already.
+fn mask_is_noop(v: &Expr, bits: u32) -> bool {
+    if let Some(n) = literal_value(v) {
+        return n >= 0 && n < (1i128 << (bits - 1));
+    }
+    matches!(v, Expr::Binary(_, "&", m) if literal_value(m).is_some_and(|m| m >= (1i128 << bits) - 1))
+}
+
+// `v & mask`, unless the operand provably already fits.
+fn masked(v: Expr, mask: &'static str, bits: u32) -> Expr {
+    if mask_is_noop(&v, bits) {
+        v
+    } else {
+        Expr::bin(v, "&", Expr::raw(mask))
+    }
+}
+
 fn num_from(from: &Ty, to: &Ty, v: Expr) -> Option<Expr> {
     let (from, to) = (from.strip_refs(), to.strip_refs());
     match (from, to) {
@@ -87,10 +162,7 @@ fn num_from(from: &Ty, to: &Ty, v: Expr) -> Option<Expr> {
         (Ty::Int(a), Ty::F64) => Some(int_to_float(*a, false, v)),
         (Ty::F32, Ty::F64) => Some(Expr::Cast("double".into(), Box::new(v))),
         (Ty::Char, Ty::Int(b)) => int_as(Int::U16, *b, v),
-        (Ty::Int(_), Ty::Char) => Some(Expr::Cast(
-            "char".into(),
-            Box::new(Expr::bin(v, "&", Expr::raw("0xFF"))),
-        )),
+        (Ty::Int(a), Ty::Char) => Some(int_to_char(*a, v)),
         (Ty::Bool, Ty::Int(_)) => Some(Expr::Ternary(
             Box::new(v),
             Box::new(Expr::raw("1")),
@@ -114,13 +186,13 @@ fn int_convert(a: Int, b: Int, v: Expr) -> Expr {
         | Int::U8
         | Int::Usize => Expr::Cast(to.into(), Box::new(v)),
         Int::U16 => {
-            let masked = Expr::bin(v, "&", Expr::raw("0xFFFF"));
+            let masked = masked(v, "0xFFFF", 16);
             Expr::Cast(to.into(), Box::new(masked))
         }
         Int::U32 => {
             if b.is_long() {
                 let widened = Expr::Cast("long".into(), Box::new(v));
-                Expr::bin(widened, "&", Expr::raw("0xFFFFFFFFL"))
+                masked(widened, "0xFFFFFFFFL", 32)
             } else {
                 Expr::Cast(to.into(), Box::new(v))
             }
@@ -134,12 +206,12 @@ fn int_to_float(a: Int, to_f32: bool, v: Expr) -> Expr {
     let cls = if to_f32 { "Float" } else { "Double" };
     match a {
         Int::U16 => {
-            let masked = Expr::bin(v, "&", Expr::raw("0xFFFF"));
+            let masked = masked(v, "0xFFFF", 16);
             Expr::Cast(ty.into(), Box::new(masked))
         }
         Int::U32 => {
             let widened = Expr::Cast("long".into(), Box::new(v));
-            let masked = Expr::bin(widened, "&", Expr::raw("0xFFFFFFFFL"));
+            let masked = masked(widened, "0xFFFFFFFFL", 32);
             Expr::Cast(ty.into(), Box::new(masked))
         }
         Int::U64 | Int::U128 => {
@@ -267,17 +339,7 @@ pub(crate) fn num_cast(from: &Ty, to: &Ty, v: Expr) -> Option<Expr> {
         (Ty::F32, Ty::F64) => Some(Expr::Cast("double".into(), Box::new(v))),
         (Ty::F64, Ty::F32) => Some(Expr::Cast("float".into(), Box::new(v))),
         (Ty::Char, Ty::Int(b)) => int_as(Int::U16, *b, v),
-        (Ty::Int(a), Ty::Char) => {
-            let code = Expr::bin(v, "&", Expr::raw("0xFF"));
-            Some(Expr::Cast(
-                "char".into(),
-                Box::new(if a.is_long() {
-                    Expr::Cast("int".into(), Box::new(code))
-                } else {
-                    code
-                }),
-            ))
-        }
+        (Ty::Int(a), Ty::Char) => Some(int_to_char(*a, v)),
         (Ty::Bool, Ty::Int(_)) => Some(Expr::Ternary(
             Box::new(v),
             Box::new(Expr::raw("1")),
@@ -291,41 +353,59 @@ fn int_as(a: Int, b: Int, v: Expr) -> Option<Expr> {
     if a.java() == b.java() {
         // Same Java type: only `as u8` still has to drop the upper bits.
         return match b {
-            Int::U8 if a != Int::U8 => Some(Expr::bin(v, "&", Expr::raw("0xFF"))),
+            Int::U8 if a != Int::U8 => Some(masked(v, "0xFF", 8)),
             _ => None,
         };
     }
     Some(match b {
         Int::U8 => {
-            let masked = Expr::bin(v, "&", Expr::raw("0xFF"));
+            let masked = masked(v, "0xFF", 8);
             if a.is_long() {
                 Expr::Cast("int".into(), Box::new(masked))
             } else {
-                masked
+                char_code(masked)
             }
         }
         Int::I8 => Expr::Cast("byte".into(), Box::new(v)),
         Int::I16 | Int::U16 => Expr::Cast(b.java().into(), Box::new(v)),
         Int::I32 | Int::U32 | Int::Isize | Int::Usize => {
             if a == Int::U16 {
-                Expr::bin(v, "&", Expr::raw("0xFFFF"))
+                char_code(masked(v, "0xFFFF", 16))
             } else {
                 Expr::Cast("int".into(), Box::new(v))
             }
         }
         Int::I64 | Int::U64 | Int::I128 | Int::U128 => match a {
-            Int::U16 => Expr::Cast(
-                "long".into(),
-                Box::new(Expr::bin(v, "&", Expr::raw("0xFFFF"))),
-            ),
-            Int::U32 | Int::Usize => Expr::bin(
-                Expr::Cast("long".into(), Box::new(v)),
-                "&",
-                Expr::raw("0xFFFFFFFFL"),
-            ),
+            Int::U16 => Expr::Cast("long".into(), Box::new(masked(v, "0xFFFF", 16))),
+            Int::U32 | Int::Usize => {
+                masked(Expr::Cast("long".into(), Box::new(v)), "0xFFFFFFFFL", 32)
+            }
             _ => Expr::Cast("long".into(), Box::new(v)),
         },
     })
+}
+
+// A char literal stays an `int` value even in generic positions.
+fn char_code(e: Expr) -> Expr {
+    if matches!(&e, Expr::Raw(s) if s.starts_with('\'')) {
+        Expr::Cast("int".into(), Box::new(e))
+    } else {
+        e
+    }
+}
+
+// `as char` from `u8`: a literal is already the code point; anything else may be a boxed Integer.
+fn int_to_char(a: Int, v: Expr) -> Expr {
+    if a == Int::U8 && matches!(&v, Expr::Raw(_)) {
+        return Expr::Cast("char".into(), Box::new(v));
+    }
+    let code = masked(v, "0xFF", 8);
+    let code = if a.is_long() {
+        Expr::Cast("int".into(), Box::new(code))
+    } else {
+        code
+    };
+    Expr::Cast("char".into(), Box::new(code))
 }
 
 // `as` from a float saturates (NaN becomes 0); Java only saturates to the signed bounds.
@@ -425,14 +505,11 @@ pub(crate) fn unsigned_string(i: Int, v: Expr) -> Option<Expr> {
 // own operators already give the right answer.
 pub(crate) fn compare_expr(ty: &Ty, a: Expr, b: Expr) -> Option<Expr> {
     match ty.strip_refs() {
-        Ty::Ordering => {
-            let norm = |e: Expr| Expr::call(Expr::raw("Integer"), "signum", vec![e]);
-            Some(Expr::call(
-                Expr::raw("Integer"),
-                "compare",
-                vec![norm(a), norm(b)],
-            ))
-        }
+        Ty::Ordering => Some(Expr::call(
+            Expr::raw("Integer"),
+            "compare",
+            vec![signum(a), signum(b)],
+        )),
         // `usize` stays signed like its Display, so `i < v.len()` reads naturally.
         Ty::Int(i) if i.is_unsigned() && !matches!(i, Int::U8 | Int::Usize) => {
             Some(unsigned_compare(*i, a, b))
@@ -441,12 +518,44 @@ pub(crate) fn compare_expr(ty: &Ty, a: Expr, b: Expr) -> Option<Expr> {
     }
 }
 
+// `Integer.signum`, dropped when the operand already yields only -1/0/1.
+pub(crate) fn signum(e: Expr) -> Expr {
+    let normalized = match &e {
+        Expr::Call {
+            recv: Some(recv),
+            name,
+            ..
+        } => {
+            matches!(name.as_str(), "compare" | "compareUnsigned" | "signum")
+                && matches!(&**recv, Expr::Raw(s) if is_compare_class(s))
+        }
+        Expr::Call { name, .. } => {
+            let (cls, op) = name.split_once('.').unwrap_or(("", name));
+            is_compare_class(cls) && matches!(op, "compare" | "compareUnsigned" | "signum")
+        }
+        _ => false,
+    };
+    if normalized {
+        e
+    } else {
+        Expr::call(Expr::raw("Integer"), "signum", vec![e])
+    }
+}
+
+fn is_compare_class(s: &str) -> bool {
+    matches!(
+        s,
+        "Integer" | "Long" | "Short" | "Byte" | "Double" | "Float" | "Boolean" | "Character"
+    )
+}
+
 fn unsigned_compare(i: Int, a: Expr, b: Expr) -> Expr {
     match i {
-        Int::U16 => {
-            let masked = |e: Expr| Expr::bin(e, "&", Expr::raw("0xFFFF"));
-            Expr::call(Expr::raw("Integer"), "compare", vec![masked(a), masked(b)])
-        }
+        Int::U16 => Expr::call(
+            Expr::raw("Integer"),
+            "compare",
+            vec![masked(a, "0xFFFF", 16), masked(b, "0xFFFF", 16)],
+        ),
         Int::U32 | Int::Usize => Expr::call(Expr::raw("Integer"), "compareUnsigned", vec![a, b]),
         _ => Expr::call(Expr::raw("Long"), "compareUnsigned", vec![a, b]),
     }
@@ -682,14 +791,10 @@ fn bit_width(i: Int) -> u32 {
 
 // Java's bit helpers always work on 32/64 bits; mask narrow values and their sign bits away.
 fn mask_width(i: Int, v: Expr) -> Expr {
-    let mask = match i {
-        Int::I8 => Some("0xFF"),
-        Int::I16 | Int::U16 => Some("0xFFFF"),
-        _ => None,
-    };
-    match mask {
-        Some(m) => Expr::bin(v, "&", Expr::raw(m)),
-        None => v,
+    match i {
+        Int::I8 => masked(v, "0xFF", 8),
+        Int::I16 | Int::U16 => masked(v, "0xFFFF", 16),
+        _ => v,
     }
 }
 
@@ -781,6 +886,10 @@ fn clamp(
         return narrow(lower, i);
     }
     let math = |f: &str, a: Vec<Expr>| Expr::call(Expr::raw("Math"), f, a);
+    if !i.is_long() {
+        // Java 21's clamp also evaluates the receiver first, like Rust.
+        return narrow(math("clamp", vec![recv, lo, hi]), i);
+    }
     narrow(math("max", vec![lo, math("min", vec![hi, recv])]), i)
 }
 
@@ -805,11 +914,10 @@ fn unsigned_div_rem(i: Int, a: Expr, b: Expr, rem: bool) -> Expr {
             },
             vec![a, b],
         ),
+        // u8 values are plain Java ints in 0..255, so they need no reinterpretation.
+        Int::U8 => Expr::bin(a, if rem { "%" } else { "/" }, b),
         _ => {
-            let (a, b) = (
-                Expr::bin(a, "&", Expr::raw("0xFFFF")),
-                Expr::bin(b, "&", Expr::raw("0xFFFF")),
-            );
+            let (a, b) = (masked(a, "0xFFFF", 16), masked(b, "0xFFFF", 16));
             Expr::bin(a, if rem { "%" } else { "/" }, b)
         }
     }
@@ -1143,19 +1251,14 @@ pub(super) fn saturating_int(recv: Expr, b: Expr, i: Int, name: &str) -> Expr {
                 i,
             ),
             Int::I32 => narrow(
-                int_cast(math(
-                    "max",
+                math(
+                    "clamp",
                     vec![
+                        Expr::bin(Expr::Cast("long".into(), Box::new(recv)), "+", b),
                         Expr::raw("Integer.MIN_VALUE"),
-                        math(
-                            "min",
-                            vec![
-                                Expr::bin(Expr::Cast("long".into(), Box::new(recv)), "+", b),
-                                Expr::raw("Integer.MAX_VALUE"),
-                            ],
-                        ),
+                        Expr::raw("Integer.MAX_VALUE"),
                     ],
-                )),
+                ),
                 i,
             ),
             _ => Expr::bin(recv, "+", b),
@@ -1221,19 +1324,14 @@ pub(super) fn saturating_int(recv: Expr, b: Expr, i: Int, name: &str) -> Expr {
                 i,
             ),
             Int::I32 => narrow(
-                int_cast(math(
-                    "max",
+                math(
+                    "clamp",
                     vec![
+                        Expr::bin(Expr::Cast("long".into(), Box::new(recv)), "*", b),
                         Expr::raw("Integer.MIN_VALUE"),
-                        math(
-                            "min",
-                            vec![
-                                Expr::bin(Expr::Cast("long".into(), Box::new(recv)), "*", b),
-                                Expr::raw("Integer.MAX_VALUE"),
-                            ],
-                        ),
+                        Expr::raw("Integer.MAX_VALUE"),
                     ],
-                )),
+                ),
                 i,
             ),
             _ => Expr::bin(recv, "*", b),
@@ -1352,17 +1450,7 @@ pub(super) fn lower_float_method(
         }
         "is_nan" => Expr::call(Expr::raw(cls), "isNaN", vec![recv]),
         "is_infinite" => Expr::call(Expr::raw(cls), "isInfinite", vec![recv]),
-        "is_finite" => Expr::bin(
-            Expr::Unary(
-                "!",
-                Box::new(Expr::call(Expr::raw(cls), "isInfinite", vec![recv.clone()])),
-            ),
-            "&&",
-            Expr::Unary(
-                "!",
-                Box::new(Expr::call(Expr::raw(cls), "isNaN", vec![recv])),
-            ),
-        ),
+        "is_finite" => Expr::call(Expr::raw(cls), "isFinite", vec![recv]),
         "signum" => cast(math("signum", vec![recv])),
         "copysign" => cast(math("copySign", vec![recv, b0])),
         "to_degrees" => cast(math("toDegrees", vec![recv])),
@@ -1379,7 +1467,7 @@ pub(super) fn lower_float_method(
         "atan" => cast(math("atan", vec![recv])),
         "atan2" => cast(math("atan2", vec![recv, b0])),
         "hypot" => cast(math("hypot", vec![recv, b0])),
-        "clamp" => cast(math("max", vec![b0, math("min", vec![b1, recv])])),
+        "clamp" => cast(math("clamp", vec![recv, b0, b1])),
         "cmp" | "total_cmp" => Expr::call(Expr::raw(cls), "compare", vec![recv, b0]),
         "partial_cmp" => {
             let a = simple(cx, recv, &fty, line, out);
