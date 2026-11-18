@@ -42,3 +42,43 @@ fn main() {
         assert!(stderr.contains(expected), "missing {expected}: {stderr}");
     }
 }
+
+#[test]
+fn lost_writes_through_mut_option_are_reported() {
+    let work = tempfile::tempdir().unwrap();
+    let source = work.path().join("aliases.rs");
+    std::fs::write(
+        &source,
+        r#"struct Node { next: Option<Box<Node>> }
+fn set(o: &mut Option<Box<Node>>) { *o = None; }
+fn bump(o: &mut Option<i32>) { if let Some(x) = o { *x += 1; } }
+fn main() {
+    let mut n = Node { next: None };
+    let slot = &mut n.next;
+    *slot = None;
+    set(&mut n.next);
+    let mut c = Some(1);
+    bump(&mut c);
+}"#,
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_rust2java"))
+        .arg(&source)
+        .arg("-o")
+        .arg(work.path().join("out"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert_eq!(
+        stderr
+            .matches("`&mut` to a field/element of immutable Java type")
+            .count(),
+        2,
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("writing through a `&mut` binding"),
+        "{stderr}"
+    );
+}

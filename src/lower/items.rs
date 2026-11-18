@@ -1539,7 +1539,7 @@ pub fn param_type(cx: &mut Cx, ty: &Ty) -> String {
 
 // `&mut i32` / `&mut String` parameters are passed as one-element arrays.
 fn is_cell_param(ty: &Ty) -> bool {
-    matches!(ty, Ty::Ref { mutable: true, .. }) && super::is_cell_value_ty(ty)
+    matches!(ty, Ty::Ref { mutable: true, .. }) && super::is_mut_ref_cell_ty(ty)
 }
 
 fn wrap_generics(decls: &[String]) -> String {

@@ -261,12 +261,18 @@ fn lower_cell_let(
     let line = cx.line(l.syntax());
     let elem = ty.strip_refs().java();
     let arr = format!("{elem}[]");
+    // Java can't create `Optional<T>[]`; the raw array is the usual workaround.
+    let raw_elem = elem.split('<').next().unwrap_or(&elem).to_string();
     match l.initializer() {
         Some(init) if !is_control_flow(&init) => {
             let e = expr::lower_expr_as(cx, &init, ty, out);
             let name = cx.declare(rust_name);
             cx.mark_cell(ip);
-            let init = Expr::raw(format!("{{{}}}", render(&e)));
+            let init = if raw_elem == elem {
+                Expr::raw(format!("{{{}}}", render(&e)))
+            } else {
+                Expr::raw(format!("new {raw_elem}[]{{{}}}", render(&e)))
+            };
             out.push(Stmt::new(
                 line,
                 StmtKind::Local {
@@ -279,7 +285,7 @@ fn lower_cell_let(
         init => {
             let name = cx.declare(rust_name);
             cx.mark_cell(ip);
-            let alloc = Expr::raw(format!("new {elem}[1]"));
+            let alloc = Expr::raw(format!("new {raw_elem}[1]"));
             out.push(Stmt::new(
                 line,
                 StmtKind::Local {

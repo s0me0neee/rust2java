@@ -29,11 +29,12 @@ pub fn lower_expr(cx: &mut Cx, e: &ast::Expr, out: &mut Vec<Stmt>) -> Expr {
                 r.syntax(),
                 "reference to a `Cell`/`RefCell` field (its Java field is a plain value)",
             ),
-            Some(inner) if r.mut_token().is_some() && super::is_cell_value_ty(&cx.ty(&inner)) => cx
-                .unsupported(
+            Some(inner) if r.mut_token().is_some() && super::is_mut_ref_cell_ty(&cx.ty(&inner)) => {
+                cx.unsupported(
                     r.syntax(),
                     "`&mut` to a field/element of immutable Java type",
-                ),
+                )
+            }
             Some(inner) => lower_expr(cx, &inner, out),
             None => Expr::raw("null"),
         },
@@ -780,6 +781,16 @@ pub fn place_assign(
                 return cx.unsupported(
                     lhs.syntax(),
                     "replacing a shared object through `borrow_mut`",
+                );
+            }
+            // A Java local holding a copy of an immutable value: the write would be lost.
+            if cx.local_of_path(&inner).is_some()
+                && cx.cell_path(&inner).is_none()
+                && matches!(cx.ty(&inner), Ty::Ref { mutable: true, ref inner } if super::is_mut_ref_cell_ty(inner))
+            {
+                return cx.unsupported(
+                    lhs.syntax(),
+                    "writing through a `&mut` binding to a value Java can't share",
                 );
             }
             let place = lower_expr(cx, &inner, out);

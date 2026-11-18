@@ -1,4 +1,4 @@
-// `&mut` of an `Option<Box<T>>` field aliases a Java `Optional` value: writes are lost.
+// `&mut` of an `Option<Box<T>>` local: the alias shares the cell, so the write reaches `head`.
 struct Node {
     value: i32,
 }

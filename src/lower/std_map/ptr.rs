@@ -74,7 +74,7 @@ pub fn ref_mut_pat(cx: &Cx, p: &ast::IdentPat) -> Option<Ty> {
         return None;
     }
     let inner = cx.convert(&t.as_reference()?.0);
-    is_cell_value_ty(&inner).then_some(inner)
+    crate::lower::is_mut_ref_cell_ty(&inner).then_some(inner)
 }
 
 pub fn array_cell_type_ref(cx: &Cx, t: &ast::Type) -> Option<Ty> {

@@ -360,7 +360,7 @@ impl<'a, 'db> Cx<'a, 'db> {
     // Whether a `let` binding must live in a one-element array: its value type is immutable in
     // Java and it is either borrowed `&mut` or (being `mut`) captured by a closure.
     pub fn binding_needs_cell(&self, ip: &ast::IdentPat, ty: &Ty) -> bool {
-        if !is_cell_value_ty(ty) {
+        if !is_mut_ref_cell_ty(ty) {
             return false;
         }
         let Some(local) = self.sema.to_def(ip) else {
@@ -728,6 +728,11 @@ pub fn strip_parens(e: &ast::Expr) -> ast::Expr {
 }
 
 // Types whose Java representation is immutable, so `&mut` needs a cell.
+// Types a `&mut` local/param must box in a one-element array: Java can't write through them.
+pub fn is_mut_ref_cell_ty(ty: &Ty) -> bool {
+    is_cell_value_ty(ty) || matches!(ty.strip_refs(), Ty::Option(_))
+}
+
 pub fn is_cell_value_ty(ty: &Ty) -> bool {
     matches!(
         ty.strip_refs(),
