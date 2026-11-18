@@ -13,7 +13,7 @@ use super::stmt::{self, Dest};
 use super::{Cx, escape_keyword, expr, std_map, traits};
 use crate::frontend::{module_class_from, pascal_case, trait_java_name};
 use crate::jir::{Class, Expr, Member, Method, Stmt, StmtKind};
-use crate::ty::Ty;
+use crate::ty::{Int, Ty};
 
 // A field of a struct or enum variant, as Java sees it.
 #[derive(Clone)]
@@ -624,14 +624,19 @@ fn lower_variant_record(
         );
         if !fields.is_empty() {
             body.push_str(&format!("{vname} o = ({vname}) other; "));
+            let mut direct = false;
             for (i, f) in fields.iter().enumerate() {
                 match compare_field(
                     &f.ty,
                     &format!("this.{}", f.name),
                     &format!("o.{}", f.name),
                     i,
+                    i + 1 == fields.len(),
                 ) {
-                    Some(code) => body.push_str(&code),
+                    Some((code, tail)) => {
+                        direct = tail;
+                        body.push_str(&code);
+                    }
                     None => {
                         if let Some(node) = &node {
                             cx.error(
@@ -645,8 +650,12 @@ fn lower_variant_record(
                     }
                 }
             }
+            if !direct {
+                body.push_str("return 0;");
+            }
+        } else {
+            body.push_str("return 0;");
         }
-        body.push_str("return 0;");
         trailer.push(format!(
             "public int compareTo({impl_iface} other) {{ {body} }}"
         ));
@@ -2091,8 +2100,13 @@ fn this_field(f: &FieldInfo) -> Expr {
     Expr::Field(Box::new(Expr::raw("this")), f.name.clone())
 }
 
+enum DebugSeg {
+    Lit(String),
+    Val(Expr),
+}
+
 fn debug_method(cx: &mut Cx, name: &str, kind: StructKind, fields: &[FieldInfo]) -> String {
-    let mut parts: Vec<Expr> = Vec::new();
+    let mut segs: Vec<DebugSeg> = Vec::new();
     let mut lit = String::new();
     match kind {
         StructKind::Unit => lit.push_str(name),
@@ -2103,8 +2117,8 @@ fn debug_method(cx: &mut Cx, name: &str, kind: StructKind, fields: &[FieldInfo])
                 if i > 0 {
                     lit.push_str(", ");
                 }
-                parts.push(Expr::str_lit(&std::mem::take(&mut lit)));
-                parts.push(debug_value(cx, &f.ty, this_field(f), 0));
+                segs.push(DebugSeg::Lit(std::mem::take(&mut lit)));
+                segs.push(DebugSeg::Val(debug_value(cx, &f.ty, this_field(f), 0)));
             }
             lit.push(')');
         }
@@ -2115,18 +2129,71 @@ fn debug_method(cx: &mut Cx, name: &str, kind: StructKind, fields: &[FieldInfo])
                     lit.push_str(", ");
                 }
                 lit.push_str(&format!("{}: ", f.name));
-                parts.push(Expr::str_lit(&std::mem::take(&mut lit)));
-                parts.push(debug_value(cx, &f.ty, this_field(f), 0));
+                segs.push(DebugSeg::Lit(std::mem::take(&mut lit)));
+                segs.push(DebugSeg::Val(debug_value(cx, &f.ty, this_field(f), 0)));
             }
             lit.push_str(" }");
         }
     }
-    parts.push(Expr::str_lit(&lit));
-    let expr = str_concat(parts);
+    segs.push(DebugSeg::Lit(lit));
+    let mut expr = str_concat(
+        segs.iter()
+            .map(|s| match s {
+                DebugSeg::Lit(t) => Expr::str_lit(t),
+                DebugSeg::Val(e) => e.clone(),
+            })
+            .collect(),
+    );
+    // `String.formatted` beats `+` once there are enough fields to pay for the varargs form.
+    if fields.len() >= 3 {
+        let template: String = segs
+            .iter()
+            .map(|s| match s {
+                DebugSeg::Lit(t) => t.clone(),
+                DebugSeg::Val(_) => "%s".to_string(),
+            })
+            .collect();
+        let args: Vec<Expr> = segs
+            .iter()
+            .filter_map(|s| match s {
+                DebugSeg::Val(e) => Some(e.clone()),
+                DebugSeg::Lit(_) => None,
+            })
+            .collect();
+        let formatted = Expr::call(Expr::str_lit(&template), "formatted", args);
+        if crate::emit::render_expr(&formatted).len() < crate::emit::render_expr(&expr).len() {
+            expr = formatted;
+        }
+    }
     format!(
         "public String debug() {{ return {}; }}",
         crate::emit::render_expr(&expr)
     )
+}
+
+// `debug_value` is a String except where Java's `+` would stringify it anyway.
+fn debug_is_string(ty: &Ty) -> bool {
+    match ty.strip_refs() {
+        Ty::Int(i) => wide_unsigned(*i),
+        Ty::Bool => false,
+        Ty::Vec(t) => !crate::lower::fmt::debug_is_to_string(t),
+        _ => true,
+    }
+}
+
+// Debug text that must itself be a String, e.g. as a lambda body (not a `+` operand).
+fn debug_string(cx: &mut Cx, ty: &Ty, v: Expr, depth: usize) -> Expr {
+    let e = debug_value(cx, ty, v, depth);
+    if debug_is_string(ty) {
+        e
+    } else {
+        Expr::bin(Expr::str_lit(""), "+", e)
+    }
+}
+
+// These need masking or an unsigned conversion, which `fmt::debug` supplies.
+fn wide_unsigned(i: Int) -> bool {
+    matches!(i, Int::U16 | Int::U32 | Int::U64 | Int::U128)
 }
 
 pub fn debug_value(cx: &mut Cx, ty: &Ty, v: Expr, depth: usize) -> Expr {
@@ -2134,8 +2201,7 @@ pub fn debug_value(cx: &mut Cx, ty: &Ty, v: Expr, depth: usize) -> Expr {
         return e;
     }
     match ty.strip_refs() {
-        Ty::Str => str_concat(vec![Expr::str_lit("\""), v, Expr::str_lit("\"")]),
-        Ty::Char => str_concat(vec![Expr::str_lit("'"), v, Expr::str_lit("'")]),
+        Ty::Str | Ty::Char => crate::lower::fmt::debug(cx, v, ty),
         Ty::Adt { .. } => Expr::call(v, "debug", vec![]),
         Ty::Option(inner) => {
             let x = format!("x{depth}");
@@ -2224,13 +2290,19 @@ pub fn debug_value(cx: &mut Cx, ty: &Ty, v: Expr, depth: usize) -> Expr {
                 Box::new(inner),
             )
         }
+        Ty::Int(i) if wide_unsigned(*i) => crate::lower::fmt::debug(cx, v, ty),
+        Ty::Int(_) | Ty::Bool => v,
         _ => Expr::call(Expr::raw("String"), "valueOf", vec![v]),
     }
 }
 
 fn debug_seq(cx: &mut Cx, v: Expr, inner: &Ty, depth: usize, open: &str, close: &str) -> Expr {
+    // A Java List of values whose `toString` is already Rust's Debug text needs no mapping.
+    if open == "[" && crate::lower::fmt::debug_is_to_string(inner) {
+        return v;
+    }
     let x = format!("x{depth}");
-    let body = debug_value(cx, inner, Expr::name(&x), depth + 1);
+    let body = debug_string(cx, inner, Expr::name(&x), depth + 1);
     let stream = Expr::call(v, "stream", vec![]);
     let mapped = Expr::call(
         stream,
@@ -2296,42 +2368,65 @@ fn hash_method(fields: &[FieldInfo]) -> String {
 
 fn compare_method(cx: &mut Cx, node: &SyntaxNode, name: &str, fields: &[FieldInfo]) -> String {
     let mut body = String::new();
+    let last = fields.len().wrapping_sub(1);
+    // A plain last field returns its comparison directly; the `cN` dance would need `return 0`.
+    let mut direct = false;
     for (i, f) in fields.iter().enumerate() {
         match compare_field(
             &f.ty,
             &format!("this.{}", f.name),
             &format!("other.{}", f.name),
             i,
+            i == last,
         ) {
-            Some(code) => body.push_str(&code),
+            Some((code, tail)) => {
+                direct = tail;
+                body.push_str(&code);
+            }
             None => cx.error(
                 node,
                 &format!("derive(Ord/PartialOrd): cannot compare field `{}`", f.name),
             ),
         }
     }
-    body.push_str("return 0;");
+    if !direct {
+        body.push_str("return 0;");
+    }
     format!("public int compareTo({name} other) {{ {body} }}")
 }
 
 // One field's comparison, leaving its result in `cN` and returning early when it differs.
-fn compare_field(ty: &Ty, a: &str, b: &str, n: usize) -> Option<String> {
+// `last` lets a plain comparison be returned directly, so no trailing `return 0` is needed.
+fn compare_field(ty: &Ty, a: &str, b: &str, n: usize, last: bool) -> Option<(String, bool)> {
     match ty.strip_refs() {
         Ty::Vec(inner) => {
             let elem = compare_expr(inner, &format!("{a}.get(i{n})"), &format!("{b}.get(i{n})"))?;
-            Some(format!(
-                "int c{n} = 0; for (int i{n} = 0; i{n} < Math.min({a}.size(), {b}.size()); i{n}++) {{ int d{n} = {elem}; if (d{n} != 0) return d{n}; }} c{n} = Integer.compare({a}.size(), {b}.size()); if (c{n} != 0) return c{n}; "
+            Some((
+                format!(
+                    "int c{n} = 0; for (int i{n} = 0; i{n} < Math.min({a}.size(), {b}.size()); i{n}++) {{ int d{n} = {elem}; if (d{n} != 0) return d{n}; }} c{n} = Integer.compare({a}.size(), {b}.size()); if (c{n} != 0) return c{n}; "
+                ),
+                false,
             ))
         }
         Ty::Option(inner) => {
             let elem = compare_expr(inner, &format!("{a}.get()"), &format!("{b}.get()"))?;
-            Some(format!(
-                "int c{n} = 0; if ({a}.isPresent() && {b}.isPresent()) {{ c{n} = {elem}; }} else if ({a}.isPresent()) {{ c{n} = 1; }} else if ({b}.isPresent()) {{ c{n} = -1; }} if (c{n} != 0) return c{n}; "
+            Some((
+                format!(
+                    "int c{n} = 0; if ({a}.isPresent() && {b}.isPresent()) {{ c{n} = {elem}; }} else if ({a}.isPresent()) {{ c{n} = 1; }} else if ({b}.isPresent()) {{ c{n} = -1; }} if (c{n} != 0) return c{n}; "
+                ),
+                false,
             ))
         }
         _ => {
             let cmp = compare_expr(ty, a, b)?;
-            Some(format!("int c{n} = {cmp}; if (c{n} != 0) return c{n}; "))
+            if last {
+                Some((format!("return {cmp};"), true))
+            } else {
+                Some((
+                    format!("int c{n} = {cmp}; if (c{n} != 0) return c{n}; "),
+                    false,
+                ))
+            }
         }
     }
 }

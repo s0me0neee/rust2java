@@ -546,7 +546,7 @@ pub fn is_target_typed(e: &Expr) -> bool {
 }
 
 // Java's `toString` already prints Rust's Debug text for these (`[1, 2, 3]`, `true`).
-fn debug_is_to_string(ty: &Ty) -> bool {
+pub(crate) fn debug_is_to_string(ty: &Ty) -> bool {
     match ty.strip_refs() {
         Ty::Int(i) => !unsigned_display(*i),
         Ty::Bool => true,
