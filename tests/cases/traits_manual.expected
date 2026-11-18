@@ -1,0 +1,8 @@
+true false true
+false true true
+Card(2, s)
+[Card(1, s), Card(3, c), Card(3, h)]
+Some(Card(3, h))
+2
+Card(9, s)
+true false

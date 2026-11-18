@@ -3,7 +3,7 @@
 use ra_ap_hir::ModuleDef;
 use ra_ap_syntax::{AstNode, ast, ast::HasArgList};
 
-use super::{Cx, expr};
+use super::{Cx, expr, traits};
 use crate::emit::render_expr as render;
 use crate::jir::{Expr, LambdaBody, Stmt, StmtKind};
 use crate::ty::{Int, Ty};
@@ -275,6 +275,7 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
     }
     match key {
         "mem::swap" => return mem_swap(cx, c, out),
+        "mem::size_of" => return mem::mem_size_of(cx, c),
         "mem::replace" => return mem_replace(cx, c, &ret, false, out),
         "mem::take" => return mem_replace(cx, c, &ret, true, out),
         "mem::drop" | "mem::forget" => {
@@ -868,7 +869,32 @@ pub fn lower_std_method(
         return e;
     }
 
+    // `impl Deref for W { type Target = T; }`: method calls forward to `w.deref()`.
     let t = recv_ty.strip_refs().clone();
+    let deref_forward = !matches!(
+        name.as_str(),
+        "to_string"
+            | "clone"
+            | "into"
+            | "try_into"
+            | "from"
+            | "eq"
+            | "ne"
+            | "cmp"
+            | "partial_cmp"
+            | "hash"
+            | "default"
+            | "next"
+            | "deref"
+            | "borrow"
+            | "borrow_mut"
+            | "as_ref"
+            | "as_mut"
+    );
+    let (recv, t) = match traits::deref_target(cx, recv_ty) {
+        Some(target) if deref_forward => (Expr::call(recv.clone(), "deref", vec![]), target),
+        _ => (recv.clone(), t),
+    };
     let found = match &t {
         Ty::Int(i) => lower_int_method(
             cx,
@@ -994,7 +1020,7 @@ pub fn lower_std_method(
             line,
             out,
         ),
-        Ty::Ordering => lower_ordering_method(cx, recv.clone(), args.clone(), &name),
+        Ty::Ordering => lower_ordering_method(cx, recv.clone(), args.clone(), &name, line, out),
         _ => None,
     };
     if let Some(e) = found {
@@ -1003,19 +1029,29 @@ pub fn lower_std_method(
 
     // Generic fallbacks.
     if name == "clone" {
-        return clone_expr(recv, recv_ty);
+        return clone_expr(recv, &t);
     }
     if name == "to_string"
         && let Some(e) = super::fmt::std_error_display(cx, recv.clone(), recv_ty)
     {
         return e;
     }
-    if name == "into" || name == "from" {
-        if recv_ty.strip_refs().java() != ret.strip_refs().java()
-            && (matches!(ret.strip_refs(), Ty::Adt { .. })
-                || matches!(recv_ty.strip_refs(), Ty::Adt { .. }))
-        {
-            return cx.unsupported(m.syntax(), "`into()` through a user `From` impl");
+    if name == "into" || name == "try_into" || name == "from" {
+        let target = match ret.strip_refs() {
+            Ty::Result(ok, _) if name == "try_into" => (**ok).clone(),
+            other => other.clone(),
+        };
+        if let Ty::Adt { java, .. } = target.strip_refs() {
+            // The user's own `From`/`TryFrom` impl shows up as a static method on the target.
+            let method = if name == "try_into" {
+                "try_from"
+            } else {
+                "from"
+            };
+            return Expr::static_call(format!("{java}.{method}"), vec![recv]);
+        }
+        if matches!(t, Ty::Adt { .. }) {
+            return cx.unsupported(m.syntax(), "`into()` from a user type");
         }
         return clone_expr(recv, &ret);
     }

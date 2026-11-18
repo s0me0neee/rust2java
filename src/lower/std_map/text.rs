@@ -608,5 +608,9 @@ pub(super) fn parse_expr(
         Ty::Result(t, _) => (**t).clone(),
         _ => Ty::Other("?".into()),
     };
+    // A user `FromStr` already returns the Result; the caller's unwrap/expect/? applies to it.
+    if let Ty::Adt { java, .. } = target.strip_refs() {
+        return Expr::static_call(format!("{java}.from_str"), vec![recv]);
+    }
     super::option::parse_result(cx, m, recv, ret, &target, line, out)
 }

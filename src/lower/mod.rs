@@ -9,6 +9,7 @@ pub mod macros;
 pub mod pat;
 pub mod std_map;
 pub mod stmt;
+pub mod traits;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -66,6 +67,8 @@ pub struct Cx<'a, 'db> {
     pub pulled_iters: HashMap<ra_ap_hir::Local<'db>, String>,
     // `for x in v.iter_mut()` over immutable values: `x` stands for `list.get(idx)`.
     pub elem_aliases: HashMap<ra_ap_hir::Local<'db>, (String, String, ElemAliasKind)>,
+    // Local ADTs implementing Iterator/Deref, recorded for their use sites.
+    pub local_traits: HashMap<String, traits::TraitImpls>,
 }
 
 #[derive(Clone, Copy)]
@@ -137,6 +140,7 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         lambda_depth: 0,
         pulled_iters: HashMap::new(),
         elem_aliases: HashMap::new(),
+        local_traits: HashMap::new(),
     };
     let comments = collect_comments(&cx, file.syntax());
     let last_line = text.trim_end().lines().count().max(1) as u32;
