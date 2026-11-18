@@ -55,6 +55,24 @@ pub fn lower_stmt(cx: &mut Cx, s: &ast::Stmt, out: &mut Vec<Stmt>) {
     }
 }
 
+// A value computed by a call with write-backs: keep it in a local so they can run before it is used.
+fn hold_for_write_backs(cx: &mut Cx, v: Expr, ty: &Ty, line: u32, out: &mut Vec<Stmt>) -> Expr {
+    if cx.write_backs.is_empty() {
+        return v;
+    }
+    let name = cx.fresh("result");
+    out.push(Stmt::new(
+        line,
+        StmtKind::Local {
+            ty: decl_type(ty),
+            name: name.clone(),
+            init: Some(v),
+        },
+    ));
+    out.append(&mut cx.write_backs);
+    Expr::name(name)
+}
+
 // `var` for a long generic type, when the initializer alone determines exactly that type. Boxed
 // Long/Short/Byte/Float are excluded: `Map.entry(i, 0)` would infer Integer from the literal.
 fn var_infers(jty: &str, init: &Expr) -> bool {
@@ -533,16 +551,46 @@ pub fn lower_to_dest(cx: &mut Cx, e: &ast::Expr, dest: &Dest, out: &mut Vec<Stmt
         }
         _ => {
             let ty = cx.ty(e);
+            // A call statement may pass `&mut field` through a temporary cell (`expr::write_back_cell`).
+            let call = matches!(
+                super::strip_parens(e),
+                ast::Expr::CallExpr(_) | ast::Expr::MethodCallExpr(_)
+            );
+            let saved = std::mem::replace(
+                &mut cx.write_back_call,
+                call.then(|| super::strip_parens(e).syntax().clone()),
+            );
+            let saved_backs = std::mem::take(&mut cx.write_backs);
+            lower_value_to_dest(cx, e, &ty, dest, line, out);
+            cx.write_back_call = saved;
+            cx.write_backs = saved_backs;
+        }
+    }
+}
+
+// The value of `e` delivered to `dest`, followed by any write-backs its call needed.
+fn lower_value_to_dest(
+    cx: &mut Cx,
+    e: &ast::Expr,
+    ty: &Ty,
+    dest: &Dest,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) {
+    {
+        {
             match dest {
                 Dest::Discard => {
                     let v = expr::lower_expr(cx, e, out);
                     push_discard(out, line, v);
+                    out.append(&mut cx.write_backs);
                 }
                 Dest::Return => {
                     let unit_fn = cx.ret_ty.as_ref().is_none_or(Ty::is_unit);
                     if unit_fn {
                         let v = expr::lower_expr(cx, e, out);
                         push_discard(out, line, v);
+                        out.append(&mut cx.write_backs);
                         if !is_tail_of_fn(e) {
                             out.push(Stmt::new(line, StmtKind::Return(None)));
                         }
@@ -554,6 +602,7 @@ pub fn lower_to_dest(cx: &mut Cx, e: &ast::Expr, dest: &Dest, out: &mut Vec<Stmt
                             Some(inner) => super::std_map::ptr::as_handle(cx, e, v, &inner),
                             None => v,
                         };
+                        let v = hold_for_write_backs(cx, v, &ret, line, out);
                         out.push(Stmt::new(line, StmtKind::Return(Some(v))));
                     }
                 }
@@ -572,9 +621,11 @@ pub fn lower_to_dest(cx: &mut Cx, e: &ast::Expr, dest: &Dest, out: &mut Vec<Stmt
                             )),
                         ));
                     }
+                    out.append(&mut cx.write_backs);
                 }
                 Dest::Yield => {
                     let v = expr::lower_expr(cx, e, out);
+                    let v = hold_for_write_backs(cx, v, ty, line, out);
                     out.push(Stmt::new(
                         line,
                         StmtKind::Raw(format!("yield {};", render(&v))),

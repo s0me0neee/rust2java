@@ -1,6 +1,6 @@
-// Rust structs are values; their Java classes are shared references. Two places differ:
-// `*p = v` through a `&mut` must change the object `p` points at (fields are copied in), and
-// copying a `Copy` struct must not share it when someone later changes it in place (`.clone()`).
+// Rust structs and arrays are values; their Java classes/lists are shared references. Two places
+// differ: `*p = v` through a `&mut` must change the object `p` points at (fields are copied in),
+// and copying a `Copy` struct or array must not share it when someone later changes one in place.
 
 use std::collections::HashSet;
 
@@ -17,9 +17,29 @@ fn struct_of<'db>(t: &ra_ap_hir::Type<'db>) -> Option<ra_ap_hir::Struct> {
     }
 }
 
-// Structs some code changes in place: a field assignment, a `&mut` to one, or `*p = ..`.
-fn mutated_structs(cx: &Cx) -> HashSet<ra_ap_hir::Struct> {
-    let mut found = HashSet::new();
+// Struct and array types some code changes in place (`a.f = x`, `v[i] = x`, any `&mut` to one).
+#[derive(Default)]
+pub struct Mutated {
+    structs: HashSet<ra_ap_hir::Struct>,
+    // Arrays by their `Ty` (arrays and `Vec` share it, but only arrays are `Copy`).
+    arrays: HashSet<String>,
+}
+
+fn array_key<'db>(cx: &Cx<'_, 'db>, t: &ra_ap_hir::Type<'db>) -> Option<String> {
+    t.is_array().then(|| format!("{:?}", cx.convert(t)))
+}
+
+fn mutated_types<'db>(cx: &Cx<'_, 'db>) -> Mutated {
+    let mut found = Mutated::default();
+    let note = |cx: &Cx<'_, 'db>, t: &ra_ap_hir::Type<'db>, found: &mut Mutated| {
+        let t = t.strip_references();
+        if let Some(s) = struct_of(&t) {
+            found.structs.insert(s);
+        }
+        if let Some(k) = array_key(cx, &t) {
+            found.arrays.insert(k);
+        }
+    };
     let krate = cx.module.krate(cx.db);
     for module in krate.modules(cx.db) {
         let src = module.definition_source(cx.db);
@@ -43,19 +63,16 @@ fn mutated_structs(cx: &Cx) -> HashSet<ra_ap_hir::Struct> {
                     };
                     if let Some(base) = &place
                         && let Some(t) = cx.sema.type_of_expr(base)
-                        && let Some(s) = struct_of(&t.original.strip_references())
                     {
-                        found.insert(s);
+                        note(cx, &t.original, &mut found);
                     }
                 }
             } else if let Some(e) = ast::Expr::cast(node)
                 && let Some(t) = cx.sema.type_of_expr(&e)
             {
                 let t = t.adjusted();
-                if t.is_mutable_reference()
-                    && let Some(s) = struct_of(&t.strip_references())
-                {
-                    found.insert(s);
+                if t.is_mutable_reference() {
+                    note(cx, &t, &mut found);
                 }
             }
         }
@@ -63,24 +80,28 @@ fn mutated_structs(cx: &Cx) -> HashSet<ra_ap_hir::Struct> {
     found
 }
 
-// Whether a copy of a value of this type must be a fresh object: a `Copy` struct that is (or
-// holds a struct that is) changed in place somewhere.
-fn copy_needs_clone(cx: &mut Cx, t: &ra_ap_hir::Type) -> bool {
-    let Some(s) = struct_of(t) else { return false };
+// Whether a copy of a value of this type must be a fresh object: a `Copy` struct or array that
+// is (or holds a struct that is) changed in place somewhere.
+fn copy_needs_clone<'db>(cx: &mut Cx<'_, 'db>, t: &ra_ap_hir::Type<'db>) -> bool {
     if !t.is_copy(cx.db) {
         return false;
     }
-    if cx.mutated_structs.is_none() {
-        cx.mutated_structs = Some(mutated_structs(cx));
+    if cx.mutated.is_none() {
+        cx.mutated = Some(mutated_types(cx));
     }
-    let mutated = cx.mutated_structs.as_ref().unwrap();
+    let key = array_key(cx, t);
+    let mutated = cx.mutated.as_ref().unwrap();
+    if let Some(k) = key {
+        return mutated.arrays.contains(&k);
+    }
+    let Some(s) = struct_of(t) else { return false };
     let mut stack = vec![s];
     let mut seen = HashSet::new();
     while let Some(s) = stack.pop() {
         if !seen.insert(s) {
             continue;
         }
-        if mutated.contains(&s) {
+        if mutated.structs.contains(&s) {
             return true;
         }
         stack.extend(
@@ -125,8 +146,19 @@ fn is_value_use(node: &SyntaxNode) -> bool {
     false
 }
 
-// `x`, `a.b`, `v[i]`, `*p` copied out of a place whose `Copy` struct type is changed in place.
-pub fn needs_copy(cx: &mut Cx, e: &ast::Expr) -> bool {
+// `x`, `a.b`, `v[i]`, `*p` copied out of a place whose `Copy` type is changed in place: the
+// lowered value `v` as a fresh object (`.clone()`, or a list copy for arrays).
+pub fn copy_of(cx: &mut Cx, e: &ast::Expr, v: Expr) -> Expr {
+    if !needs_copy(cx, e) {
+        return v;
+    }
+    match cx.ty(e) {
+        crate::ty::Ty::Vec(elem) => super::std_map::coll::clone_list(cx, v, &elem),
+        _ => Expr::call(v, "clone", vec![]),
+    }
+}
+
+fn needs_copy(cx: &mut Cx, e: &ast::Expr) -> bool {
     let is_place = match e {
         ast::Expr::PathExpr(_) | ast::Expr::FieldExpr(_) | ast::Expr::IndexExpr(_) => true,
         ast::Expr::PrefixExpr(p) => p.op_kind() == Some(ast::UnaryOp::Deref),

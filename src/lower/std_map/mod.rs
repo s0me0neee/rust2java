@@ -648,12 +648,14 @@ fn cmp_min_max(
             )
         }
         _ => {
-            let (a, b) = (simple(cx, a, &ty, line, out), simple(cx, b, &ty, line, out));
             // `Ordering` is an int, so it compares by sign rather than `compareTo`.
-            let cmp = num::compare_expr(&ty, a.clone(), b.clone())
-                .unwrap_or_else(|| Expr::call(a.clone(), "compareTo", vec![b.clone()]));
-            let cond = Expr::bin(cmp, if max { ">=" } else { "<=" }, Expr::raw("0"));
-            Expr::Ternary(Box::new(cond), Box::new(a), Box::new(b))
+            if let Some(_) = num::compare_expr(&ty, a.clone(), b.clone()) {
+                let (a, b) = (simple(cx, a, &ty, line, out), simple(cx, b, &ty, line, out));
+                let cmp = num::compare_expr(&ty, a.clone(), b.clone()).unwrap();
+                let cond = Expr::bin(cmp, if max { ">" } else { "<=" }, Expr::raw("0"));
+                return Expr::Ternary(Box::new(cond), Box::new(a), Box::new(b));
+            }
+            coll::ord_pick(cx, max, ty.strip_refs(), a, b, line, out)
         }
     }
 }

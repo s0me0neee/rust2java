@@ -138,6 +138,16 @@ pub(crate) fn ord_comparator(cx: &mut Cx, ty: &Ty) -> Option<String> {
 
 // Java int expression comparing `a` with `b` the way Rust's `Ord` on `ty` does.
 pub(crate) fn compare_call(cx: &mut Cx, ty: &Ty, a: &str, b: &str) -> String {
+    // Lists of array-able elements compare directly instead of through a cast lambda.
+    if let Ty::Vec(elem) | Ty::Deque(elem) = ty.strip_refs()
+        && !elem.boxed().contains('<')
+    {
+        let e = elem.boxed();
+        let extra = ord_comparator(cx, elem)
+            .map(|c| format!(", {c}"))
+            .unwrap_or_default();
+        return format!("Arrays.compare({a}.toArray({e}[]::new), {b}.toArray({e}[]::new){extra})");
+    }
     let cmp = ord_comparator(cx, ty);
     call_comparator(cmp, ty, a, b)
 }
@@ -154,6 +164,28 @@ fn call_comparator(cmp: Option<String>, ty: &Ty, a: &str, b: &str) -> String {
     }
 }
 
+// `a.cmp(&b)` as a Java int, for any type (`compareTo` only where Java's order agrees).
+pub(crate) fn ord_compare(cx: &mut Cx, ty: &Ty, a: Expr, b: Expr) -> Expr {
+    let (a, b) = (render(&a), render(&b));
+    Expr::raw(compare_call(cx, ty, &a, &b))
+}
+
+// `a.max(b)` / `a.min(b)`: Rust's max keeps the second of equal values, min the first.
+pub(crate) fn ord_pick(
+    cx: &mut Cx,
+    max: bool,
+    ty: &Ty,
+    a: Expr,
+    b: Expr,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) -> Expr {
+    let (a, b) = (simple(cx, a, ty, line, out), simple(cx, b, ty, line, out));
+    let cmp = ord_compare(cx, ty, a.clone(), b.clone());
+    let cond = Expr::bin(cmp, if max { ">" } else { "<=" }, Expr::raw("0"));
+    Expr::Ternary(Box::new(cond), Box::new(a), Box::new(b))
+}
+
 // `cmp` reversed, for max-heaps.
 pub(crate) fn reversed_comparator(cmp: Option<String>) -> String {
     match cmp {
@@ -163,7 +195,7 @@ pub(crate) fn reversed_comparator(cmp: Option<String>) -> String {
     }
 }
 
-fn clone_list(cx: &mut Cx, value: Expr, elem: &Ty) -> Expr {
+pub(crate) fn clone_list(cx: &mut Cx, value: Expr, elem: &Ty) -> Expr {
     if let Ty::Vec(inner) = elem.strip_refs() {
         let item = cx.fresh("item");
         let copied = clone_list(cx, Expr::name(item.clone()), inner);
@@ -195,6 +227,28 @@ pub(super) fn method(
     out: &mut Vec<Stmt>,
 ) -> Option<Expr> {
     let name = key.rsplit("::").next().unwrap_or(key);
+    // `cmp`/`partial_cmp`/`max`/`min` on lists, tuples and options, whose Java types aren't Comparable.
+    if matches!(name, "cmp" | "partial_cmp" | "max" | "min")
+        && matches!(
+            recv_ty.strip_refs(),
+            Ty::Vec(_) | Ty::Deque(_) | Ty::Tuple(_) | Ty::Option(_)
+        )
+        && let Some(arg) = arg_asts(m).into_iter().next()
+    {
+        let ty = recv_ty.strip_refs().clone();
+        let line = cx.line(m.syntax());
+        let a = expr::lower_expr(cx, &m.receiver()?, out);
+        let b = expr::lower_expr(cx, &arg, out);
+        return Some(match name {
+            "cmp" => ord_compare(cx, &ty, a, b),
+            "partial_cmp" => Expr::call(
+                Expr::raw("Optional"),
+                "of",
+                vec![ord_compare(cx, &ty, a, b)],
+            ),
+            _ => ord_pick(cx, name == "max", &ty, a, b, line, out),
+        });
+    }
     if name == "and_modify" || matches!(name, "or_insert" | "or_insert_with" | "or_default") {
         if let Some(e) = and_modify(cx, m, name, out) {
             return Some(e);

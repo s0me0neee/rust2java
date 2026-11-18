@@ -20,7 +20,7 @@ use ra_ap_ide_db::RootDatabase;
 use ra_ap_syntax::{AstNode, SyntaxKind, SyntaxNode, ast};
 
 use crate::frontend::{self, Unit};
-use crate::jir::{Expr, JavaFile};
+use crate::jir::{self, Expr, JavaFile};
 use crate::ty::Ty;
 
 #[derive(Debug, Clone)]
@@ -69,8 +69,12 @@ pub struct Cx<'a, 'db> {
     pub builders: HashSet<ra_ap_hir::Local<'db>>,
     // `&str` locals kept as (base, start offset); see `views`.
     pub views: HashMap<ra_ap_hir::Local<'db>, views::View>,
-    // Structs changed in place somewhere in the crate (computed on first use; see `values`).
-    pub mutated_structs: Option<HashSet<ra_ap_hir::Struct>>,
+    // Struct/array types changed in place somewhere in the crate (computed on first use; see `values`).
+    pub mutated: Option<values::Mutated>,
+    // The statement-level call whose `&mut field` arguments may use a temporary cell, and the
+    // write-backs that must follow that statement.
+    pub write_back_call: Option<SyntaxNode>,
+    pub write_backs: Vec<jir::Stmt>,
     // Locals that *are* a one-element array: `Cell<i32>`/`RefCell<i32>` handles (`int[] c = {0}`).
     pub cell_handles: HashSet<ra_ap_hir::Local<'db>>,
     // >0 while lowering a closure body: statements hoisted to `out` would run only once, outside it.
@@ -179,7 +183,9 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         cells: HashSet::new(),
         builders: HashSet::new(),
         views: HashMap::new(),
-        mutated_structs: None,
+        mutated: None,
+        write_back_call: None,
+        write_backs: Vec::new(),
         cell_handles: HashSet::new(),
         lambda_depth: 0,
         pulled_iters: HashMap::new(),

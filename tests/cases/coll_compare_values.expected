@@ -1,0 +1,6 @@
+true false false Less
+true Less (2, "y") (2, "x")
+true Greater
+true Greater
+[2, 1] true
+[(1, 'a'), (1, 'b')] Some(Less)

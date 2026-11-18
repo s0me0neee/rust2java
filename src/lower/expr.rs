@@ -10,11 +10,8 @@ use crate::ty::{Int, Ty};
 
 pub fn lower_expr(cx: &mut Cx, e: &ast::Expr, out: &mut Vec<Stmt>) -> Expr {
     let v = lower_expr_inner(cx, e, out);
-    // A `Copy` struct copied out of a place gets its own object if anyone changes one in place.
-    if super::values::needs_copy(cx, e) {
-        return Expr::call(v, "clone", vec![]);
-    }
-    v
+    // A `Copy` struct/array copied out of a place gets its own object if anyone changes one in place.
+    super::values::copy_of(cx, e, v)
 }
 
 fn lower_expr_inner(cx: &mut Cx, e: &ast::Expr, out: &mut Vec<Stmt>) -> Expr {
@@ -39,10 +36,13 @@ fn lower_expr_inner(cx: &mut Cx, e: &ast::Expr, out: &mut Vec<Stmt>) -> Expr {
                 "reference to a `Cell`/`RefCell` field (its Java field is a plain value)",
             ),
             Some(inner) if r.mut_token().is_some() && super::is_mut_ref_cell_ty(&cx.ty(&inner)) => {
-                cx.unsupported(
-                    r.syntax(),
-                    "`&mut` to a field/element of immutable Java type",
-                )
+                match write_back_cell(cx, r, &inner, out) {
+                    Some(cell) => cell,
+                    None => cx.unsupported(
+                        r.syntax(),
+                        "`&mut` to a field/element of immutable Java type",
+                    ),
+                }
             }
             Some(inner) => lower_expr(cx, &inner, out),
             None => Expr::raw("null"),
@@ -483,7 +483,8 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
             } else if lt.is_primitive() {
                 Expr::bin(l, sym, r)
             } else {
-                Expr::bin(Expr::call(l, "compareTo", vec![r]), sym, Expr::raw("0"))
+                let cmp = std_map::coll::ord_compare(cx, lt.strip_refs(), l, r);
+                Expr::bin(cmp, sym, Expr::raw("0"))
             }
         }
         BinaryOp::ArithOp(a) => {
@@ -1012,6 +1013,70 @@ fn last_index(base: &ast::Expr, index: &ast::Expr) -> bool {
 
 pub fn is_empty_string_expr(e: &Expr) -> bool {
     matches!(e, Expr::Raw(s) if s == "\"\"")
+}
+
+// `f(&mut node.left)` as a whole statement: the field goes into a one-element array for the call
+// and is written back right after the statement (Rust's borrow keeps everything else off it).
+fn write_back_cell(
+    cx: &mut Cx,
+    r: &ast::RefExpr,
+    inner: &ast::Expr,
+    out: &mut Vec<Stmt>,
+) -> Option<Expr> {
+    let call = cx.write_back_call.clone()?;
+    let args = r
+        .syntax()
+        .parent()
+        .filter(|p| ast::ArgList::can_cast(p.kind()))?;
+    if cx.lambda_depth > 0 || args.parent()? != call || !stable_place(inner) {
+        return None;
+    }
+    let line = cx.line(r.syntax());
+    let elem = cx.ty(inner).strip_refs().java();
+    let current = lower_expr(cx, inner, out);
+    let base = match inner {
+        ast::Expr::FieldExpr(f) => f
+            .name_ref()
+            .map(|n| n.text().to_string())
+            .unwrap_or_else(|| "cell".into()),
+        _ => "cell".into(),
+    };
+    let name = cx.fresh(&base);
+    // Java can't create `Optional<T>[]`; the raw array is the usual workaround.
+    let raw = elem.split('<').next().unwrap_or(&elem).to_string();
+    let init = if raw == elem {
+        format!("{{{}}}", crate::emit::render_expr(&current))
+    } else {
+        format!("new {raw}[]{{{}}}", crate::emit::render_expr(&current))
+    };
+    out.push(Stmt::new(
+        line,
+        StmtKind::Local {
+            ty: format!("{elem}[]"),
+            name: name.clone(),
+            init: Some(Expr::raw(init)),
+        },
+    ));
+    let mut back = Vec::new();
+    let assign = place_assign(cx, inner, "=", Expr::raw(format!("{name}[0]")), &mut back);
+    back.push(Stmt::new(line, StmtKind::Expr(assign)));
+    cx.write_backs.extend(back);
+    Some(Expr::name(name))
+}
+
+// A place that can be read now and assigned after the call: fields/indexes over a local or `self`.
+fn stable_place(e: &ast::Expr) -> bool {
+    match e {
+        ast::Expr::PathExpr(_) => true,
+        ast::Expr::FieldExpr(f) => f.expr().is_some_and(|b| stable_place(&b)),
+        ast::Expr::IndexExpr(i) => {
+            i.base().is_some_and(|b| stable_place(&b))
+                && i.index()
+                    .is_some_and(|ix| matches!(ix, ast::Expr::PathExpr(_) | ast::Expr::Literal(_)))
+        }
+        ast::Expr::ParenExpr(p) => p.expr().is_some_and(|x| stable_place(&x)),
+        _ => false,
+    }
 }
 
 // The string `s` of an `s.as_bytes()` expression (bytes and Java char codes agree for ASCII).
