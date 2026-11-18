@@ -377,6 +377,24 @@ pub(super) fn parse_expr(
         Ty::Result(t, _) => (**t).clone(),
         _ => Ty::Other("?".into()),
     };
+    // `FromStr` already returns a Result; the outer `.unwrap()` is dropped by
+    // `is_unwrapped_source`, so unwrap here where the value is wanted.
+    if let Ty::Adt { java, .. } = target.strip_refs() {
+        let call = Expr::static_call(format!("{java}.from_str"), vec![recv]);
+        let outer = m.syntax().parent().and_then(ast::MethodCallExpr::cast);
+        return match consumed_by(cx, &ast::Expr::MethodCallExpr(m.clone())).as_deref() {
+            Some("unwrap") => Expr::call(call, "unwrap", vec![]),
+            Some("expect") => {
+                let msg = outer
+                    .and_then(|o| o.arg_list())
+                    .and_then(|a| a.args().next())
+                    .map(|a| expr::lower_expr(cx, &a, out))
+                    .unwrap_or_else(|| Expr::str_lit(""));
+                Expr::call(call, "expect", vec![msg])
+            }
+            _ => call,
+        };
+    }
     let call = match target.strip_refs() {
         Ty::Int(i) if i.is_long() => Expr::call(Expr::raw("Long"), "parseLong", vec![recv.clone()]),
         Ty::Int(_) => Expr::call(Expr::raw("Integer"), "parseInt", vec![recv.clone()]),

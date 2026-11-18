@@ -5,7 +5,7 @@
 use ra_ap_syntax::{AstNode, ast, ast::HasArgList, ast::HasLoopBody, ast::HasName};
 
 use super::stmt::{self, Dest};
-use super::{Cx, LoopFrame, expr, strip_parens};
+use super::{Cx, LoopFrame, expr, strip_parens, traits};
 use crate::emit::render_expr as render;
 use crate::jir::{Block, Expr, Stmt, StmtKind};
 use crate::ty::{Int, Ty};
@@ -305,6 +305,10 @@ fn for_each_source(
         let cty = cx.ty(&c);
         if !matches!(cty.strip_refs(), Ty::Iter(_)) {
             let v = expr::lower_expr(cx, &c, out);
+            // A Deref newtype iterates its target (`for x in w.iter()`).
+            if let Some(target) = traits::deref_target(cx, &cty) {
+                return collection_iterable(Expr::call(v, "deref", vec![]), &target);
+            }
             return collection_iterable(v, &cty);
         }
     }
@@ -326,6 +330,14 @@ fn for_each_source(
         );
     }
     let src = expr::lower_expr(cx, iterable, out);
+    // A user type with `impl Iterator` iterates through its generated `stream()`.
+    if let Some(item) = traits::iter_item(cx, it_ty) {
+        let stream = Expr::call(src, "stream", vec![]);
+        return Expr::Cast(
+            format!("Iterable<{}>", item.boxed()),
+            Box::new(Expr::raw(format!("{}::iterator", render(&stream)))),
+        );
+    }
     match it_ty.strip_refs() {
         Ty::Iter(t) => Expr::Cast(
             format!("Iterable<{}>", t.boxed()),
@@ -537,6 +549,21 @@ pub fn lower_iter_method(
     {
         return None;
     }
+    // A user type with `impl Iterator`: stream() then the usual adaptor lowering.
+    if matches!(recv_ty.strip_refs(), Ty::Adt { .. })
+        && (key.starts_with("Iterator::") || key.starts_with("IntoIterator::"))
+        && let Some(item) = traits::iter_item(cx, recv_ty)
+    {
+        let recv = expr::lower_expr(cx, &recv_ast, out);
+        if key == "IntoIterator::into_iter" {
+            return Some(recv);
+        }
+        let src = Expr::call(recv, "stream", vec![]);
+        let line = cx.line(m.syntax());
+        return Some(lower_adaptor_core(
+            cx, m, &name, src, item, &ret_ty, line, out,
+        ));
+    }
     if !matches!(recv_ty.strip_refs(), Ty::Iter(_)) {
         if let (Ty::Vec(t), "join" | "concat") = (recv_ty.strip_refs(), name.as_str())
             && t.is_str()
@@ -567,7 +594,12 @@ fn lower_source(
     out: &mut Vec<Stmt>,
 ) -> Expr {
     let line = cx.line(m.syntax());
-    let recv = expr::lower_expr(cx, recv_ast, out);
+    let mut recv = expr::lower_expr(cx, recv_ast, out);
+    let mut recv_ty = recv_ty.clone();
+    if let Some(target) = traits::deref_target(cx, &recv_ty) {
+        recv = Expr::call(recv, "deref", vec![]);
+        recv_ty = target;
+    }
     let args = arg_exprs(m);
     match (recv_ty.strip_refs(), name) {
         (Ty::Map { .. }, "iter" | "into_iter" | "iter_mut") => {
@@ -622,7 +654,7 @@ fn lower_source(
             Expr::call(Expr::name(tmp), "stream", vec![])
         }
         (Ty::Vec(_), "windows" | "chunks") => {
-            let v = ensure_simple(cx, recv, recv_ty, line, out);
+            let v = ensure_simple(cx, recv.clone(), &recv_ty, line, out);
             let k = lower_arg(cx, &args[0], out);
             let k = ensure_simple(cx, k, &Ty::Int(Int::Usize), line, out);
             let i = cx.fresh("i");
@@ -647,7 +679,7 @@ fn lower_source(
         }
         (Ty::Str, "bytes") => boxed(Expr::call(recv, "chars", vec![])),
         (Ty::Str, "char_indices") => {
-            let s = ensure_simple(cx, recv, recv_ty, line, out);
+            let s = ensure_simple(cx, recv.clone(), &recv_ty, line, out);
             let i = cx.fresh("i");
             let ss = render(&s);
             Expr::raw(format!(
@@ -772,6 +804,20 @@ fn lower_adaptor(
     }
 
     let src = expr::lower_expr(cx, recv_ast, out);
+    lower_adaptor_core(cx, m, name, src, item, ret_ty, line, out)
+}
+
+fn lower_adaptor_core(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    name: &str,
+    src: Expr,
+    item: Ty,
+    ret_ty: &Ty,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) -> Expr {
+    let args = arg_exprs(m);
     let call = |name: &str, args: Vec<Expr>| Expr::call(src.clone(), name, args);
     match name {
         "map" | "filter" | "for_each" | "inspect" | "take_while" | "skip_while" | "any" | "all" => {

@@ -5,12 +5,12 @@ use ra_ap_hir::{
     Variant,
 };
 use ra_ap_syntax::{
-    AstNode, SyntaxNode, ast, ast::HasAttrs, ast::HasGenericParams, ast::HasModuleItem,
-    ast::HasName, ast::HasTypeBounds, ast::HasVisibility,
+    AstNode, SyntaxNode, ast, ast::HasArgList, ast::HasAttrs, ast::HasGenericParams,
+    ast::HasModuleItem, ast::HasName, ast::HasTypeBounds, ast::HasVisibility,
 };
 
 use super::stmt::{self, Dest};
-use super::{Cx, escape_keyword, expr, std_map};
+use super::{Cx, escape_keyword, expr, std_map, traits};
 use crate::frontend::{module_class_from, pascal_case, trait_java_name};
 use crate::jir::{Class, Expr, Member, Method, Stmt, StmtKind};
 use crate::ty::Ty;
@@ -35,6 +35,7 @@ struct Target {
 
 pub fn lower_source_file(cx: &mut Cx, file: &ast::SourceFile, is_root: bool) -> Class {
     let items: Vec<ast::Item> = file.items().collect();
+    traits::collect(cx, &items);
     let mut members = Vec::new();
     lower_items(cx, &items, &mut members);
     if is_root {
@@ -170,7 +171,7 @@ fn adt_of_item(cx: &Cx, item: &ast::Item) -> Option<Adt> {
 }
 
 // The local ADT an impl block extends; std types count as foreign.
-fn impl_self_adt(cx: &Cx, imp: &ast::Impl) -> Option<Adt> {
+pub(crate) fn impl_self_adt(cx: &Cx, imp: &ast::Impl) -> Option<Adt> {
     let def = cx.sema.to_impl_def(imp)?;
     let adt = def.self_ty(cx.db).strip_references().as_adt()?;
     adt.module(cx.db)
@@ -373,7 +374,7 @@ fn lower_enum(cx: &mut Cx, e: &ast::Enum, adt: Option<Adt>, impls: Vec<&ast::Imp
         interface: !plain,
         generics: generic_decls.clone(),
     };
-    let (impl_members, implements) = if impls.is_empty() {
+    let (impl_members, mut implements) = if impls.is_empty() {
         (Vec::new(), Vec::new())
     } else {
         lower_impls(cx, &impls, &target)
@@ -422,31 +423,46 @@ fn lower_enum(cx: &mut Cx, e: &ast::Enum, adt: Option<Adt>, impls: Vec<&ast::Imp
         trailer.push(format!("{name}(int value) {{ this.value = value; }}"));
         header = format!("{vis}enum {name}{}", impl_clause(&implements));
     } else {
-        if derives.iter().any(|d| d == "PartialOrd" || d == "Ord") {
-            cx.error(
-                e.syntax(),
-                "derive(Ord/PartialOrd) on a data enum is not supported yet",
-            );
-        }
-        if derives.iter().any(|d| d == "Debug") {
+        let has_debug = derives.iter().any(|d| d == "Debug");
+        let has_ord = derives.iter().any(|d| d == "PartialOrd" || d == "Ord");
+        let has_display = impls
+            .iter()
+            .any(|imp| std_trait_name(cx, imp).as_deref() == Some("Display"));
+        if has_debug {
             trailer.push("String debug();".to_string());
         }
         if derives.iter().any(|d| d == "Clone") {
             trailer.push(format!("{name} clone();"));
         }
+        if has_ord {
+            // Java's Comparable needs a method each record can inherit.
+            trailer.push("int variantIndex();".to_string());
+        }
         members.extend(impl_members);
         if let Some(en) = eh {
-            for v in en.variants(cx.db) {
+            for (i, v) in en.variants(cx.db).iter().enumerate() {
                 members.push(Member::Class(lower_variant_record(
                     cx,
-                    &v,
+                    v,
                     &name,
                     &generics,
                     &generic_decls,
                     &derives,
                     line,
+                    i,
+                    has_display,
+                    has_ord,
                 )));
             }
+        }
+        if has_ord {
+            let args = generic_arg_names(&generics);
+            let iface = if args.is_empty() {
+                name.clone()
+            } else {
+                format!("{name}<{}>", args.join(", "))
+            };
+            implements.push(format!("Comparable<{iface}>"));
         }
         header = format!(
             "{vis}sealed interface {name}{generics}{}",
@@ -498,6 +514,9 @@ fn lower_variant_record(
     generic_decls: &[String],
     derives: &[String],
     fallback_line: u32,
+    index: usize,
+    has_display: bool,
+    has_ord: bool,
 ) -> Class {
     let vname = escape_keyword(v.name(cx.db).as_str());
     let vline = v
@@ -525,19 +544,62 @@ fn lower_variant_record(
         format!("{enum_name}<{}>", type_args.join(", "))
     };
     let node = v.source(cx.db).map(|src| src.value.syntax().clone());
-    let trailer = match node {
+    // Compare by variant index, then by fields: derived Ord/PartialOrd on a data enum.
+    let derives_record: Vec<String> = derives
+        .iter()
+        .filter(|d| *d != "Ord" && *d != "PartialOrd")
+        .cloned()
+        .collect();
+    let mut trailer = match &node {
         Some(node) => derive_methods(
             cx,
-            &node,
+            node,
             &vname,
             generic_decls,
             kind,
             &fields,
-            derives,
+            &derives_record,
             false,
         ),
         None => Vec::new(),
     };
+    if has_display {
+        trailer.push("public String toString() { return display(); }".to_string());
+    }
+    if has_ord {
+        trailer.push(format!("public int variantIndex() {{ return {index}; }}"));
+        let mut body = format!(
+            "int c = Integer.compare({index}, other.variantIndex()); if (c != 0) return c; "
+        );
+        if !fields.is_empty() {
+            body.push_str(&format!("{vname} o = ({vname}) other; "));
+            for (i, f) in fields.iter().enumerate() {
+                match compare_field(
+                    &f.ty,
+                    &format!("this.{}", f.name),
+                    &format!("o.{}", f.name),
+                    i,
+                ) {
+                    Some(code) => body.push_str(&code),
+                    None => {
+                        if let Some(node) = &node {
+                            cx.error(
+                                node,
+                                &format!(
+                                    "derive(Ord/PartialOrd): cannot compare field `{}`",
+                                    f.name
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        body.push_str("return 0;");
+        trailer.push(format!(
+            "public int compareTo({impl_iface} other) {{ {body} }}"
+        ));
+    }
     Class {
         line: vline,
         header: format!(
@@ -653,56 +715,66 @@ fn lower_trait(cx: &mut Cx, t: &ast::Trait) -> Option<Member> {
 
 // --- impls -------------------------------------------------------------------------------
 
-fn impl_trait(cx: &Cx, imp: &ast::Impl) -> Option<Trait> {
+pub(crate) fn impl_trait(cx: &Cx, imp: &ast::Impl) -> Option<Trait> {
     cx.sema.to_impl_def(imp)?.trait_(cx.db)
 }
 
 fn lower_impls(cx: &mut Cx, impls: &[&ast::Impl], target: &Target) -> (Vec<Member>, Vec<String>) {
     let mut members = Vec::new();
     let mut implements = Vec::new();
+    // `impl Ord` wins over `impl PartialOrd` for the generated `compareTo`.
+    let has_ord = impls
+        .iter()
+        .any(|imp| std_trait_name(cx, imp).as_deref() == Some("Ord"));
     for imp in impls {
         let tr = impl_trait(cx, imp);
+        let mut tname = String::new();
         if let Some(tr) = tr {
             let local = tr.module(cx.db).krate(cx.db).origin(cx.db).is_local();
-            let tname = tr.name(cx.db).as_str().to_string();
+            tname = tr.name(cx.db).as_str().to_string();
             if local {
                 implements.push(trait_java_name(cx.db, cx.module, tr));
             } else {
                 match tname.as_str() {
                     "Display" => {
-                        if target.interface {
-                            cx.error(imp.syntax(), "Display for a data enum is not supported yet");
-                        } else if let Some(m) = display_method(cx, imp, target) {
+                        let header = if target.interface {
+                            "default String display()"
+                        } else {
+                            "public String toString()"
+                        };
+                        if let Some(m) = write_method(cx, imp, target, header) {
                             members.push(Member::Method(m));
                         }
                         continue;
                     }
                     "Debug" => {
-                        cx.error(
-                            imp.syntax(),
-                            "manual Debug impls are not supported yet (use #[derive(Debug)])",
-                        );
-                        continue;
-                    }
-                    "Ord" | "PartialOrd" => {
-                        cx.error(
-                            imp.syntax(),
-                            "manual Ord/PartialOrd impls are not supported yet (use #[derive])",
-                        );
+                        let header = if target.interface {
+                            "default String debug()"
+                        } else {
+                            "public String debug()"
+                        };
+                        if let Some(m) = write_method(cx, imp, target, header) {
+                            members.push(Member::Method(m));
+                        }
                         continue;
                     }
                     "PartialEq" | "Eq" | "Hash" => {
-                        cx.error(
-                            imp.syntax(),
-                            "manual PartialEq/Eq/Hash impls are not supported yet (use #[derive])",
-                        );
-                        continue;
-                    }
-                    "Iterator" => {
-                        cx.error(
-                            imp.syntax(),
-                            "impl Iterator for a user type is not supported yet",
-                        );
+                        // Java forbids a default method that overrides Object's equals/hashCode.
+                        if target.interface {
+                            cx.error(
+                                imp.syntax(),
+                                "manual PartialEq/Eq/Hash on a data enum is not supported \
+                                 (its records already implement equals/hashCode)",
+                            );
+                        } else if tname == "PartialEq" {
+                            if let Some(m) = equals_impl(cx, imp, target) {
+                                members.push(Member::Method(m));
+                            }
+                        } else if tname == "Hash"
+                            && let Some(m) = hash_code_impl(cx, imp, target)
+                        {
+                            members.push(Member::Method(m));
+                        }
                         continue;
                     }
                     _ => {}
@@ -712,9 +784,11 @@ fn lower_impls(cx: &mut Cx, impls: &[&ast::Impl], target: &Target) -> (Vec<Membe
         let Some(list) = imp.assoc_item_list() else {
             continue;
         };
+        let index_mut = tname == "IndexMut";
         for item in list.assoc_items() {
             match item {
                 ast::AssocItem::Fn(f) => {
+                    let fname = f.name().map(|n| n.text().to_string()).unwrap_or_default();
                     let is_static = f.param_list().and_then(|p| p.self_param()).is_none();
                     let vis = if f.visibility().is_some() {
                         "public "
@@ -736,15 +810,38 @@ fn lower_impls(cx: &mut Cx, impls: &[&ast::Impl], target: &Target) -> (Vec<Membe
                     } else {
                         vis.to_string()
                     };
+                    // Associated types in signatures (`Self::Item`, `Self::Err`) are not
+                    // resolved by rust-analyzer's type conversion; spell them out here.
+                    let ret_override = if tname == "Iterator" && fname == "next" {
+                        traits::impl_assoc_type(cx, imp, "Item")
+                            .map(|item| Ty::Option(Box::new(item)))
+                    } else if matches!(tname.as_str(), "FromStr" | "TryFrom") {
+                        let assoc = if tname == "FromStr" { "Err" } else { "Error" };
+                        traits::impl_assoc_type(cx, imp, assoc).map(|err| {
+                            Ty::Result(
+                                Box::new(Ty::Adt {
+                                    name: target.java.clone(),
+                                    java: target.java.clone(),
+                                    args: Vec::new(),
+                                }),
+                                Box::new(err),
+                            )
+                        })
+                    } else {
+                        None
+                    };
+                    // `index_mut` itself cannot be expressed (Java has no mutable element
+                    // references); only the generated `index_mut_set` setter is needed.
+                    if index_mut && fname == "index_mut" {
+                        if let Some(setter) = index_mut_setter(cx, &f, target) {
+                            members.push(Member::Method(setter));
+                        }
+                        continue;
+                    }
                     let saved = std::mem::replace(&mut cx.self_ty_java, target.java.clone());
-                    members.push(Member::Method(lower_fn_inner(
-                        cx,
-                        &f,
-                        &modifiers,
-                        static_generics,
-                        None,
-                    )));
+                    let m = lower_fn_sig(cx, &f, &modifiers, static_generics, None, ret_override);
                     cx.self_ty_java = saved;
+                    members.push(Member::Method(m));
                 }
                 ast::AssocItem::Const(c) => {
                     if let Some(m) = lower_const(cx, c.name(), c.ty(), c.body(), c.syntax()) {
@@ -754,12 +851,307 @@ fn lower_impls(cx: &mut Cx, impls: &[&ast::Impl], target: &Target) -> (Vec<Membe
                 _ => {}
             }
         }
+        if tname == "Iterator"
+            && let Some(item) = traits::impl_assoc_type(cx, imp, "Item")
+        {
+            members.push(Member::Method(stream_method(cx, imp, &item)));
+        }
+        if matches!(tname.as_str(), "Ord" | "PartialOrd") {
+            let is_ord = tname == "Ord";
+            if (is_ord || !has_ord)
+                && let Some(m) = compare_to_method(cx, imp, target, is_ord)
+            {
+                if !implements.iter().any(|i| i.starts_with("Comparable")) {
+                    implements.push(format!("Comparable<{}>", target.java));
+                }
+                members.push(Member::Method(m));
+            }
+        }
     }
     (members, implements)
 }
 
-// `impl Display for X` -> `public String toString()` with `f` as a StringBuilder.
-fn display_method(cx: &mut Cx, imp: &ast::Impl, target: &Target) -> Option<Method> {
+fn std_trait_name(cx: &Cx, imp: &ast::Impl) -> Option<String> {
+    let tr = impl_trait(cx, imp)?;
+    (!tr.module(cx.db).krate(cx.db).origin(cx.db).is_local())
+        .then(|| tr.name(cx.db).as_str().to_string())
+}
+
+fn find_impl_fn(imp: &ast::Impl, name: &str) -> Option<ast::Fn> {
+    imp.assoc_item_list()?.assoc_items().find_map(|i| match i {
+        ast::AssocItem::Fn(f) if f.name().is_some_and(|n| n.text() == name) => Some(f),
+        _ => None,
+    })
+}
+
+// Java type of the second parameter of `eq`/`cmp` (`&Self` included).
+fn other_param_java(cx: &mut Cx, param: &ast::Param, target: &Target) -> String {
+    match param.ty() {
+        Some(t) if !t.syntax().text().to_string().contains("Self") => {
+            let j = cx.type_ref(&t).strip_refs().java();
+            if j == "Object" {
+                target.java.clone()
+            } else {
+                j
+            }
+        }
+        _ => target.java.clone(),
+    }
+}
+
+// `impl PartialEq for S` -> `equals(Object)` that casts and runs the Rust `eq` body.
+fn equals_impl(cx: &mut Cx, imp: &ast::Impl, target: &Target) -> Option<Method> {
+    let f = find_impl_fn(imp, "eq")?;
+    let params: Vec<ast::Param> = f.param_list()?.params().collect();
+    let param = params.first()?;
+    let ast::Pat::IdentPat(ip) = param.pat()? else {
+        cx.unsupported(f.syntax(), "`eq` parameter that is not a plain identifier");
+        return None;
+    };
+    if ip.pat().is_some() {
+        cx.unsupported(f.syntax(), "`eq` parameter pattern");
+        return None;
+    }
+    let rust_name = ip.name()?.text().to_string();
+    let other_ty = other_param_java(cx, param, target);
+    let line = cx.line(f.syntax());
+    let close_line = cx.end_line(f.syntax());
+    let saved_self = std::mem::replace(&mut cx.self_ty_java, target.java.clone());
+    let saved = cx.save_method_state();
+    cx.enter_method();
+    let obj = cx.declare("o");
+    let other = cx.declare(&rust_name);
+    let mut prelude = vec![Stmt::new(
+        line,
+        StmtKind::If {
+            cond: Expr::Unary(
+                "!",
+                Box::new(Expr::InstanceOf(
+                    Box::new(Expr::name(obj.clone())),
+                    format!("{other_ty} {other}"),
+                )),
+            ),
+            then: crate::jir::Block {
+                stmts: vec![Stmt::new(line, StmtKind::Return(Some(Expr::raw("false"))))],
+                close_line: line,
+            },
+            els: None,
+        },
+    )];
+    cx.ret_ty = Some(Ty::Bool);
+    let body = f.body()?;
+    let mut block = stmt::lower_block(cx, &body, &Dest::Return);
+    prelude.append(&mut block.stmts);
+    block.stmts = prelude;
+    block.close_line = close_line;
+    cx.ret_ty = None;
+    cx.restore_method_state(saved);
+    cx.self_ty_java = saved_self;
+    Some(Method {
+        line,
+        header: format!("public boolean equals(Object {obj})"),
+        body: Some(block),
+    })
+}
+
+// `impl Hash` -> `hashCode()` over the `self.f.hash(state)` calls of the Rust body.
+fn hash_code_impl(cx: &mut Cx, imp: &ast::Impl, target: &Target) -> Option<Method> {
+    let f = find_impl_fn(imp, "hash")?;
+    let line = cx.line(f.syntax());
+    let close_line = cx.end_line(f.syntax());
+    let saved_self = std::mem::replace(&mut cx.self_ty_java, target.java.clone());
+    let saved = cx.save_method_state();
+    cx.enter_method();
+    let mut inputs: Vec<Expr> = Vec::new();
+    let mut ok = true;
+    if let Some(list) = f.body().and_then(|b| b.stmt_list()) {
+        if list.tail_expr().is_some() {
+            ok = false;
+        }
+        for s in list.statements() {
+            let ast::Stmt::ExprStmt(es) = s else {
+                ok = false;
+                break;
+            };
+            let Some(ast::Expr::MethodCallExpr(m)) = es.expr() else {
+                ok = false;
+                break;
+            };
+            let name = m
+                .name_ref()
+                .map(|n| n.text().to_string())
+                .unwrap_or_default();
+            let mut out = Vec::new();
+            let value = if name == "hash" {
+                m.receiver().map(|r| expr::lower_expr(cx, &r, &mut out))
+            } else if name.starts_with("write_") {
+                m.arg_list()
+                    .and_then(|a| a.args().next())
+                    .map(|a| expr::lower_expr(cx, &a, &mut out))
+            } else {
+                None
+            };
+            match value {
+                Some(v) if out.is_empty() => inputs.push(v),
+                _ => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+    } else {
+        ok = false;
+    }
+    cx.restore_method_state(saved);
+    cx.self_ty_java = saved_self;
+    if !ok {
+        cx.error(
+            f.syntax(),
+            "manual Hash impl must only hash fields (`self.f.hash(state)`)",
+        );
+        return None;
+    }
+    let call = Expr::call(Expr::raw("Objects"), "hash", inputs);
+    Some(Method {
+        line,
+        header: "public int hashCode()".into(),
+        body: Some(crate::jir::Block {
+            stmts: vec![Stmt::new(
+                line,
+                StmtKind::Return(Some(Expr::raw(crate::emit::render_expr(&call)))),
+            )],
+            close_line,
+        }),
+    })
+}
+
+// `impl Ord`/`impl PartialOrd` -> `compareTo` delegating to the Rust-named method.
+fn compare_to_method(
+    cx: &mut Cx,
+    imp: &ast::Impl,
+    target: &Target,
+    is_ord: bool,
+) -> Option<Method> {
+    let fname = if is_ord { "cmp" } else { "partial_cmp" };
+    let f = find_impl_fn(imp, fname)?;
+    let params: Vec<ast::Param> = f.param_list()?.params().collect();
+    let param = params.first()?;
+    let other_ty = other_param_java(cx, param, target);
+    let other = match param.pat() {
+        Some(ast::Pat::IdentPat(ip)) if ip.pat().is_none() => ip
+            .name()
+            .map(|n| escape_keyword(&n.text().to_string()))
+            .unwrap_or_else(|| "other".into()),
+        _ => "other".into(),
+    };
+    // Printed after the Rust-named method, so it belongs on that method's closing line.
+    let line = cx.end_line(f.syntax());
+    let call = Expr::raw(format!(
+        "{}({other}){}",
+        escape_keyword(fname),
+        if is_ord { "" } else { ".orElse(0)" }
+    ));
+    Some(Method {
+        line,
+        header: format!("public int compareTo({other_ty} {other})"),
+        body: Some(crate::jir::Block {
+            stmts: vec![Stmt::new(line, StmtKind::Return(Some(call)))],
+            close_line: cx.end_line(f.syntax()),
+        }),
+    })
+}
+
+// `impl IndexMut` needs a setter: Java cannot assign through a method call.
+fn index_mut_setter(cx: &mut Cx, f: &ast::Fn, target: &Target) -> Option<Method> {
+    let Some(place) = f
+        .body()
+        .and_then(|b| b.stmt_list())
+        .and_then(|l| l.tail_expr())
+        .and_then(|e| match super::strip_parens(&e) {
+            ast::Expr::RefExpr(r) => r.expr(),
+            _ => None,
+        })
+    else {
+        cx.unsupported(f.syntax(), "impl IndexMut whose body is not `&mut <place>`");
+        return None;
+    };
+    let mut params: Vec<(String, String)> = Vec::new();
+    if let Some(pl) = f.param_list() {
+        for p in pl.params() {
+            let ty = p
+                .ty()
+                .map(|t| cx.type_ref(&t))
+                .unwrap_or(Ty::Other("?".into()));
+            let jty = param_type(cx, &ty);
+            match p.pat() {
+                Some(ast::Pat::IdentPat(ip)) if ip.pat().is_none() => {
+                    let n = ip
+                        .name()
+                        .map(|n| n.text().to_string())
+                        .unwrap_or_else(|| "_".into());
+                    params.push((jty, n));
+                }
+                _ => {
+                    cx.unsupported(f.syntax(), "impl IndexMut with a destructuring parameter");
+                    return None;
+                }
+            }
+        }
+    }
+    let out_ty = cx
+        .sema
+        .to_fn_def(f)
+        .map(|d| cx.convert(&d.ret_type(cx.db)).strip_refs().java())
+        .unwrap_or_else(|| "Object".into());
+    let line = cx.line(f.syntax());
+    let saved_self = std::mem::replace(&mut cx.self_ty_java, target.java.clone());
+    let saved = cx.save_method_state();
+    cx.enter_method();
+    let mut jparams: Vec<String> = Vec::new();
+    for (jty, rust) in &params {
+        let name = cx.declare(rust);
+        jparams.push(format!("{jty} {name}"));
+    }
+    let value = cx.fresh("value");
+    jparams.push(format!("{out_ty} {value}"));
+    let mut prelude = Vec::new();
+    let assign = expr::place_assign(cx, &place, "=", Expr::name(value), &mut prelude);
+    cx.restore_method_state(saved);
+    cx.self_ty_java = saved_self;
+    prelude.push(Stmt::new(
+        line,
+        if assign.is_statement_expr() {
+            StmtKind::Expr(assign)
+        } else {
+            StmtKind::Raw(crate::emit::render_expr(&assign) + ";")
+        },
+    ));
+    Some(Method {
+        line,
+        header: format!("public void index_mut_set({})", jparams.join(", ")),
+        body: Some(crate::jir::Block {
+            stmts: prelude,
+            close_line: cx.end_line(f.syntax()),
+        }),
+    })
+}
+
+// `impl Iterator` -> `stream()` over `next()`, so for loops and stream pipelines work.
+fn stream_method(cx: &mut Cx, imp: &ast::Impl, item: &Ty) -> Method {
+    let line = cx.end_line(imp.syntax());
+    let ret = Expr::raw("Stream.generate(() -> next().orElse(null)).takeWhile(Objects::nonNull)");
+    Method {
+        line,
+        header: format!("public Stream<{}> stream()", item.boxed()),
+        body: Some(crate::jir::Block {
+            stmts: vec![Stmt::new(line, StmtKind::Return(Some(ret)))],
+            close_line: cx.end_line(imp.syntax()),
+        }),
+    }
+}
+
+// `impl Display`/`impl Debug`: `write!(f, ..)` appends to a StringBuilder returned as a String.
+fn write_method(cx: &mut Cx, imp: &ast::Impl, target: &Target, header: &str) -> Option<Method> {
     let list = imp.assoc_item_list()?;
     let fmt_fn = list.assoc_items().find_map(|i| match i {
         ast::AssocItem::Fn(f) if f.name().is_some_and(|n| n.text() == "fmt") => Some(f),
@@ -791,7 +1183,13 @@ fn display_method(cx: &mut Cx, imp: &ast::Impl, target: &Target) -> Option<Metho
         if let Some(tail) = text.tail_expr()
             && tail.syntax().text().to_string() != "Ok(())"
         {
-            stmt::lower_to_dest(cx, &tail, &Dest::Discard, &mut stmts);
+            // `write!(f, ..)` returns the `Ok(())`; only its `f.append(..)` statement matters.
+            match &tail {
+                ast::Expr::MacroExpr(m) => {
+                    let _ = super::macros::lower_macro_expr(cx, m, &mut stmts);
+                }
+                _ => stmt::lower_to_dest(cx, &tail, &Dest::Discard, &mut stmts),
+            }
         }
     }
     let close_line = cx.end_line(fmt_fn.syntax());
@@ -803,7 +1201,7 @@ fn display_method(cx: &mut Cx, imp: &ast::Impl, target: &Target) -> Option<Metho
     cx.self_ty_java = saved_self;
     Some(Method {
         line,
-        header: "public String toString()".into(),
+        header: header.to_string(),
         body: Some(crate::jir::Block { stmts, close_line }),
     })
 }
@@ -898,14 +1296,28 @@ fn lower_fn_inner(
     extra_generics: &[String],
     self_param: Option<(String, String)>,
 ) -> Method {
+    lower_fn_sig(cx, f, modifiers, extra_generics, self_param, None)
+}
+
+fn lower_fn_sig(
+    cx: &mut Cx,
+    f: &ast::Fn,
+    modifiers: &str,
+    extra_generics: &[String],
+    self_param: Option<(String, String)>,
+    ret_override: Option<Ty>,
+) -> Method {
     let saved = cx.save_method_state();
     let line = cx.line(f.syntax());
     cx.enter_method();
     let name = f.name().map(|n| n.text().to_string()).unwrap_or_default();
     let def = cx.sema.to_fn_def(f);
-    let ret = match def {
-        Some(d) => cx.convert(&d.ret_type(cx.db)),
-        None => Ty::Unit,
+    let ret = match ret_override {
+        Some(t) => t,
+        None => match def {
+            Some(d) => cx.convert(&d.ret_type(cx.db)),
+            None => Ty::Unit,
+        },
     };
     let mut params = Vec::new();
     let mut prelude = Vec::new();
@@ -1272,6 +1684,45 @@ pub fn lower_ctor_call(
     Expr::New {
         ty: diamond(cx, &target, &ty),
         args,
+    }
+}
+
+// Calls to `#[derive(..)]`-generated methods: rust-analyzer resolves them to a builtin impl
+// that has no source node, while the generated Java method has a different name.
+pub fn lower_derive_method_call(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    f: Function,
+    out: &mut Vec<Stmt>,
+) -> Option<Expr> {
+    let AssocItemContainer::Impl(imp) = f.as_assoc_item(cx.db)?.container(cx.db) else {
+        return None;
+    };
+    // Real impls have an AST; builtin derives do not.
+    if imp.source(cx.db).is_some() {
+        return None;
+    }
+    let tr = imp.trait_(cx.db)?;
+    let tname = tr.name(cx.db).as_str().to_string();
+    let name = m.name_ref()?.text().to_string();
+    let plain_enum = imp
+        .self_ty(cx.db)
+        .strip_references()
+        .as_adt()
+        .is_some_and(|adt| adt.as_enum().is_some_and(|e| enum_is_plain(cx, e)));
+    let recv = expr::lower_expr(cx, &m.receiver()?, out);
+    let args = expr::call_args(cx, m, out);
+    match (tname.as_str(), name.as_str()) {
+        ("PartialEq", "eq") => Some(Expr::call(recv, "equals", args)),
+        ("PartialEq", "ne") => Some(Expr::Unary("!", Box::new(Expr::call(recv, "equals", args)))),
+        ("Ord" | "PartialOrd", "cmp") => Some(Expr::call(recv, "compareTo", args)),
+        ("PartialOrd", "partial_cmp") => Some(Expr::call(
+            Expr::raw("Optional"),
+            "of",
+            vec![Expr::call(recv, "compareTo", args)],
+        )),
+        ("Clone", "clone") if plain_enum => Some(recv),
+        _ => None,
     }
 }
 

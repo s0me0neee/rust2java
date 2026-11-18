@@ -324,6 +324,15 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
         BinaryOp::LogicOp(LogicOp::And) => Expr::bin(l, "&&", r),
         BinaryOp::LogicOp(LogicOp::Or) => Expr::bin(l, "||", r),
         BinaryOp::CmpOp(CmpOp::Eq { negated }) => {
+            // `Ordering` is a Java int; normalize compareTo's sign magnitude.
+            if *lt.strip_refs() == Ty::Ordering || *rt.strip_refs() == Ty::Ordering {
+                let eq = Expr::bin(
+                    Expr::call(Expr::raw("Integer"), "signum", vec![l]),
+                    if negated { "!=" } else { "==" },
+                    Expr::call(Expr::raw("Integer"), "signum", vec![r]),
+                );
+                return eq;
+            }
             if lt.is_primitive() && rt.is_primitive() {
                 Expr::bin(l, if negated { "!=" } else { "==" }, r)
             } else {
@@ -342,7 +351,13 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
                 (ast::Ordering::Greater, true) => ">",
                 (ast::Ordering::Greater, false) => ">=",
             };
-            if lt.is_primitive() {
+            if *lt.strip_refs() == Ty::Ordering {
+                Expr::bin(
+                    Expr::call(Expr::raw("Integer"), "signum", vec![l]),
+                    sym,
+                    Expr::call(Expr::raw("Integer"), "signum", vec![r]),
+                )
+            } else if lt.is_primitive() {
                 Expr::bin(l, sym, r)
             } else {
                 Expr::bin(Expr::call(l, "compareTo", vec![r]), sym, Expr::raw("0"))
@@ -351,6 +366,10 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
         BinaryOp::ArithOp(a) => {
             if let Ty::Adt { .. } = lt.strip_refs() {
                 return Expr::call(l, op_trait_method(a), vec![r]);
+            }
+            if matches!(rt.strip_refs(), Ty::Adt { .. }) {
+                // `impl Mul<V2> for f64` would need a free function; keep it explicit.
+                return cx.unsupported(b.syntax(), "a user type on the right of an operator");
             }
             let sym = arith_symbol(a, &lt);
             let v = Expr::bin(l, sym, r);
@@ -457,8 +476,27 @@ pub fn place_assign(
                 return cx.unsupported(lhs.syntax(), "index assignment");
             };
             let bt = cx.ty(&base);
-            let b = lower_expr(cx, &base, out);
+            let mut b = lower_expr(cx, &base, out);
             let i = lower_expr(cx, &index, out);
+            // `impl Deref` newtypes assign through their target.
+            let mut bt = bt.clone();
+            if let Some(target) = super::traits::deref_target(cx, &bt) {
+                b = Expr::call(b, "deref", vec![]);
+                bt = target;
+            }
+            if matches!(bt.strip_refs(), Ty::Adt { .. }) {
+                let value = if sym == "=" {
+                    r
+                } else {
+                    let cur = Expr::call(b.clone(), "index", vec![i.clone()]);
+                    let elem_ty = cx.ty(lhs);
+                    narrow_if_needed(
+                        Expr::bin(cur, static_op(sym.trim_end_matches('=')), r),
+                        &elem_ty,
+                    )
+                };
+                return Expr::call(b, "index_mut_set", vec![i, value]);
+            }
             let setter = if matches!(bt.strip_refs(), Ty::Map { .. }) {
                 "put"
             } else {
@@ -542,6 +580,8 @@ fn lower_prefix(cx: &mut Cx, p: &ast::PrefixExpr, out: &mut Vec<Stmt>) -> Expr {
         Some(ast::UnaryOp::Not) => {
             if ty.strip_refs() == &Ty::Bool {
                 Expr::Unary("!", Box::new(v))
+            } else if matches!(ty.strip_refs(), Ty::Adt { .. }) {
+                Expr::call(v, "not", vec![])
             } else {
                 Expr::Unary("~", Box::new(v))
             }
@@ -628,11 +668,25 @@ fn lower_index(cx: &mut Cx, i: &ast::IndexExpr, out: &mut Vec<Stmt>) -> Expr {
         let b = lower_expr(cx, &base, out);
         return std_map::lower_slice_range(cx, b, &bt, r, out);
     }
+    // `impl Deref` newtypes index through their target.
+    if let Some(target) = super::traits::deref_target(cx, &bt) {
+        let b = Expr::call(lower_expr(cx, &base, out), "deref", vec![]);
+        let ix = lower_expr(cx, &index, out);
+        return match target.strip_refs() {
+            Ty::Str => Expr::call(b, "charAt", vec![ix]),
+            _ => Expr::call(b, "get", vec![ix]),
+        };
+    }
+    if matches!(bt.strip_refs(), Ty::Adt { .. }) {
+        let b = lower_expr(cx, &base, out);
+        let ix = lower_expr(cx, &index, out);
+        return Expr::call(b, "index", vec![ix]);
+    }
     if !matches!(
         bt.strip_refs(),
         Ty::Vec(_) | Ty::Deque(_) | Ty::Map { .. } | Ty::Str
     ) {
-        return cx.unsupported(i.syntax(), "indexing a user type (`impl Index`)");
+        return cx.unsupported(i.syntax(), "indexing this type");
     }
     let b = lower_expr(cx, &base, out);
     let ix = lower_expr(cx, &index, out);

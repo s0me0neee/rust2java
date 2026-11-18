@@ -641,9 +641,42 @@ pub(super) fn lower_ordering_method(
     recv: Expr,
     args: Vec<Expr>,
     name: &str,
+    line: u32,
+    out: &mut Vec<Stmt>,
 ) -> Option<Expr> {
-    let _ = (cx, args);
+    let arg0 = args.first().cloned().unwrap_or_else(|| Expr::raw("0"));
+    // `then*` reads the receiver twice; hoist anything with side effects.
+    let mut once = |recv: Expr| -> Expr {
+        if matches!(recv, Expr::Raw(_) | Expr::Name(_)) {
+            return recv;
+        }
+        let tmp = cx.fresh("ord");
+        out.push(Stmt::new(
+            line,
+            StmtKind::Local {
+                ty: "int".into(),
+                name: tmp.clone(),
+                init: Some(recv),
+            },
+        ));
+        Expr::name(tmp)
+    };
+    let zero_check = |v: &Expr| Expr::bin(v.clone(), "!=", Expr::raw("0"));
     Some(match name {
+        // `a.then(b)` / `a.then_with(|| b)`: keep `a` unless it is Equal.
+        "then" => {
+            let v = once(recv);
+            Expr::Ternary(Box::new(zero_check(&v)), Box::new(v), Box::new(arg0))
+        }
+        "then_with" => {
+            let v = once(recv);
+            let f = Expr::call(
+                Expr::Cast("Supplier<Integer>".into(), Box::new(arg0)),
+                "get",
+                vec![],
+            );
+            Expr::Ternary(Box::new(zero_check(&v)), Box::new(v), Box::new(f))
+        }
         "is_lt" => Expr::bin(recv, "<", Expr::raw("0")),
         "is_le" => Expr::bin(recv, "<=", Expr::raw("0")),
         "is_gt" => Expr::bin(recv, ">", Expr::raw("0")),

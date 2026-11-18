@@ -1,5 +1,7 @@
 // Std mem::{swap, replace, take, drop}, size_of.
 
+use ra_ap_syntax::ast::HasGenericArgs;
+
 use super::*;
 
 // Hook for std free functions (`key` as built by `calls::std_fn_key`, e.g. `Rc::new`).
@@ -92,4 +94,51 @@ pub(super) fn mem_replace(
     out.push(Stmt::new(line, StmtKind::Expr(assign)));
     let _ = ret;
     Expr::name(tmp)
+}
+
+// `mem::size_of::<T>()`: Rust's sizes for the primitive (and pointer) types.
+pub(super) fn mem_size_of(cx: &mut Cx, c: &ast::CallExpr) -> Expr {
+    let ty = c
+        .expr()
+        .and_then(|e| match e {
+            ast::Expr::PathExpr(p) => p.path(),
+            _ => None,
+        })
+        .and_then(|p| p.segment())
+        .and_then(|s| s.generic_arg_list())
+        .and_then(|list| {
+            list.generic_args().find_map(|a| match a {
+                ast::GenericArg::TypeArg(t) => t.ty(),
+                _ => None,
+            })
+        })
+        .map(|t| cx.type_ref(&t));
+    let Some(ty) = ty else {
+        return cx.unsupported(c.syntax(), "mem::size_of without a type argument");
+    };
+    match rust_size(&ty) {
+        Some(n) => Expr::raw(format!("{n}")),
+        None => cx.unsupported(c.syntax(), "mem::size_of for this type"),
+    }
+}
+
+fn rust_size(ty: &Ty) -> Option<u64> {
+    Some(match ty {
+        Ty::Unit => 0,
+        Ty::Never => 0,
+        Ty::Bool => 1,
+        Ty::Char => 4,
+        Ty::Int(i) => match i {
+            Int::I8 | Int::U8 => 1,
+            Int::I16 | Int::U16 => 2,
+            Int::I32 | Int::U32 => 4,
+            Int::I64 | Int::U64 => 8,
+            Int::I128 | Int::U128 => 16,
+            Int::Isize | Int::Usize => 8,
+        },
+        Ty::F32 => 4,
+        Ty::F64 => 8,
+        Ty::Ref { .. } => 8,
+        _ => return None,
+    })
 }

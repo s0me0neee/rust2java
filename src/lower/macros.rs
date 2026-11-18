@@ -161,6 +161,10 @@ fn lower_write(cx: &mut Cx, mc: &ast::MacroCall, out: &mut Vec<Stmt>) -> Expr {
         return cx.unsupported(mc.syntax(), "write! target type");
     };
     out.push(Stmt::new(cx.line(mc.syntax()), StmtKind::Expr(write)));
+    // Inside `impl Display`/`Debug` the `Result` is dropped (even through `?`).
+    if cx.in_display {
+        return Expr::raw("null");
+    }
     cx.needs_result = true;
     Expr::New {
         ty: "Ok<>".into(),

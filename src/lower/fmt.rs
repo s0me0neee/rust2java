@@ -954,6 +954,7 @@ pub fn debug_supported(ty: &Ty) -> bool {
         | Ty::F32
         | Ty::F64
         | Ty::Str
+        | Ty::Ordering
         | Ty::Adt { .. } => true,
         Ty::Vec(t) | Ty::Set { t, .. } | Ty::Deque(t) | Ty::Option(t) => debug_supported(t),
         Ty::Map { k, v, .. } | Ty::Result(k, v) => debug_supported(k) && debug_supported(v),
@@ -1298,6 +1299,15 @@ pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
         Ty::Str => debug_quote(cx, v, '"'),
         Ty::Char => debug_quote(cx, v, '\''),
         Ty::F32 | Ty::F64 => debug_float(cx, v),
+        Ty::Ordering => Expr::Ternary(
+            Box::new(Expr::bin(v.clone(), "<", Expr::raw("0"))),
+            Box::new(Expr::str_lit("Less")),
+            Box::new(Expr::Ternary(
+                Box::new(Expr::bin(v, ">", Expr::raw("0"))),
+                Box::new(Expr::str_lit("Greater")),
+                Box::new(Expr::str_lit("Equal")),
+            )),
+        ),
         Ty::Vec(inner) | Ty::Deque(inner) => debug_sequence(cx, v, inner, "[", "]"),
         Ty::Set { t, .. } => debug_sequence(cx, v, t, "{", "}"),
         Ty::Map { k, v: value, .. } => {

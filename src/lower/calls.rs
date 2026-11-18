@@ -157,6 +157,9 @@ pub fn lower_method_call(cx: &mut Cx, m: &ast::MethodCallExpr, out: &mut Vec<Stm
         if let Some(e) = items::lower_foreign_impl_call(cx, m, f, out) {
             return e;
         }
+        if let Some(e) = items::lower_derive_method_call(cx, m, f, out) {
+            return e;
+        }
         let recv = expr::lower_expr(cx, &recv_ast, out);
         let args = expr::call_args(cx, m, out);
         return Expr::call(recv, escape_keyword(&name), args);
