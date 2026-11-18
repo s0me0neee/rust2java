@@ -244,7 +244,12 @@ fn lower_for_kind(
         };
     }
 
-    let elem_ty = cx.pat_ty(p);
+    // A line-mode stdin `lines()` stream carries plain Strings, not phantom `Result`s.
+    let elem_ty = if super::std_map::io::plain_lines_iterable(cx, iterable) {
+        Ty::Str
+    } else {
+        cx.pat_ty(p)
+    };
     let it_ty = cx.ty(iterable);
     let iter = for_each_source(cx, iterable, &it_ty, &elem_ty, out);
     let (name, mut binds) = match simple_ident(p) {
@@ -405,10 +410,17 @@ fn for_each_source(
         );
     }
     match it_ty.strip_refs() {
-        Ty::Iter(t) => Expr::Cast(
-            format!("Iterable<{}>", t.boxed()),
-            Box::new(Expr::raw(format!("{}::iterator", render(&src)))),
-        ),
+        Ty::Iter(t) => {
+            let t = if super::std_map::io::plain_lines_iterable(cx, iterable) {
+                elem_ty.clone()
+            } else {
+                (**t).clone()
+            };
+            Expr::Cast(
+                format!("Iterable<{}>", t.boxed()),
+                Box::new(Expr::raw(format!("{}::iterator", render(&src)))),
+            )
+        }
         other => collection_iterable(src, other),
     }
 }
@@ -560,10 +572,11 @@ pub fn lower_iter_let(
         return false;
     }
     let line = cx.line(l.syntax());
+    let plain = super::std_map::io::plain_iterator(cx, &init, local, &scope);
     let src = expr::lower_expr(cx, &init, out);
     let name = cx.declare(rust_name);
     let items = cx.fresh(&format!("{name}_items"));
-    let b = item.boxed();
+    let b = if plain { Ty::Str.boxed() } else { item.boxed() };
     out.push(Stmt::new(
         line,
         StmtKind::Local {
@@ -800,7 +813,8 @@ fn lower_source(
                 super::std_map::bytes_stream(cx, recv)
             } else {
                 let line_mode = super::std_map::io::is_line_stdin(cx, &recv_ast);
-                super::std_map::lines_stream(cx, recv, line_mode)
+                let plain = super::std_map::io::plain_lines(cx, m);
+                super::std_map::lines_stream(cx, recv, line_mode, plain)
             }
         }
         (Ty::Str, "split_whitespace" | "split_ascii_whitespace") => {
@@ -1055,6 +1069,10 @@ fn lower_adaptor(
     }
 
     let src = expr::lower_expr(cx, recv_ast, out);
+    // `lines().flatten()`, `lines().map(|l| l.unwrap())`: the items are already plain Strings.
+    if super::std_map::io::plain_adaptor(cx, name, m, recv_ast) {
+        return src;
+    }
     lower_adaptor_core(cx, m, name, src, item, ret_ty, line, out)
 }
 

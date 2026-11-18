@@ -1,6 +1,8 @@
 // Std stdin/stdout/stderr, BufRead/Write, fs, env, process, time.
 
 use super::*;
+use crate::lower::strip_parens;
+use ra_ap_syntax::ast::{HasLoopBody, HasName};
 
 // Hook for std free functions (`key` as built by `calls::std_fn_key`, e.g. `Rc::new`).
 pub(super) fn fn_call(
@@ -113,7 +115,7 @@ fn read_into(cx: &mut Cx, m: &ast::MethodCallExpr, to_string: bool, out: &mut Ve
         return read_line_mode(cx, m, to_string, &rs, &ps, line, out);
     }
     cx.import("java.nio.charset.StandardCharsets");
-    let rs = format!("((InputStream) {})", render(&rdr));
+    let rs = input_stream(&rdr);
     let text = cx.fresh("text");
     let ch = cx.fresh("ch");
     let ex = cx.fresh("ex");
@@ -221,7 +223,7 @@ fn read_to_end(cx: &mut Cx, m: &ast::MethodCallExpr, out: &mut Vec<Stmt>) -> Exp
     let rdr = lower_receiver(cx, m, out);
     let place = line_arg(cx, m, out).unwrap_or_else(|| Expr::raw("null"));
     cx.import("java.io.*");
-    let r = format!("((InputStream) {})", render(&rdr));
+    let r = input_stream(&rdr);
     let bytes = cx.fresh("bytes");
     let i = cx.fresh("i");
     let ex = cx.fresh("ex");
@@ -265,7 +267,7 @@ fn read_bytes(cx: &mut Cx, m: &ast::MethodCallExpr, out: &mut Vec<Stmt>) -> Expr
     let rdr = lower_receiver(cx, m, out);
     let place = render(&line_arg(cx, m, out).unwrap_or_else(|| Expr::raw("null")));
     cx.import("java.io.*");
-    let r = format!("((InputStream) {})", render(&rdr));
+    let r = input_stream(&rdr);
     let (bytes, count, i, ex) = (
         cx.fresh("bytes"),
         cx.fresh("count"),
@@ -721,19 +723,33 @@ pub(super) fn fs_write(
     Expr::name(n)
 }
 
+// stdin is already an InputStream, so its byte reads need no cast.
+fn input_stream(recv: &Expr) -> String {
+    let text = render(recv);
+    if text == "STDIN" {
+        text
+    } else {
+        format!("((InputStream) {text})")
+    }
+}
+
 // Split only on LF, stripping CR only in CRLF, just like Rust's BufRead::lines.
-pub(crate) fn lines_stream(cx: &mut Cx, recv: Expr, line_mode: bool) -> Expr {
-    cx.needs_result = true;
+pub(crate) fn lines_stream(cx: &mut Cx, recv: Expr, line_mode: bool, plain: bool) -> Expr {
     cx.import("java.io.*");
     if line_mode {
-        return Expr::call(
-            recv,
-            "lines().<Result<String, Object>>map",
-            vec![Expr::raw("Ok::new")],
-        );
+        if !plain {
+            cx.needs_result = true;
+            return Expr::call(
+                recv,
+                "lines().<Result<String, Object>>map",
+                vec![Expr::raw("Ok::new")],
+            );
+        }
+        return Expr::call(recv, "lines", vec![]);
     }
+    cx.needs_result = true;
     cx.import("java.nio.charset.StandardCharsets");
-    let r = format!("((InputStream) {})", render(&recv));
+    let r = input_stream(&recv);
     let text = cx.fresh("text");
     let ch = cx.fresh("ch");
     let bytes = cx.fresh("bytes");
@@ -748,12 +764,306 @@ pub(crate) fn lines_stream(cx: &mut Cx, recv: Expr, line_mode: bool) -> Expr {
 pub(crate) fn bytes_stream(cx: &mut Cx, recv: Expr) -> Expr {
     cx.needs_result = true;
     cx.import("java.io.*");
-    let r = format!("((InputStream) {})", render(&recv));
+    let r = input_stream(&recv);
     let ex = cx.fresh("ex");
     let b = cx.fresh("b");
     Expr::raw(format!(
         "Stream.<Result<Integer, Object>>generate(() -> {{ try {{ return new Ok<>({r}.read()); }} catch (IOException {ex}) {{ return new Err<>({ex}); }} }}).takeWhile({b} -> {b}.is_err() || {b}.unwrap() != -1)"
     ))
+}
+
+// ---- line-mode `lines()` items --------------------------------------------------------------
+//
+// `STDIN.lines()` never yields an Err, so when a program only ever unwraps the items the Java
+// stream can carry plain Strings and the entire Result wrapper disappears. An I/O failure becomes
+// an UncheckedIOException instead of an Err item (accepted: both abort the program).
+
+fn is_lines_call(cx: &Cx, m: &ast::MethodCallExpr) -> bool {
+    method_name(m) == "lines" && m.receiver().is_some_and(|r| is_line_stdin(cx, &r))
+}
+
+fn lines_call(cx: &Cx, e: &ast::Expr) -> Option<ast::MethodCallExpr> {
+    match strip_parens(e) {
+        ast::Expr::MethodCallExpr(m) if is_lines_call(cx, &m) => Some(m),
+        _ => None,
+    }
+}
+
+fn first_arg(m: &ast::MethodCallExpr) -> Option<ast::Expr> {
+    m.arg_list().and_then(|al| al.args().next())
+}
+
+fn is_receiver(m: &ast::MethodCallExpr, node: &ra_ap_syntax::SyntaxNode) -> bool {
+    m.receiver()
+        .is_some_and(|r| r.syntax().text_range() == node.text_range())
+}
+
+fn is_result_ok(a: &ast::Expr) -> bool {
+    matches!(strip_parens(a), ast::Expr::PathExpr(p)
+        if p.path().is_some_and(|p| p.syntax().text().to_string().ends_with("Result::ok")))
+}
+
+// `|l| l.unwrap()` / `|l| l.expect(..)`: the closure only strips the phantom Result.
+fn closure_unwraps_param(cx: &Cx, a: &ast::Expr) -> bool {
+    let ast::Expr::ClosureExpr(c) = strip_parens(a) else {
+        return false;
+    };
+    let Some(ast::Pat::IdentPat(ip)) = c
+        .param_list()
+        .and_then(|pl| pl.params().next())
+        .and_then(|p| p.pat())
+    else {
+        return false;
+    };
+    let Some(local) = cx.sema.to_def(&ip) else {
+        return false;
+    };
+    let Some(ast::Expr::MethodCallExpr(m)) = c.body().map(|b| strip_parens(&b)) else {
+        return false;
+    };
+    matches!(method_name(&m).as_str(), "unwrap" | "expect")
+        && m.receiver()
+            .is_some_and(|r| cx.local_of_path(&r) == Some(local))
+}
+
+// A use of a loop binding that only strips the phantom Result (`line.unwrap()`, `line?`).
+fn unwraps_only(pe: &ast::PathExpr) -> bool {
+    let parent = pe.syntax().parent();
+    if parent
+        .as_ref()
+        .is_some_and(|p| ast::TryExpr::can_cast(p.kind()))
+    {
+        return true;
+    }
+    let Some(m) = parent.and_then(ast::MethodCallExpr::cast) else {
+        return false;
+    };
+    matches!(method_name(&m).as_str(), "unwrap" | "expect") && is_receiver(&m, pe.syntax())
+}
+
+fn for_uses_unwrap(cx: &Cx, f: &ast::ForExpr) -> bool {
+    let (Some(ast::Pat::IdentPat(ip)), Some(body), Some(iter)) =
+        (f.pat(), f.loop_body(), f.iterable())
+    else {
+        return false;
+    };
+    if lines_call(cx, &iter).is_none() {
+        return false;
+    }
+    let Some(local) = cx.sema.to_def(&ip) else {
+        return false;
+    };
+    let mut uses = 0;
+    for node in cx.expanded_descendants(body.syntax()) {
+        let Some(pe) = ast::PathExpr::cast(node) else {
+            continue;
+        };
+        if cx.local_of_path(&ast::Expr::PathExpr(pe.clone())) != Some(local) {
+            continue;
+        }
+        uses += 1;
+        if !unwraps_only(&pe) {
+            return false;
+        }
+    }
+    uses > 0
+}
+
+// `lines()` items are plain Strings when the consumer only ever unwraps them.
+pub(crate) fn plain_lines(cx: &Cx, m: &ast::MethodCallExpr) -> bool {
+    if !is_lines_call(cx, m) {
+        return false;
+    }
+    let Some(parent) = m.syntax().parent() else {
+        return false;
+    };
+    if let Some(f) = ast::ForExpr::cast(parent.clone()) {
+        return for_uses_unwrap(cx, &f);
+    }
+    // A pulled iterator (`let mut it = ..lines();`) whose every use is `next()` + unwraps.
+    if let Some(l) = ast::LetStmt::cast(parent.clone()) {
+        let Some(ast::Pat::IdentPat(ip)) = l.pat() else {
+            return false;
+        };
+        let Some(local) = cx.sema.to_def(&ip) else {
+            return false;
+        };
+        let Some(scope) = cx.enclosing_fn(ip.syntax()) else {
+            return false;
+        };
+        let init = ast::Expr::MethodCallExpr(m.clone());
+        return plain_iterator(cx, &init, local, &scope);
+    }
+    let Some(c) = ast::MethodCallExpr::cast(parent) else {
+        return false;
+    };
+    match method_name(&c).as_str() {
+        "flatten" => true,
+        "map" | "inspect" => first_arg(&c).is_some_and(|a| closure_unwraps_param(cx, &a)),
+        "map_while" => first_arg(&c).is_some_and(|a| is_result_ok(&a)),
+        _ => false,
+    }
+}
+
+// The same decision, from the `for` loop's iterable expression.
+pub(crate) fn plain_lines_iterable(cx: &Cx, iterable: &ast::Expr) -> bool {
+    lines_call(cx, iterable).is_some_and(|m| plain_lines(cx, &m))
+}
+
+// The adaptor that would unwrap the phantom Result is dropped entirely.
+pub(crate) fn plain_adaptor(
+    cx: &Cx,
+    name: &str,
+    m: &ast::MethodCallExpr,
+    recv_ast: &ast::Expr,
+) -> bool {
+    let Some(lines) = lines_call(cx, recv_ast) else {
+        return false;
+    };
+    if !plain_lines(cx, &lines) {
+        return false;
+    }
+    match name {
+        "flatten" => true,
+        "map" | "inspect" => first_arg(m).is_some_and(|a| closure_unwraps_param(cx, &a)),
+        "map_while" => first_arg(m).is_some_and(|a| is_result_ok(&a)),
+        _ => false,
+    }
+}
+
+// `let mut it = stdin.lines();` when every use pulls `it.next().unwrap().unwrap()`.
+pub(crate) fn plain_iterator(
+    cx: &Cx,
+    init: &ast::Expr,
+    local: ra_ap_hir::Local<'_>,
+    scope: &ra_ap_syntax::SyntaxNode,
+) -> bool {
+    if lines_call(cx, init).is_none() {
+        return false;
+    }
+    let mut uses = 0;
+    for node in cx.expanded_descendants(scope) {
+        let Some(pe) = ast::PathExpr::cast(node) else {
+            continue;
+        };
+        if cx.local_of_path(&ast::Expr::PathExpr(pe.clone())) != Some(local) {
+            continue;
+        }
+        uses += 1;
+        if !next_double_unwrap(&pe) {
+            return false;
+        }
+    }
+    uses > 0
+}
+
+fn next_double_unwrap(pe: &ast::PathExpr) -> bool {
+    let Some(next) = pe.syntax().parent().and_then(ast::MethodCallExpr::cast) else {
+        return false;
+    };
+    if method_name(&next) != "next" || !is_receiver(&next, pe.syntax()) {
+        return false;
+    }
+    let Some(first) = next.syntax().parent().and_then(ast::MethodCallExpr::cast) else {
+        return false;
+    };
+    if !matches!(method_name(&first).as_str(), "unwrap" | "expect") {
+        return false;
+    }
+    first
+        .syntax()
+        .parent()
+        .and_then(ast::MethodCallExpr::cast)
+        .is_some_and(|second| matches!(method_name(&second).as_str(), "unwrap" | "expect"))
+}
+
+fn local_ident(cx: &Cx, local: ra_ap_hir::Local<'_>) -> Option<ast::IdentPat> {
+    local.primary_source(cx.db).into_ident_pat()
+}
+
+fn local_is_plain_iterator(cx: &Cx, local: ra_ap_hir::Local<'_>) -> bool {
+    let Some(ip) = local_ident(cx, local) else {
+        return false;
+    };
+    let Some(l) = ip.syntax().parent().and_then(ast::LetStmt::cast) else {
+        return false;
+    };
+    let Some(init) = l.initializer() else {
+        return false;
+    };
+    let Some(scope) = cx.enclosing_fn(ip.syntax()) else {
+        return false;
+    };
+    plain_iterator(cx, &init, local, &scope)
+}
+
+// Is this `Result<String, _>` expression actually a plain line of a line-mode stdin stream?
+pub(crate) fn phantom_line_result(cx: &Cx, e: &ast::Expr) -> bool {
+    match strip_parens(e) {
+        ast::Expr::PathExpr(pe) => {
+            let Some(local) = cx.local_of_path(&ast::Expr::PathExpr(pe.clone())) else {
+                return false;
+            };
+            if !matches!(cx.ty(e).strip_refs(), Ty::Result(ok, _) if ok.is_str()) {
+                return false;
+            }
+            let Some(ip) = local_ident(cx, local) else {
+                return false;
+            };
+            match ip.syntax().parent() {
+                Some(p) if ast::ForExpr::can_cast(p.kind()) => ast::ForExpr::cast(p)
+                    .and_then(|f| f.iterable())
+                    .is_some_and(|it| plain_lines_iterable(cx, &it)),
+                Some(p) if ast::Param::can_cast(p.kind()) => p
+                    .ancestors()
+                    .find_map(ast::ClosureExpr::cast)
+                    .and_then(|c| c.syntax().parent())
+                    .and_then(ast::MethodCallExpr::cast)
+                    .is_some_and(|call| {
+                        matches!(
+                            method_name(&call).as_str(),
+                            "map" | "inspect" | "filter_map"
+                        ) && call
+                            .receiver()
+                            .is_some_and(|r| plain_lines_iterable(cx, &r))
+                    }),
+                Some(p) if ast::LetStmt::can_cast(p.kind()) => local_is_plain_iterator(cx, local),
+                _ => false,
+            }
+        }
+        ast::Expr::MethodCallExpr(m) if matches!(method_name(&m).as_str(), "unwrap" | "expect") => {
+            m.receiver().is_some_and(|r| phantom_line_result(cx, &r))
+        }
+        ast::Expr::MethodCallExpr(m) if method_name(&m) == "next" => m
+            .receiver()
+            .and_then(|r| cx.local_of_path(&r))
+            .is_some_and(|local| local_is_plain_iterator(cx, local)),
+        _ => false,
+    }
+}
+
+// `let line = line.unwrap();` on such a loop: the binding already names the loop variable.
+pub(crate) fn phantom_line_let(cx: &Cx, init: &ast::Expr) -> Option<String> {
+    let recv = match strip_parens(init) {
+        ast::Expr::MethodCallExpr(m) if matches!(method_name(&m).as_str(), "unwrap" | "expect") => {
+            m.receiver()?
+        }
+        ast::Expr::TryExpr(t) => t.expr()?,
+        _ => return None,
+    };
+    if !phantom_line_result(cx, &recv) {
+        return None;
+    }
+    let local = cx.local_of_path(&recv)?;
+    let ip = local_ident(cx, local)?;
+    if !ip
+        .syntax()
+        .parent()
+        .is_some_and(|p| ast::ForExpr::can_cast(p.kind()))
+    {
+        return None;
+    }
+    Some(cx.lookup(&ip.name()?.text().to_string()))
 }
 
 // Byte-level reads need stdin as an InputStream; otherwise it can be a line reader.

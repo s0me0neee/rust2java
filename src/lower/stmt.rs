@@ -165,6 +165,14 @@ pub fn lower_let(cx: &mut Cx, l: &ast::LetStmt, out: &mut Vec<Stmt>) {
             return;
         }
     }
+    // `let line = line.unwrap();` on a line-mode stdin loop: the binding already names a String.
+    if ip.mut_token().is_none()
+        && let Some(init) = l.initializer()
+        && let Some(java) = super::std_map::io::phantom_line_let(cx, &init)
+    {
+        cx.declare_as(&rust_name, &java);
+        return;
+    }
     if matches!(ty, Ty::Iter(_)) && super::iter::lower_iter_let(cx, l, ip, &rust_name, &ty, out) {
         return;
     }

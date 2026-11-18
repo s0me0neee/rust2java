@@ -321,6 +321,10 @@ pub(super) fn lower_result_method(
     out: &mut Vec<Stmt>,
 ) -> Option<Expr> {
     let b0 = args.first().cloned().unwrap_or_else(|| Expr::raw("null"));
+    // A line of a line-mode stdin `lines()` stream is a plain String at runtime.
+    if matches!(name, "unwrap" | "expect") && super::io::phantom_line_result(cx, recv_ast) {
+        return Some(recv);
+    }
     // A `read_to_string()` receiver already lowered to the unwrapped value when it saw
     // the `.unwrap()` call; pass it through.
     if matches!(name, "unwrap" | "expect") && is_unwrapped_source(cx, recv_ast) {

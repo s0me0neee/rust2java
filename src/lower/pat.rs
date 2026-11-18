@@ -1797,6 +1797,12 @@ pub fn lower_try(cx: &mut Cx, t: &ast::TryExpr, out: &mut Vec<Stmt>) -> Expr {
     {
         return expr::lower_expr(cx, &inner, out);
     }
+    // `?` on a plain line of a line-mode stdin stream cannot fail.
+    if let Some(inner) = t.expr()
+        && crate::lower::std_map::io::phantom_line_result(cx, &inner)
+    {
+        return expr::lower_expr(cx, &inner, out);
+    }
     let line = cx.line(t.syntax());
     let Some(inner) = t.expr() else {
         return cx.unsupported(t.syntax(), "`?` without an operand");
