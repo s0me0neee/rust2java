@@ -274,13 +274,9 @@ pub(super) fn lower_str_method(
     match name {
         "len" => return Some(Expr::call(recv, "length", vec![])),
         "is_empty" => return Some(Expr::call(recv, "isEmpty", vec![])),
-        "push_str" => {
-            let v = Expr::bin(recv, "+", b0);
-            return Some(expr::place_assign(cx, recv_ast, "=", v, out));
-        }
-        "push" => {
-            let v = Expr::bin(recv, "+", b0);
-            return Some(expr::place_assign(cx, recv_ast, "=", v, out));
+        "push_str" | "push" => {
+            let _ = recv;
+            return Some(expr::place_assign(cx, recv_ast, "+=", b0, out));
         }
         "clear" => {
             return Some(expr::place_assign(

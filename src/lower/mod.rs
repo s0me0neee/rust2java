@@ -77,6 +77,12 @@ pub struct Cx<'a, 'db> {
     pub macro_method_defs: Vec<crate::jir::Method>,
     // While lowering such a method: expansion tree root and expansion offset -> definition line.
     pub macro_lines: Option<(SyntaxNode, HashMap<u32, u32>)>,
+    // `env::args()` was used, so the entry point keeps the command-line arguments.
+    pub uses_args: bool,
+    // No byte-level reads anywhere in the file: stdin is a `BufferedReader` read by lines.
+    pub stdin_lines: bool,
+    // The array literal being lowered initializes a binding that is only ever read: `List.of`.
+    pub read_only_literal: bool,
 }
 
 // Per-method state saved around lowering a nested method (a macro method generated mid-body).
@@ -166,7 +172,11 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         macro_methods: HashMap::new(),
         macro_method_defs: Vec::new(),
         macro_lines: None,
+        uses_args: false,
+        stdin_lines: false,
+        read_only_literal: false,
     };
+    cx.stdin_lines = !std_map::io::has_byte_reads(&cx, file.syntax());
     let comments = collect_comments(&cx, file.syntax());
     let last_line = text.trim_end().lines().count().max(1) as u32;
     let class = items::lower_source_file(&mut cx, &file, unit.is_root);
@@ -365,7 +375,7 @@ impl<'a, 'db> Cx<'a, 'db> {
                 .syntax()
                 .parent()
                 .and_then(ast::RefExpr::cast)
-                .is_some_and(|r| r.mut_token().is_some());
+                .is_some_and(|r| r.mut_token().is_some() && !is_inline_read_arg(&r));
             let in_closure = pe
                 .syntax()
                 .ancestors()
@@ -381,6 +391,47 @@ impl<'a, 'db> Cx<'a, 'db> {
             }
         }
         false
+    }
+
+    // An immutable binding whose value is only read (method receiver, `&x`, `x[i]`, `for .. in x`)
+    // and never moved, so it can hold an unmodifiable Java list.
+    pub fn binding_read_only(&self, ip: &ast::IdentPat) -> bool {
+        if ip.mut_token().is_some() || ip.ref_token().is_some() {
+            return false;
+        }
+        let Some(local) = self.sema.to_def(ip) else {
+            return false;
+        };
+        let Some(scope) = self.enclosing_fn(ip.syntax()) else {
+            return false;
+        };
+        self.expanded_descendants(&scope)
+            .into_iter()
+            .filter_map(ast::PathExpr::cast)
+            .filter(|pe| {
+                pe.path().is_some_and(|path| {
+                    matches!(self.sema.resolve_path(&path), Some(ra_ap_hir::PathResolution::Local(l)) if l == local)
+                })
+            })
+            .all(|pe| {
+                let me = pe.syntax().clone();
+                let Some(parent) = me.parent() else {
+                    return false;
+                };
+                if let Some(r) = ast::RefExpr::cast(parent.clone()) {
+                    return r.mut_token().is_none();
+                }
+                if let Some(m) = ast::MethodCallExpr::cast(parent.clone()) {
+                    return m.receiver().is_some_and(|r| r.syntax() == &me);
+                }
+                if let Some(i) = ast::IndexExpr::cast(parent.clone()) {
+                    return i.base().is_some_and(|b| b.syntax() == &me);
+                }
+                if let Some(f) = ast::ForExpr::cast(parent) {
+                    return f.iterable().is_some_and(|it| it.syntax() == &me);
+                }
+                false
+            })
     }
 
     // Whether any closure (not containing the binding itself) refers to this binding.
@@ -534,6 +585,13 @@ impl<'a, 'db> Cx<'a, 'db> {
         name
     }
 
+    // Makes `rust` stand for existing Java text (e.g. `STDIN`) in the current scope.
+    pub fn declare_as(&mut self, rust: &str, java: &str) {
+        if let Some(s) = self.scopes.last_mut() {
+            s.insert(rust.to_string(), java.to_string());
+        }
+    }
+
     pub fn lookup(&self, rust: &str) -> String {
         for a in self.aliases.iter().rev() {
             if let Some(n) = a.get(rust) {
@@ -585,6 +643,18 @@ impl<'a, 'db> Cx<'a, 'db> {
     pub fn import(&mut self, imp: &str) {
         self.imports.insert(imp.to_string());
     }
+}
+
+// `r.read_line(&mut s)` / `read_to_string(&mut s)` are lowered in place as `s += ...`, so the
+// borrow never leaves the statement and `s` can stay a plain local.
+fn is_inline_read_arg(r: &ast::RefExpr) -> bool {
+    r.syntax()
+        .parent()
+        .filter(|p| ast::ArgList::can_cast(p.kind()))
+        .and_then(|p| p.parent())
+        .and_then(ast::MethodCallExpr::cast)
+        .and_then(|m| m.name_ref())
+        .is_some_and(|n| matches!(&*n.text(), "read_line" | "read_to_string"))
 }
 
 pub fn strip_parens(e: &ast::Expr) -> ast::Expr {

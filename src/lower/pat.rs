@@ -67,8 +67,10 @@ pub fn lower_condition(
             continue;
         };
         // `while let Some(x) = v.pop()`: test emptiness, pop in the body.
+        // `if let Some(x) = v.get(i)` / `m.get(k)`: test the index/key, read in the body.
         if i + 1 == parts.len()
-            && let Some((cond, bind)) = pop_idiom(cx, &p, &init)
+            && let Some((cond, bind)) =
+                pop_idiom(cx, &p, &init).or_else(|| get_idiom(cx, &p, &init))
         {
             tests.push(cond);
             all.extend(bind);
@@ -357,6 +359,88 @@ fn pop_idiom(cx: &mut Cx, p: &ast::Pat, init: &ast::Expr) -> Option<(Expr, Optio
         _ => return None,
     };
     Some((cond, bind))
+}
+
+// `if let Some(x) = v.get(i)` -> `if (i < v.size()) { var x = v.get(i); ... }`, and for maps
+// `m.containsKey(k)` / `m.get(k)`. The index or key is evaluated twice, so it must be pure.
+fn get_idiom(cx: &mut Cx, p: &ast::Pat, init: &ast::Expr) -> Option<(Expr, Option<Bind>)> {
+    let ast::Pat::TupleStructPat(tp) = p else {
+        return None;
+    };
+    if !matches!(cx.pat_ty(p).strip_refs(), Ty::Option(_)) {
+        return None;
+    }
+    let mut inner: ast::Pat = tp.fields().next()?;
+    if let ast::Pat::RefPat(r) = &inner {
+        inner = r.pat()?;
+    }
+    let ast::Expr::MethodCallExpr(m) = init else {
+        return None;
+    };
+    if m.name_ref()?.text() != "get" {
+        return None;
+    }
+    let recv_ast = m.receiver()?;
+    let rty = cx.ty(&recv_ast);
+    let is_map = match rty.strip_refs() {
+        Ty::Vec(_) => false,
+        Ty::Map { .. } => true,
+        _ => return None,
+    };
+    let arg = ast::HasArgList::arg_list(m)?.args().next()?;
+    let arg = match &arg {
+        ast::Expr::RefExpr(r) => r.expr()?,
+        other => other.clone(),
+    };
+    if !is_pure(&arg) {
+        return None;
+    }
+    let mut pre = Vec::new();
+    let recv = expr::lower_expr(cx, &recv_ast, &mut pre);
+    let key = expr::lower_expr(cx, &arg, &mut pre);
+    if !pre.is_empty() || !is_place(&recv) {
+        return None;
+    }
+    let cond = if is_map {
+        Expr::call(recv.clone(), "containsKey", vec![key.clone()])
+    } else {
+        Expr::bin(key.clone(), "<", Expr::call(recv.clone(), "size", vec![]))
+    };
+    let bind = match &inner {
+        ast::Pat::IdentPat(ip) if ip.pat().is_none() && bind_pat_def(cx, ip).is_none() => {
+            let line = cx.line(ip.syntax());
+            let rust = ident_name(ip);
+            let java = cx.declare(&rust);
+            let ty = cx.pat_ty(&inner);
+            Some(Bind {
+                line,
+                rust,
+                java,
+                value: Expr::call(recv, "get", vec![key]),
+                ty,
+                extracted: true,
+            })
+        }
+        ast::Pat::WildcardPat(_) => None,
+        _ => return None,
+    };
+    Some((cond, bind))
+}
+
+// Locals, literals, field reads and arithmetic on them: safe to evaluate twice.
+fn is_pure(e: &ast::Expr) -> bool {
+    match e {
+        ast::Expr::PathExpr(_) | ast::Expr::Literal(_) => true,
+        ast::Expr::ParenExpr(p) => p.expr().is_some_and(|x| is_pure(&x)),
+        ast::Expr::FieldExpr(f) => f.expr().is_some_and(|x| is_pure(&x)),
+        ast::Expr::PrefixExpr(p) => p.expr().is_some_and(|x| is_pure(&x)),
+        ast::Expr::BinExpr(b) => {
+            !matches!(b.op_kind(), Some(ast::BinaryOp::Assignment { .. }))
+                && b.lhs().is_some_and(|x| is_pure(&x))
+                && b.rhs().is_some_and(|x| is_pure(&x))
+        }
+        _ => false,
+    }
 }
 
 // --- `let … else` and plain destructuring ---------------------------------------------------

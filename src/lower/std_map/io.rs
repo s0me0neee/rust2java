@@ -107,6 +107,10 @@ fn read_into(cx: &mut Cx, m: &ast::MethodCallExpr, to_string: bool, out: &mut Ve
     let place = line_arg(cx, m, out).unwrap_or_else(|| Expr::raw("null"));
     let ps = render(&place);
     cx.import("java.io.*");
+    if m.receiver().is_some_and(|r| is_line_stdin(cx, &r)) {
+        let rs = render(&rdr);
+        return read_line_mode(cx, m, to_string, &rs, &ps, line, out);
+    }
     cx.import("java.nio.charset.StandardCharsets");
     let rs = format!("((InputStream) {})", render(&rdr));
     let text = cx.fresh("text");
@@ -156,6 +160,56 @@ fn read_into(cx: &mut Cx, m: &ast::MethodCallExpr, to_string: bool, out: &mut Ve
         format!(
             "{} {result}; try {{ {read} {result} = new Ok<>({text}.size()); }} catch (IOException {ex}) {{ {result} = new Err<>({ex}); }}",
             result_java(&ret)
+        ),
+    );
+    Expr::name(result)
+}
+
+// read_line/read_to_string on a line-mode STDIN. `lines()` drops the terminator, so `\n` is put
+// back (a final line without one gains it, and `\r\n` loses the `\r`: accepted).
+fn read_line_mode(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    to_string: bool,
+    reader: &str,
+    place: &str,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) -> Expr {
+    let read = if to_string {
+        format!("{reader}.lines().map(l -> l + \"\\n\").collect(Collectors.joining())")
+    } else {
+        format!("{reader}.lines().findFirst().map(l -> l + \"\\n\").orElse(\"\")")
+    };
+    let e = ast::Expr::MethodCallExpr(m.clone());
+    let unwrapped = unwrapped(cx, &e);
+    if unwrapped && unwrap_in_stmt(&e) {
+        out.push(Stmt::new(
+            line,
+            StmtKind::Raw(format!("{place} += {read};")),
+        ));
+        return Expr::raw("null");
+    }
+    let text = cx.fresh("text");
+    push_raw(
+        out,
+        line,
+        format!("String {text} = {read}; {place} += {text};"),
+    );
+    let count = Expr::call(Expr::name(&text), "length", vec![]);
+    if unwrapped {
+        return count;
+    }
+    cx.needs_result = true;
+    let ret = cx.ty(&e);
+    let result = cx.fresh("read");
+    push_raw(
+        out,
+        line,
+        format!(
+            "{} {result} = new Ok<>({});",
+            result_java(&ret),
+            render(&count)
         ),
     );
     Expr::name(result)
@@ -667,9 +721,16 @@ pub(super) fn fs_write(
 }
 
 // Split only on LF, stripping CR only in CRLF, just like Rust's BufRead::lines.
-pub(crate) fn lines_stream(cx: &mut Cx, recv: Expr) -> Expr {
+pub(crate) fn lines_stream(cx: &mut Cx, recv: Expr, line_mode: bool) -> Expr {
     cx.needs_result = true;
     cx.import("java.io.*");
+    if line_mode {
+        return Expr::call(
+            recv,
+            "lines().<Result<String, Object>>map",
+            vec![Expr::raw("Ok::new")],
+        );
+    }
     cx.import("java.nio.charset.StandardCharsets");
     let r = format!("((InputStream) {})", render(&recv));
     let text = cx.fresh("text");
@@ -692,6 +753,33 @@ pub(crate) fn bytes_stream(cx: &mut Cx, recv: Expr) -> Expr {
     Expr::raw(format!(
         "Stream.<Result<Integer, Object>>generate(() -> {{ try {{ return new Ok<>({r}.read()); }} catch (IOException {ex}) {{ return new Err<>({ex}); }} }}).takeWhile({b} -> {b}.is_err() || {b}.unwrap() != -1)"
     ))
+}
+
+// Byte-level reads need stdin as an InputStream; otherwise it can be a line reader.
+pub(crate) fn has_byte_reads(cx: &Cx, root: &ra_ap_syntax::SyntaxNode) -> bool {
+    cx.expanded_descendants(root)
+        .into_iter()
+        .filter_map(ast::MethodCallExpr::cast)
+        .any(|m| {
+            matches!(
+                method_name(&m).as_str(),
+                "read" | "bytes" | "read_to_end" | "read_exact" | "read_until"
+            ) && m.receiver().is_some_and(|r| is_reader_source(&cx.ty(&r)))
+        })
+}
+
+// A reader over stdin in line mode (`stdin()`, its lock, a BufReader around either), which is the
+// BufferedReader `STDIN`; files stay byte streams.
+pub(crate) fn is_line_stdin(cx: &Cx, e: &ast::Expr) -> bool {
+    cx.stdin_lines
+        && cx.sema.type_of_expr(e).is_some_and(|t| {
+            use ra_ap_hir::HirDisplay;
+            let shown = t
+                .original
+                .display(cx.db, cx.module.krate(cx.db).to_display_target(cx.db))
+                .to_string();
+            shown.contains("Stdin")
+        })
 }
 
 pub(crate) fn is_reader_source(ty: &Ty) -> bool {

@@ -55,6 +55,20 @@ pub fn lower_stmt(cx: &mut Cx, s: &ast::Stmt, out: &mut Vec<Stmt>) {
     }
 }
 
+// `[a, b]` or `vec![a, b]` (not the `[x; n]` repeat form).
+fn is_list_literal(e: &ast::Expr) -> bool {
+    match e {
+        ast::Expr::ArrayExpr(a) => a.semicolon_token().is_none(),
+        ast::Expr::MacroExpr(m) => m.macro_call().is_some_and(|mc| {
+            super::macros::macro_name(&mc) == "vec"
+                && mc
+                    .token_tree()
+                    .is_some_and(|t| !t.syntax().text().to_string().contains(';'))
+        }),
+        _ => false,
+    }
+}
+
 pub fn lower_let(cx: &mut Cx, l: &ast::LetStmt, out: &mut Vec<Stmt>) {
     let line = cx.line(l.syntax());
     let Some(p) = l.pat() else { return };
@@ -84,6 +98,24 @@ pub fn lower_let(cx: &mut Cx, l: &ast::LetStmt, out: &mut Vec<Stmt>) {
         .name()
         .map(|n| n.text().to_string())
         .unwrap_or_else(|| "_".into());
+    // `let stdin = io::stdin();`: the name just stands for the shared handle.
+    if ip.mut_token().is_none()
+        && let Some(ast::Expr::CallExpr(c)) = l.initializer()
+        && ast::HasArgList::arg_list(&c).is_none_or(|a| a.args().next().is_none())
+        && let Ty::Other(handle) = ty.strip_refs()
+    {
+        let java = match handle.as_str() {
+            "Stdin" => Some("STDIN"),
+            "Stdout" => Some("System.out"),
+            "Stderr" => Some("System.err"),
+            _ => None,
+        };
+        if let Some(java) = java {
+            let _ = expr::lower_expr(cx, &ast::Expr::CallExpr(c), out);
+            cx.declare_as(&rust_name, java);
+            return;
+        }
+    }
     if matches!(ty, Ty::Iter(_)) && super::iter::lower_iter_let(cx, l, ip, &rust_name, &ty, out) {
         return;
     }
@@ -133,8 +165,10 @@ pub fn lower_let(cx: &mut Cx, l: &ast::LetStmt, out: &mut Vec<Stmt>) {
             lower_to_dest(cx, &init, &Dest::Assign(name), out);
         }
         Some(init) => {
+            cx.read_only_literal = is_list_literal(&init) && cx.binding_read_only(ip);
             // The initializer is lowered before declaring so `let x = x + 1` sees the old `x`.
             let e = expr::lower_expr_as(cx, &init, &ty, out);
+            cx.read_only_literal = false;
             let name = cx.declare(&rust_name);
             out.push(Stmt::new(
                 line,

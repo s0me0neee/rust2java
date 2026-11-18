@@ -89,8 +89,13 @@ fn entry_point(cx: &mut Cx, file: &ast::SourceFile) -> String {
         }
         None => "main();".into(),
     };
+    let (field, keep) = if cx.uses_args {
+        ("static String[] ARGS; ", "ARGS = args; ")
+    } else {
+        ("", "")
+    };
     format!(
-        "static String[] ARGS; public static void main(String[] args) {{ ARGS = args; try {{ {call} }} catch (RuntimeException e) {{ System.out.flush(); System.err.println(\"thread 'main' panicked:\\n\" + e.getMessage()); System.exit(101); }} }}"
+        "{field}public static void main(String[] args) {{ {keep}try {{ {call} }} catch (RuntimeException e) {{ System.out.flush(); System.err.println(\"thread 'main' panicked:\\n\" + e.getMessage()); System.exit(101); }} }}"
     )
 }
 

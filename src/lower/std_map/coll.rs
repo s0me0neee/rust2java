@@ -1277,6 +1277,7 @@ pub(super) fn lower_heap_method(
 
 // `[a, b, c]` -> mutable list; `[x; n]` -> n independent copies when `x` is a mutable object.
 pub fn lower_array_expr(cx: &mut Cx, a: &ast::ArrayExpr, out: &mut Vec<Stmt>) -> Expr {
+    let read_only = std::mem::take(&mut cx.read_only_literal);
     let exprs: Vec<ast::Expr> = a.exprs().collect();
     if a.semicolon_token().is_some() && exprs.len() == 2 {
         return lower_repeat(cx, a.syntax(), &exprs[0], &exprs[1], out);
@@ -1295,6 +1296,9 @@ pub fn lower_array_expr(cx: &mut Cx, a: &ast::ArrayExpr, out: &mut Vec<Stmt>) ->
         ("List", "of")
     };
     let list = Expr::call(Expr::raw(factory.0), factory.1, items);
+    if read_only {
+        return list;
+    }
     Expr::New {
         ty: "ArrayList<>".into(),
         args: vec![list],

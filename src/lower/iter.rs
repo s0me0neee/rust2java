@@ -799,7 +799,8 @@ fn lower_source(
             if name == "bytes" {
                 super::std_map::bytes_stream(cx, recv)
             } else {
-                super::std_map::lines_stream(cx, recv)
+                let line_mode = super::std_map::io::is_line_stdin(cx, &recv_ast);
+                super::std_map::lines_stream(cx, recv, line_mode)
             }
         }
         (Ty::Str, "split_whitespace" | "split_ascii_whitespace") => {

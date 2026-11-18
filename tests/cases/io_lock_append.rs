@@ -1,3 +1,4 @@
+// Exact counts with a missing final newline: the byte read below keeps stdin out of line mode.
 use std::io::{self, BufRead, Read};
 
 fn main() {
@@ -11,4 +12,5 @@ fn main() {
     println!("{}:{:?}", n, rest);
     let n = lock.read_line(&mut first).unwrap();
     println!("eof:{}:{:?}", n, first);
+    let _ = lock.bytes().count();
 }

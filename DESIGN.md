@@ -477,7 +477,7 @@ When a program reads stdin, one shared reader is declared on the file's last lin
 | Rust | Java |
 |---|---|
 | `std::env::args()` | `Stream.concat(Stream.of("<crate>"), Arrays.stream(ARGS))`. Rust includes the program name as `args[0]`; Java doesn't. |
-| `io::stdin().read_line(&mut s)` | `s += STDIN.lines().findFirst().map(l -> l + "\n").orElse("");`. `findFirst` pulls exactly one line, and `lines()` throws no checked exception. When the returned byte count is used, the line goes into a temporary first. |
+| `io::stdin().read_line(&mut s)` | `s += STDIN.lines().findFirst().map(l -> l + "\n").orElse("");`. `findFirst` pulls exactly one line, and `lines()` throws no checked exception. When the returned byte count is used, the line goes into a temporary first. `STDIN` is a `BufferedReader` unless the file also reads stdin bytes (`read`, `bytes`, `read_to_end`, …); then it is an `InputStream` and lines are split byte-exactly. |
 | `io::stdin().lines()` | `STDIN.lines()`. The usual `.map(\|l\| l.unwrap())` / `.map_while(Result::ok)` is dropped. |
 | `io::stdin().read_to_string(&mut s)` | `s += STDIN.lines().map(l -> l + "\n").collect(Collectors.joining());` |
 | `fs::read_to_string(p)` with `.unwrap()`/`.expect()` | `String text; try { text = Files.readString(Path.of(p)); } catch (IOException e) { throw new UncheckedIOException(e); }` (one line) |

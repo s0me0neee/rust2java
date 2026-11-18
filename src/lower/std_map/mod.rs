@@ -9,7 +9,7 @@ use crate::jir::{Expr, LambdaBody, Stmt, StmtKind};
 use crate::ty::{Int, Ty};
 
 mod coll;
-mod io;
+pub mod io;
 mod mem;
 mod num;
 mod option;
@@ -249,7 +249,11 @@ fn default_value(ty: &Ty) -> Expr {
 
 // Declares (once) the shared stdin reader on the file's last line.
 pub fn need_stdin(cx: &mut Cx) {
-    let decl = "static final InputStream STDIN = new BufferedInputStream(System.in);";
+    let decl = if cx.stdin_lines {
+        "static final BufferedReader STDIN = new BufferedReader(new InputStreamReader(System.in));"
+    } else {
+        "static final InputStream STDIN = new BufferedInputStream(System.in);"
+    };
     if !cx.file_trailer.iter().any(|t| t.contains("STDIN")) {
         cx.import("java.io.*");
         cx.file_trailer.push(decl.into());
@@ -307,6 +311,7 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
         "io::stdout" | "stdio::stdout" => return Expr::raw("System.out"),
         "io::stderr" | "stdio::stderr" => return Expr::raw("System.err"),
         "env::args" | "env::args_os" => {
+            cx.uses_args = true;
             return Expr::raw("Stream.concat(Stream.of(\"main\"), Arrays.stream(ARGS))");
         }
         "env::var" => {
