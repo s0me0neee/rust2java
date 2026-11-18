@@ -288,12 +288,17 @@ pub fn lower_path_expr(cx: &mut Cx, p: &ast::PathExpr) -> Expr {
     }
     match cx.sema.resolve_path(&path) {
         Some(PathResolution::Local(local)) => {
-            if let Some((list, idx)) = cx.elem_aliases.get(&local) {
-                return Expr::call(
-                    Expr::name(list.clone()),
-                    "get",
-                    vec![Expr::name(idx.clone())],
-                );
+            if let Some((list, idx, kind)) = cx.elem_aliases.get(&local) {
+                return match kind {
+                    super::ElemAliasKind::Entry => {
+                        Expr::call(Expr::name(list.clone()), "getValue", vec![])
+                    }
+                    _ => Expr::call(
+                        Expr::name(list.clone()),
+                        "get",
+                        vec![Expr::name(idx.clone())],
+                    ),
+                };
             }
             let name = cx.lookup(local.name(cx.db).as_str());
             if cx.cells.contains(&local) {
@@ -451,6 +456,34 @@ pub fn place_assign(
     r: Expr,
     out: &mut Vec<Stmt>,
 ) -> Expr {
+    let alias_place = match lhs {
+        ast::Expr::PrefixExpr(p) if p.op_kind() == Some(ast::UnaryOp::Deref) => p.expr(),
+        ast::Expr::PathExpr(_) => Some(lhs.clone()),
+        _ => None,
+    };
+    if let Some(local) = alias_place.and_then(|e| cx.local_of_path(&e))
+        && let Some((list, idx, kind)) = cx.elem_aliases.get(&local).cloned()
+    {
+        let (list, idx) = (Expr::name(list), Expr::name(idx));
+        let value = if sym == "=" {
+            r
+        } else {
+            let elem_ty = cx.ty(lhs);
+            let cur = match kind {
+                super::ElemAliasKind::Entry => Expr::call(list.clone(), "getValue", vec![]),
+                _ => Expr::call(list.clone(), "get", vec![idx.clone()]),
+            };
+            narrow_if_needed(
+                Expr::bin(cur, static_op(sym.trim_end_matches('=')), r),
+                &elem_ty,
+            )
+        };
+        return match kind {
+            super::ElemAliasKind::Entry => Expr::call(list, "setValue", vec![value]),
+            super::ElemAliasKind::Map => Expr::call(list, "put", vec![idx, value]),
+            super::ElemAliasKind::List => Expr::call(list, "set", vec![idx, value]),
+        };
+    }
     match lhs {
         ast::Expr::IndexExpr(ix) => {
             let (Some(base), Some(index)) = (ix.base(), ix.index()) else {
@@ -473,25 +506,6 @@ pub fn place_assign(
                 narrow_if_needed(Expr::bin(getter, static_op(op), r), &elem_ty)
             };
             Expr::call(b, setter, vec![i, value])
-        }
-        ast::Expr::PrefixExpr(p)
-            if p.op_kind() == Some(ast::UnaryOp::Deref)
-                && let Some(local) = p.expr().and_then(|i| cx.local_of_path(&i))
-                && let Some((list, idx)) = cx.elem_aliases.get(&local).cloned() =>
-        {
-            // `*x op= r` where `x` aliases `list[idx]`.
-            let (list, idx) = (Expr::name(list), Expr::name(idx));
-            let value = if sym == "=" {
-                r
-            } else {
-                let elem_ty = cx.ty(lhs);
-                let cur = Expr::call(list.clone(), "get", vec![idx.clone()]);
-                narrow_if_needed(
-                    Expr::bin(cur, static_op(sym.trim_end_matches('=')), r),
-                    &elem_ty,
-                )
-            };
-            Expr::call(list, "set", vec![idx, value])
         }
         ast::Expr::PrefixExpr(p) if p.op_kind() == Some(ast::UnaryOp::Deref) => {
             let inner = p.expr().unwrap();
@@ -638,6 +652,15 @@ fn lower_index(cx: &mut Cx, i: &ast::IndexExpr, out: &mut Vec<Stmt>) -> Expr {
     let ix = lower_expr(cx, &index, out);
     match bt.strip_refs() {
         Ty::Str => Expr::call(b, "charAt", vec![ix]),
+        Ty::Deque(_) => Expr::call(
+            Expr::call(
+                Expr::call(Expr::call(b, "stream", vec![]), "skip", vec![ix]),
+                "findFirst",
+                vec![],
+            ),
+            "orElseThrow",
+            vec![],
+        ),
         _ => Expr::call(b, "get", vec![ix]),
     }
 }
