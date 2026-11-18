@@ -8,7 +8,7 @@ use crate::emit::render_expr as render;
 use crate::jir::{Expr, LambdaBody, Stmt, StmtKind};
 use crate::ty::{Int, Ty};
 
-mod coll;
+pub(crate) mod coll;
 pub mod io;
 mod mem;
 mod num;
@@ -207,6 +207,54 @@ fn wrap_try_ok(
         ),
     );
     Expr::name(name)
+}
+
+// `new TreeSet<>(cmp)` / `new TreeMap<>(cmp)` when the key needs a comparator for Rust's `Ord`.
+fn ordered_new(cx: &mut Cx, ty: &Ty) -> Option<Expr> {
+    let (class, key) = match ty.strip_refs() {
+        Ty::Set { ordered: true, t } => ("TreeSet<>", t),
+        Ty::Map {
+            ordered: true, k, ..
+        } => ("TreeMap<>", k),
+        _ => return None,
+    };
+    let cmp = coll::ord_comparator(cx, key)?;
+    Some(Expr::New {
+        ty: class.into(),
+        args: vec![Expr::raw(cmp)],
+    })
+}
+
+// A set/map filled from a list (of pairs, for a map); later duplicate keys win, as in Rust.
+fn ordered_from(cx: &mut Cx, src: Expr, ty: &Ty) -> Expr {
+    let new = match ordered_new(cx, ty) {
+        Some(e) => format!("() -> {}", render(&e)),
+        None => match ty.strip_refs() {
+            Ty::Map { ordered, .. } | Ty::Set { ordered, .. } => {
+                let kind = if matches!(ty.strip_refs(), Ty::Map { .. }) {
+                    "Map"
+                } else {
+                    "Set"
+                };
+                format!("{}{kind}::new", if *ordered { "Tree" } else { "Hash" })
+            }
+            _ => "ArrayList::new".into(),
+        },
+    };
+    let collector = match ty.strip_refs() {
+        Ty::Map { .. } => {
+            let (a, b) = (cx.fresh("a"), cx.fresh("b"));
+            format!(
+                "Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue, ({a}, {b}) -> {b}, {new})"
+            )
+        }
+        _ => format!("Collectors.toCollection({new})"),
+    };
+    Expr::call(
+        Expr::call(src, "stream", vec![]),
+        "collect",
+        vec![Expr::raw(collector)],
+    )
 }
 
 fn clone_expr(e: Expr, ty: &Ty) -> Expr {
@@ -412,6 +460,9 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
             ty: "HashMap<>".into(),
             args: vec![],
         },
+        "BTreeMap::new" | "BTreeSet::new" if ordered_new(cx, &ret).is_some() => {
+            ordered_new(cx, &ret).unwrap()
+        }
         "BTreeMap::new" => Expr::New {
             ty: "TreeMap<>".into(),
             args: vec![],
@@ -469,6 +520,11 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
         }
         "Default::default" => default_value(&ret),
         "From::from" | "Into::into" => match ret.strip_refs() {
+            Ty::Set { ordered: true, .. } | Ty::Map { ordered: true, .. }
+                if ordered_new(cx, &ret).is_some() =>
+            {
+                ordered_from(cx, args[0].clone(), &ret)
+            }
             Ty::Vec(_) | Ty::Set { .. } | Ty::Map { .. } | Ty::Deque(_) | Ty::Heap(_) => {
                 clone_expr(args[0].clone(), &ret)
             }

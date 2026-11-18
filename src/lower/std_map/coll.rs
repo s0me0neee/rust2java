@@ -10,8 +10,15 @@ pub(super) fn fn_call(
     ret: &Ty,
     out: &mut Vec<Stmt>,
 ) -> Option<Expr> {
+    if matches!(key, "HashMap::from" | "BTreeMap::from") {
+        let src = expr::call_args(cx, c, out).into_iter().next()?;
+        return Some(ordered_from(cx, src, ret));
+    }
     if matches!(key, "HashSet::from" | "BTreeSet::from") {
         let src = expr::call_args(cx, c, out).into_iter().next()?;
+        if ordered_new(cx, ret).is_some() {
+            return Some(ordered_from(cx, src, ret));
+        }
         return Some(clone_expr(src, ret));
     }
     if matches!(
@@ -29,19 +36,11 @@ pub(super) fn fn_call(
                     && !adt.module(cx.db).krate(cx.db).origin(cx.db).is_local()
             })
             || heap_is_reverse(c);
-        let cmp = if matches!(elem.strip_refs(), Ty::Tuple(_)) {
-            let Some(cmp) = tuple_comparator(cx, elem) else {
-                return Some(cx.unsupported(c.syntax(), "heap ordering of this tuple type"));
-            };
-            Some(if reversed {
-                cmp
-            } else {
-                format!("({cmp}).reversed()")
-            })
-        } else if reversed {
-            None
+        let natural = ord_comparator(cx, elem);
+        let cmp = if reversed {
+            natural
         } else {
-            Some("Comparator.reverseOrder()".into())
+            Some(reversed_comparator(natural))
         };
         let heap = Expr::New {
             ty: "PriorityQueue<>".into(),
@@ -70,18 +69,95 @@ pub(super) fn fn_call(
     None
 }
 
-fn tuple_comparator(cx: &mut Cx, ty: &Ty) -> Option<String> {
-    let Ty::Tuple(fields) = ty.strip_refs() else {
-        return None;
-    };
-    if fields.len() != 2 || fields.iter().any(|t| !t.is_primitive() && !t.is_str()) {
-        return None;
+// Java comparator for Rust's `Ord` on `ty`; `None` when Java's natural order already agrees.
+pub(crate) fn ord_comparator(cx: &mut Cx, ty: &Ty) -> Option<String> {
+    let boxed = ty.boxed();
+    match ty.strip_refs() {
+        Ty::Int(Int::U16) => {
+            let x = cx.fresh("x");
+            Some(format!(
+                "Comparator.comparingInt(({boxed} {x}) -> {x} & 0xFFFF)"
+            ))
+        }
+        Ty::Int(Int::U32) => Some("Integer::compareUnsigned".into()),
+        Ty::Int(Int::U64 | Int::U128) => Some("Long::compareUnsigned".into()),
+        Ty::Tuple(fields) if fields.len() >= 2 => {
+            let p = cx.fresh("p");
+            let mut chain = String::new();
+            for (n, field) in fields.iter().enumerate() {
+                let get = match fields.len() {
+                    2 => ["getKey()", "getValue()"][n].to_string(),
+                    _ => format!("_{n}()"),
+                };
+                let key = match n {
+                    0 => format!("Comparator.comparing(({boxed} {p}) -> {p}.{get}"),
+                    _ => format!(".thenComparing({p} -> {p}.{get}"),
+                };
+                chain += &key;
+                if let Some(c) = ord_comparator(cx, field) {
+                    chain += &format!(", {c}");
+                }
+                chain += ")";
+            }
+            Some(chain)
+        }
+        Ty::Option(inner) => {
+            let o = cx.fresh("o");
+            let c = ord_comparator(cx, inner).unwrap_or_else(|| "Comparator.naturalOrder()".into());
+            // Rust orders None before Some.
+            Some(format!(
+                "Comparator.comparing(({boxed} {o}) -> {o}.orElse(null), Comparator.nullsFirst({c}))"
+            ))
+        }
+        Ty::Vec(elem) | Ty::Deque(elem) => {
+            let (a, b) = (cx.fresh("a"), cx.fresh("b"));
+            let elem_boxed = elem.boxed();
+            let c = ord_comparator(cx, elem);
+            // Lexicographic like Rust; generic element types can't form a Java array.
+            if !elem_boxed.contains('<') {
+                let arr = |l: &str| format!("{l}.toArray({elem_boxed}[]::new)");
+                let extra = c.map(|c| format!(", {c}")).unwrap_or_default();
+                return Some(format!(
+                    "({boxed} {a}, {boxed} {b}) -> Arrays.compare({}, {}{extra})",
+                    arr(&a),
+                    arr(&b)
+                ));
+            }
+            let (i, d) = (cx.fresh("i"), cx.fresh("d"));
+            let cmp = call_comparator(c, elem, &format!("{a}.get({i})"), &format!("{b}.get({i})"));
+            Some(format!(
+                "({boxed} {a}, {boxed} {b}) -> IntStream.range(0, Math.min({a}.size(), {b}.size())).map({i} -> {cmp}).filter({d} -> {d} != 0).findFirst().orElse(Integer.compare({a}.size(), {b}.size()))"
+            ))
+        }
+        _ => None,
     }
-    let item = cx.fresh("pair");
-    Some(format!(
-        "Comparator.comparing(({} {item}) -> {item}.getKey()).thenComparing({item} -> {item}.getValue())",
-        ty.boxed()
-    ))
+}
+
+// Java int expression comparing `a` with `b` the way Rust's `Ord` on `ty` does.
+pub(crate) fn compare_call(cx: &mut Cx, ty: &Ty, a: &str, b: &str) -> String {
+    let cmp = ord_comparator(cx, ty);
+    call_comparator(cmp, ty, a, b)
+}
+
+fn call_comparator(cmp: Option<String>, ty: &Ty, a: &str, b: &str) -> String {
+    match cmp {
+        None => format!("{a}.compareTo({b})"),
+        // A lambda has no `compare` method until it has a type.
+        Some(c) if c.starts_with('(') => {
+            format!("((Comparator<{}>) {c}).compare({a}, {b})", ty.boxed())
+        }
+        Some(c) if !c.starts_with("Comparator.") => format!("{}({a}, {b})", c.replace("::", ".")),
+        Some(c) => format!("{c}.compare({a}, {b})"),
+    }
+}
+
+// `cmp` reversed, for max-heaps.
+pub(crate) fn reversed_comparator(cmp: Option<String>) -> String {
+    match cmp {
+        None => "Comparator.reverseOrder()".into(),
+        Some(c) if c.starts_with("Comparator.") => format!("{c}.reversed()"),
+        Some(c) => format!("Collections.reverseOrder({c})"),
+    }
 }
 
 fn clone_list(cx: &mut Cx, value: Expr, elem: &Ty) -> Expr {
@@ -729,13 +805,10 @@ pub(super) fn lower_vec_method(
             );
             Some(Expr::raw("null"))
         }
-        "sort" | "sort_unstable" if matches!(elem.strip_refs(), Ty::Tuple(_)) => {
-            match tuple_comparator(cx, elem) {
-                Some(cmp) => Some(Expr::call(recv, "sort", vec![Expr::raw(cmp)])),
-                None => Some(cx.unsupported(m.syntax(), "sorting this tuple type")),
-            }
+        "sort" | "sort_unstable" => {
+            let cmp = ord_comparator(cx, elem).unwrap_or_else(|| "null".into());
+            Some(Expr::call(recv, "sort", vec![Expr::raw(cmp)]))
         }
-        "sort" | "sort_unstable" => Some(Expr::call(recv, "sort", vec![Expr::raw("null")])),
         "sort_by" => Some(Expr::call(recv, "sort", vec![b0])),
         "sort_by_key" | "sort_unstable_by_key" => {
             let key_ty = match arg_asts.first() {
@@ -1283,7 +1356,19 @@ pub fn lower_array_expr(cx: &mut Cx, a: &ast::ArrayExpr, out: &mut Vec<Stmt>) ->
     if a.semicolon_token().is_some() && exprs.len() == 2 {
         return lower_repeat(cx, a.syntax(), &exprs[0], &exprs[1], out);
     }
-    let items: Vec<Expr> = exprs.iter().map(|e| expr::lower_expr(cx, e, out)).collect();
+    let mut items: Vec<Expr> = exprs.iter().map(|e| expr::lower_expr(cx, e, out)).collect();
+    // `List.of((short) 1, 2)` mixes Short and Integer.
+    if let Some(Ty::Int(i)) = exprs.first().map(|e| cx.ty(e).strip_refs().clone())
+        && matches!(i.java(), "short" | "byte")
+    {
+        items = items
+            .into_iter()
+            .map(|e| match e {
+                Expr::Cast(..) => e,
+                e => Expr::Cast(i.java().into(), Box::new(e)),
+            })
+            .collect();
+    }
     if items.is_empty() {
         return Expr::New {
             ty: "ArrayList<>".into(),
@@ -1292,11 +1377,23 @@ pub fn lower_array_expr(cx: &mut Cx, a: &ast::ArrayExpr, out: &mut Vec<Stmt>) ->
     }
     // `()` elements are `null` in Java, which `List.of` rejects.
     let factory = if exprs.iter().any(|e| cx.ty(e).is_unit()) {
-        ("Arrays", "asList")
+        ("Arrays", "asList".to_string())
     } else {
-        ("List", "of")
+        ("List", "of".to_string())
     };
-    let list = Expr::call(Expr::raw(factory.0), factory.1, items);
+    // `List.of(Optional.of(1), Optional.empty())` infers `List<Optional<? extends Object>>`.
+    let elem_ty = cx.ty(&exprs[0]);
+    let untyped_empty = |e: &Expr| match e {
+        Expr::Raw(s) => s == "Optional.empty()",
+        Expr::New { ty, args } => ty.ends_with("<>") && args.is_empty(),
+        _ => false,
+    };
+    let factory = if elem_ty.boxed().contains('<') && items.iter().any(untyped_empty) {
+        (factory.0, format!("<{}>{}", elem_ty.boxed(), factory.1))
+    } else {
+        factory
+    };
+    let list = Expr::call(Expr::raw(factory.0), &factory.1, items);
     if read_only {
         return list;
     }

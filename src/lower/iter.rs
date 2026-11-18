@@ -1335,15 +1335,16 @@ fn lower_adaptor_core(
         "sum" | "product" => lower_sum_product(cx, m, name == "product", src, ret_ty),
         "min" | "max" => {
             if item.is_primitive() || item.is_str() || name == "min" {
-                call(name, vec![Expr::raw("Comparator.naturalOrder()")])
+                let cmp = super::std_map::coll::ord_comparator(cx, &item)
+                    .unwrap_or_else(|| "Comparator.naturalOrder()".into());
+                call(name, vec![Expr::raw(cmp)])
             } else {
                 // Rust's max returns the last of equal maxima; Java's returns the first.
                 let (a, b) = (cx.fresh("a"), cx.fresh("b"));
+                let cmp = super::std_map::coll::compare_call(cx, &item, &b, &a);
                 call(
                     "reduce",
-                    vec![Expr::raw(format!(
-                        "({a}, {b}) -> {b}.compareTo({a}) >= 0 ? {b} : {a}"
-                    ))],
+                    vec![Expr::raw(format!("({a}, {b}) -> {cmp} >= 0 ? {b} : {a}"))],
                 )
             }
         }
@@ -1617,21 +1618,40 @@ fn lower_collect(
             ),
             _ => collect("Collectors.joining()".into()),
         },
-        Ty::Map { ordered, .. } => {
+        Ty::Map { ordered, k, .. } => {
             let (a, b) = (cx.fresh("a"), cx.fresh("b"));
+            let new = match ordered
+                .then(|| super::std_map::coll::ord_comparator(cx, k))
+                .flatten()
+            {
+                Some(cmp) => format!("() -> new TreeMap<>({cmp})"),
+                None if *ordered => "TreeMap::new".into(),
+                None => "HashMap::new".into(),
+            };
             collect(format!(
-                "Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue, ({a}, {b}) -> {b}, {}::new)",
-                if *ordered { "TreeMap" } else { "HashMap" }
+                "Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue, ({a}, {b}) -> {b}, {new})"
             ))
         }
-        Ty::Set { ordered, .. } => collect(format!(
-            "Collectors.toCollection({}::new)",
-            if *ordered { "TreeSet" } else { "HashSet" }
-        )),
+        Ty::Set { ordered, t } => {
+            let new = match ordered
+                .then(|| super::std_map::coll::ord_comparator(cx, t))
+                .flatten()
+            {
+                Some(cmp) => format!("() -> new TreeSet<>({cmp})"),
+                None if *ordered => "TreeSet::new".into(),
+                None => "HashSet::new".into(),
+            };
+            collect(format!("Collectors.toCollection({new})"))
+        }
         Ty::Deque(_) => collect("Collectors.toCollection(ArrayDeque::new)".into()),
-        Ty::Heap(_) => collect(
-            "Collectors.toCollection(() -> new PriorityQueue<>(Comparator.reverseOrder()))".into(),
-        ),
+        Ty::Heap(t) => {
+            let cmp = super::std_map::coll::reversed_comparator(
+                super::std_map::coll::ord_comparator(cx, t),
+            );
+            collect(format!(
+                "Collectors.toCollection(() -> new PriorityQueue<>({cmp}))"
+            ))
+        }
         Ty::Result(ok, err) if matches!(ok.strip_refs(), Ty::Vec(_)) => {
             if cx.lambda_depth > 0 {
                 return cx.unsupported(m.syntax(), "collect into Result inside a closure");
