@@ -1,17 +1,83 @@
 // Std String/&str, char, bool.
 
+use ra_ap_syntax::ast::RangeItem;
+
 use super::*;
+use crate::lower::strip_parens;
 
 // Hook for std free functions (`key` as built by `calls::std_fn_key`, e.g. `Rc::new`).
 pub(super) fn fn_call(
     cx: &mut Cx,
     c: &ast::CallExpr,
     key: &str,
-    ret: &Ty,
+    _ret: &Ty,
     out: &mut Vec<Stmt>,
 ) -> Option<Expr> {
-    let _ = (cx, c, key, ret, out);
-    None
+    match key {
+        // `String::from(x)` / `str::to_string(x)` in call form: strings stay as they are.
+        k if k == "String::from" || k.ends_with("::to_string") => {
+            let first = c.arg_list()?.args().next()?;
+            let ty = cx.ty(&first);
+            let arg = expr::lower_expr(cx, &first, out);
+            Some(if ty.is_str() {
+                arg
+            } else {
+                Expr::call(Expr::raw("String"), "valueOf", vec![arg])
+            })
+        }
+        // `char::from(u8)`: the argument may be a boxed `Integer` when iterating a list.
+        "char::from" => {
+            let args = expr::call_args(cx, c, out);
+            let b = args.into_iter().next()?;
+            Some(Expr::Cast(
+                "char".into(),
+                Box::new(Expr::Cast("int".into(), Box::new(b))),
+            ))
+        }
+        _ => None,
+    }
+}
+
+// Std functions used as values (`map(String::from)`, `split(char::is_whitespace)`).
+pub(super) fn path(cx: &mut Cx, _path: &ast::Path, def: ModuleDef) -> Option<Expr> {
+    let ModuleDef::Function(f) = def else {
+        return None;
+    };
+    let key = crate::lower::calls::std_fn_key(cx, f);
+    Some(match key.as_str() {
+        // `String::valueOf` covers `String::from`/`to_string` (a blanket impl, hence `?::`).
+        k if k == "String::from" || k.ends_with("::to_string") || k.ends_with("::to_owned") => {
+            Expr::raw("String::valueOf")
+        }
+        "char::from" => {
+            let b = cx.fresh("b");
+            Expr::Lambda {
+                params: vec![b.clone()],
+                body: LambdaBody::Expr(Box::new(Expr::Cast(
+                    "char".into(),
+                    Box::new(Expr::Cast("int".into(), Box::new(Expr::name(b)))),
+                ))),
+            }
+        }
+        k if k.starts_with("char::is_") => {
+            let c = cx.fresh("c");
+            let body = lower_small_method(
+                cx,
+                Expr::name(c.clone()),
+                &[],
+                &Ty::Char,
+                &k["char::".len()..],
+                &Ty::Bool,
+                1,
+                &mut Vec::new(),
+            )?;
+            Expr::Lambda {
+                params: vec![c],
+                body: LambdaBody::Expr(Box::new(body)),
+            }
+        }
+        _ => return None,
+    })
 }
 
 // Hook for std methods, before the receiver is lowered (`key` like `RefCell::borrow`).
@@ -121,6 +187,20 @@ pub(super) fn lower_small_method(
             "&&",
             Expr::bin(recv, "<=", Expr::raw("'z'")),
         ),
+        "is_ascii_punctuation" => {
+            let range = |a: &str, b: &str| {
+                Expr::bin(
+                    Expr::bin(recv.clone(), ">=", Expr::raw(a)),
+                    "&&",
+                    Expr::bin(recv.clone(), "<=", Expr::raw(b)),
+                )
+            };
+            let mut e = range("'!'", "'/'");
+            for (a, b) in [("':'", "'@'"), ("'['", "'`'"), ("'{'", "'~'")] {
+                e = Expr::bin(e, "||", range(a, b));
+            }
+            e
+        }
         "is_ascii_hexdigit" => {
             let d = Expr::bin(
                 Expr::bin(recv.clone(), ">=", Expr::raw("'0'")),
@@ -169,6 +249,7 @@ pub(super) fn lower_small_method(
             vec![recv, b0],
         )),
         "clone" | "to_owned" => recv,
+        "into" if ret.is_str() => Expr::call(Expr::raw("String"), "valueOf", vec![recv]),
         _ => return None,
     })
 }
@@ -213,7 +294,7 @@ pub(super) fn lower_str_method(
                 out,
             ));
         }
-        "insert" => {
+        "insert" | "insert_str" => {
             let i = simple(cx, b0, &Ty::Int(Int::Usize), line, out);
             let pre = Expr::call(recv.clone(), "substring", vec![Expr::raw("0"), i.clone()]);
             let post = Expr::call(recv.clone(), "substring", vec![i]);
@@ -291,7 +372,80 @@ pub(super) fn lower_str_method(
                 opt_empty(opt_inner(ret).as_ref()),
             ));
         }
-        "replace" => return Some(Expr::call(recv, "replace", vec![b0, b1])),
+        // Both halves of the pair are cut from the same original string.
+        "split_once" | "rsplit_once" => {
+            let sv = simple(cx, recv, &Ty::Str, line, out);
+            let pat = simple(cx, b0, &arg0_ty, line, out);
+            let plen = pattern_len(&pat, &arg0_ty);
+            let getter = if name == "split_once" {
+                "indexOf"
+            } else {
+                "lastIndexOf"
+            };
+            let at = push_local(
+                cx,
+                line,
+                "int".into(),
+                Some(Expr::call(sv.clone(), getter, vec![pat])),
+                out,
+                "at",
+            );
+            let head = Expr::call(
+                sv.clone(),
+                "substring",
+                vec![Expr::raw("0"), Expr::name(at.clone())],
+            );
+            let tail = Expr::call(
+                sv,
+                "substring",
+                vec![Expr::bin(Expr::name(at.clone()), "+", plen)],
+            );
+            return Some(conditional(
+                Expr::bin(Expr::name(at), ">=", Expr::raw("0")),
+                opt_of(Expr::call(Expr::raw("Map"), "entry", vec![head, tail])),
+                opt_empty(opt_inner(ret).as_ref()),
+            ));
+        }
+        "replace" => {
+            return Some(Expr::call(
+                recv,
+                "replace",
+                vec![char_arg(b0, &arg0_ty), b1],
+            ));
+        }
+        // Java replaces every occurrence; count them with indexOf and the growing result.
+        // An empty pattern inserts at every boundary, which indexOf cannot walk.
+        "replacen" if empty_str_pat(arg_asts) => {
+            return Some(cx.unsupported(_m.syntax(), "replacen with an empty pattern"));
+        }
+        "replacen" => {
+            let sv = simple(cx, recv, &Ty::Str, line, out);
+            let pat = simple(cx, b0, &arg0_ty, line, out);
+            let rep = simple(cx, b1, &Ty::Str, line, out);
+            let n = simple(
+                cx,
+                args.get(2).cloned().unwrap_or_else(|| Expr::raw("1")),
+                &Ty::Int(Int::Usize),
+                line,
+                out,
+            );
+            let (ps, ms, ns) = (render(&pat), render(&rep), render(&n));
+            let r = cx.fresh("replaced");
+            let k = cx.fresh("k");
+            let from = cx.fresh("from");
+            let at = cx.fresh("at");
+            let plen = render(&pattern_len(&pat, &arg0_ty));
+            push_raw(
+                out,
+                line,
+                format!(
+                    "String {r} = {}; for (int {k} = 0, {from} = 0; {k} < {ns}; {k}++) {{ int {at} = {r}.indexOf({ps}, {from}); \
+                     if ({at} < 0) break; {r} = {r}.substring(0, {at}) + {ms} + {r}.substring({at} + {plen}); {from} = {at} + {ms}.length(); }}",
+                    render(&sv)
+                ),
+            );
+            return Some(Expr::name(r));
+        }
         "trim" => return Some(Expr::call(recv, "strip", vec![])),
         "trim_start" => return Some(Expr::call(recv, "stripLeading", vec![])),
         "trim_end" => return Some(Expr::call(recv, "stripTrailing", vec![])),
@@ -311,12 +465,21 @@ pub(super) fn lower_str_method(
         }
         "repeat" => return Some(Expr::call(recv, "repeat", vec![b0])),
         "eq_ignore_ascii_case" => return Some(Expr::call(recv, "equalsIgnoreCase", vec![b0])),
+        "cmp" => return Some(Expr::call(recv, "compareTo", vec![b0])),
+        // Rust yields UTF-8 bytes; Java's char codes are the same values for ASCII.
+        "as_bytes" => {
+            let codes = Expr::call(recv, "chars", vec![]);
+            return Some(Expr::call(
+                Expr::call(codes, "boxed", vec![]),
+                "toList",
+                vec![],
+            ));
+        }
         "as_str" | "as_ref" | "to_owned" | "to_string" | "clone" | "into" => return Some(recv),
         "parse" => return Some(parse_expr(cx, _m, recv, ret, line, out)),
         "get" => {
             if let Some(ast::Expr::RangeExpr(r)) = arg_asts.first() {
-                let sub = lower_slice_range(cx, recv, &Ty::Str, r, out);
-                return Some(opt_of(sub));
+                return Some(str_get_range(cx, recv, r, ret, line, out));
             }
             return None;
         }
@@ -334,23 +497,17 @@ pub(super) fn lower_str_method(
             };
             let sv = simple(cx, recv, &Ty::Str, line, out);
             let av = simple(cx, b0, &arg0_ty, line, out);
+            let plen = pattern_len(&av, &arg0_ty);
+            let av = char_arg(av, &arg0_ty);
             let inner = if name == "strip_prefix" {
-                Expr::call(
-                    sv.clone(),
-                    "substring",
-                    vec![Expr::call(av.clone(), "length", vec![])],
-                )
+                Expr::call(sv.clone(), "substring", vec![plen])
             } else {
                 Expr::call(
                     sv.clone(),
                     "substring",
                     vec![
                         Expr::raw("0"),
-                        Expr::bin(
-                            Expr::call(sv.clone(), "length", vec![]),
-                            "-",
-                            Expr::call(av.clone(), "length", vec![]),
-                        ),
+                        Expr::bin(Expr::call(sv.clone(), "length", vec![]), "-", plen),
                     ],
                 )
             };
@@ -363,6 +520,80 @@ pub(super) fn lower_str_method(
         _ => {}
     }
     None
+}
+
+fn empty_str_pat(arg_asts: &[ast::Expr]) -> bool {
+    matches!(
+        arg_asts.first().map(strip_parens),
+        Some(ast::Expr::Literal(l)) if matches!(
+            l.kind(),
+            ast::LiteralKind::String(s) if s.value().is_ok_and(|v| v.is_empty())
+        )
+    )
+}
+
+// Java's String methods that take a character pattern need a String in the mixed overloads.
+fn char_arg(v: Expr, ty: &Ty) -> Expr {
+    if matches!(ty.strip_refs(), Ty::Char) {
+        Expr::call(Expr::raw("String"), "valueOf", vec![v])
+    } else {
+        v
+    }
+}
+
+// Java expression for the pattern's length in chars: a char pattern is one long.
+fn pattern_len(pat: &Expr, ty: &Ty) -> Expr {
+    if matches!(ty.strip_refs(), Ty::Char) {
+        Expr::raw("1")
+    } else {
+        Expr::call(pat.clone(), "length", vec![])
+    }
+}
+
+// `s.get(a..b)` is `None` outside the string, where `substring` would throw.
+fn str_get_range(
+    cx: &mut Cx,
+    recv: Expr,
+    r: &ast::RangeExpr,
+    ret: &Ty,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) -> Expr {
+    let s = simple(cx, recv, &Ty::Str, line, out);
+    let from = r
+        .start()
+        .map(|e| expr::lower_expr(cx, &e, out))
+        .unwrap_or_else(|| Expr::raw("0"));
+    let from = simple(cx, from, &Ty::Int(Int::Usize), line, out);
+    let (to, open) = match r.end() {
+        Some(e) => {
+            let e = expr::lower_expr(cx, &e, out);
+            let e = if r.op_kind() == Some(ast::RangeOp::Inclusive) {
+                Expr::bin(e, "+", Expr::raw("1"))
+            } else {
+                e
+            };
+            (e, false)
+        }
+        None => (Expr::call(s.clone(), "length", vec![]), true),
+    };
+    // `length()` is pure, so an open end can stay inline; anything else is evaluated once.
+    let to = if open {
+        to
+    } else {
+        simple(cx, to, &Ty::Int(Int::Usize), line, out)
+    };
+    let bounds = Expr::bin(
+        Expr::bin(
+            Expr::bin(from.clone(), ">=", Expr::raw("0")),
+            "&&",
+            Expr::bin(from.clone(), "<=", to.clone()),
+        ),
+        "&&",
+        Expr::bin(to.clone(), "<=", Expr::call(s.clone(), "length", vec![])),
+    );
+    let sub = Expr::call(s, "substring", vec![from, to]);
+    conditional(bounds, opt_of(sub), opt_empty(opt_inner(ret).as_ref()))
 }
 
 pub(super) fn parse_expr(

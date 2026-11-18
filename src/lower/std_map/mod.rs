@@ -108,9 +108,12 @@ fn push_raw(out: &mut Vec<Stmt>, line: u32, text: String) {
 fn simple(cx: &mut Cx, e: Expr, ty: &Ty, line: u32, out: &mut Vec<Stmt>) -> Expr {
     let simple = match &e {
         Expr::Name(_) => true,
-        Expr::Raw(s) => s
-            .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '[' | ']' | '"' | ' ')),
+        Expr::Raw(s) => {
+            s.starts_with('"')
+                || s.starts_with('\'')
+                || s.chars()
+                    .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '[' | ']'))
+        }
         _ => false,
     };
     if simple || cx.lambda_depth > 0 {
@@ -344,14 +347,20 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
         "String::from" | "ToString::to_string" | "ToOwned::to_owned" => {
             args.into_iter().next().unwrap_or_else(|| Expr::str_lit(""))
         }
-        "String::from_utf8" | "String::from_utf8_lossy" | "String::from_utf8_unchecked" => {
+        "String::from_utf8"
+        | "String::from_utf8_lossy"
+        | "String::from_utf8_unchecked"
+        | "str::from_utf8"
+        | "str::from_utf8_unchecked" => {
             let src = args.first().cloned().unwrap_or_else(|| Expr::raw("null"));
             let b = cx.fresh("b");
             let joined = Expr::raw(format!(
-                "{}stream().map({b} -> String.valueOf((char) (int) {b})).collect(Collectors.joining())",
+                "{}.stream().map({b} -> String.valueOf((char) (int) {b})).collect(Collectors.joining())",
                 render(&src)
             ));
-            if key == "String::from_utf8"
+            // Only the checked forms have a `Result` to keep.
+            let fallible = matches!(key, "String::from_utf8" | "str::from_utf8");
+            if fallible
                 && consumed_by(cx, &ast::Expr::CallExpr(c.clone()))
                     .as_deref()
                     .is_none_or(|u| !matches!(u, "unwrap" | "expect"))
@@ -585,10 +594,20 @@ fn from_str_radix(
 // ---- std paths (consts and unit variants) ----------------------------------------------------
 
 pub fn lower_std_path(cx: &mut Cx, path: &ast::Path, def: ModuleDef) -> Expr {
-    let _ = def;
     let text = path.syntax().text().to_string();
     let parts: Vec<&str> = text.split("::").collect();
     let last = parts.last().copied().unwrap_or("");
+    // `Ordering::Less` can be imported unqualified, so resolve it instead of trusting the text.
+    if let ModuleDef::EnumVariant(v) = def
+        && v.parent_enum(cx.db).name(cx.db).as_str() == "Ordering"
+    {
+        match last {
+            "Less" => return Expr::raw("-1"),
+            "Equal" => return Expr::raw("0"),
+            "Greater" => return Expr::raw("1"),
+            _ => {}
+        }
+    }
     let ty_tok = parts
         .iter()
         .rev()
@@ -700,6 +719,10 @@ pub fn lower_std_path(cx: &mut Cx, path: &ast::Path, def: ModuleDef) -> Expr {
             });
         }
         _ => {}
+    }
+    // Function values (`map(String::from)`), before the const/unit-variant paths above.
+    if let Some(e) = text::path(cx, path, def) {
+        return e;
     }
     cx.unsupported(path.syntax(), &format!("std path `{text}`"))
 }

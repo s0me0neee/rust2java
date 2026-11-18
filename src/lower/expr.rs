@@ -252,9 +252,25 @@ pub fn literal_expr(cx: &mut Cx, l: &ast::Literal, ty: &Ty) -> Expr {
             Ok(v) => Expr::raw(java_string_literal(&v)),
             Err(_) => cx.unsupported(node, "string literal"),
         },
-        ast::LiteralKind::ByteString(_) | ast::LiteralKind::CString(_) => {
-            cx.unsupported(node, "byte/C string literal")
-        }
+        // `b"ab"` is a byte slice: the bytes are already `u8` (Java `int`) values.
+        ast::LiteralKind::ByteString(b) => match b.value() {
+            Ok(bytes) => {
+                let items: Vec<Expr> = bytes.iter().map(|v| Expr::raw(v.to_string())).collect();
+                if items.is_empty() {
+                    Expr::New {
+                        ty: "ArrayList<>".into(),
+                        args: vec![],
+                    }
+                } else {
+                    Expr::New {
+                        ty: "ArrayList<>".into(),
+                        args: vec![Expr::call(Expr::raw("List"), "of", items)],
+                    }
+                }
+            }
+            Err(_) => cx.unsupported(node, "byte string literal"),
+        },
+        ast::LiteralKind::CString(_) => cx.unsupported(node, "C string literal"),
     }
 }
 
@@ -329,7 +345,11 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
         BinaryOp::LogicOp(LogicOp::And) => Expr::bin(l, "&&", r),
         BinaryOp::LogicOp(LogicOp::Or) => Expr::bin(l, "||", r),
         BinaryOp::CmpOp(CmpOp::Eq { negated }) => {
-            if lt.is_primitive() && rt.is_primitive() {
+            if is_ordering(&lt) || is_ordering(&rt) {
+                // `compareTo` may return any difference; only its sign is the Ordering.
+                let (l, r) = (ordering_sign(l, &lt), ordering_sign(r, &rt));
+                Expr::bin(l, if negated { "!=" } else { "==" }, r)
+            } else if lt.is_primitive() && rt.is_primitive() {
                 Expr::bin(l, if negated { "!=" } else { "==" }, r)
             } else {
                 let eq = Expr::call(l, "equals", vec![r]);
@@ -347,7 +367,10 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
                 (ast::Ordering::Greater, true) => ">",
                 (ast::Ordering::Greater, false) => ">=",
             };
-            if lt.is_primitive() {
+            if is_ordering(&lt) || is_ordering(&rt) {
+                let (l, r) = (ordering_sign(l, &lt), ordering_sign(r, &rt));
+                Expr::bin(l, sym, r)
+            } else if lt.is_primitive() {
                 Expr::bin(l, sym, r)
             } else {
                 Expr::bin(Expr::call(l, "compareTo", vec![r]), sym, Expr::raw("0"))
@@ -362,6 +385,21 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
             narrow_if_needed(v, &cx.ty(&ast::Expr::BinExpr(b.clone())))
         }
         BinaryOp::Assignment { .. } => unreachable!(),
+    }
+}
+
+// `std::cmp::Ordering` is an int whose sign is what matters.
+fn is_ordering(t: &Ty) -> bool {
+    matches!(t.strip_refs(), Ty::Ordering)
+}
+
+fn ordering_sign(e: Expr, t: &Ty) -> Expr {
+    // An `Ordering` constant is already -1/0/1.
+    let constant = matches!(&e, Expr::Raw(s) if s == "-1" || s == "0" || s == "1");
+    if is_ordering(t) && !constant {
+        Expr::call(Expr::raw("Integer"), "signum", vec![e])
+    } else {
+        e
     }
 }
 

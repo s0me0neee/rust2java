@@ -945,6 +945,10 @@ pub fn display(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
     }
 }
 
+fn is_unmapped(ty: &Ty) -> bool {
+    matches!(ty.strip_refs(), Ty::Other(_))
+}
+
 pub fn debug_supported(ty: &Ty) -> bool {
     match ty.strip_refs() {
         Ty::Unit
@@ -954,9 +958,12 @@ pub fn debug_supported(ty: &Ty) -> bool {
         | Ty::F32
         | Ty::F64
         | Ty::Str
+        | Ty::Ordering
         | Ty::Adt { .. } => true,
         Ty::Vec(t) | Ty::Set { t, .. } | Ty::Deque(t) | Ty::Option(t) => debug_supported(t),
-        Ty::Map { k, v, .. } | Ty::Result(k, v) => debug_supported(k) && debug_supported(v),
+        Ty::Map { k, v, .. } => debug_supported(k) && debug_supported(v),
+        // A std error payload (e.g. `ParseIntError`) has no Rust-shaped Debug; print its text.
+        Ty::Result(k, v) => debug_supported(k) && (debug_supported(v) || is_unmapped(v)),
         Ty::Tuple(ts) => ts.iter().all(debug_supported),
         _ => false,
     }
@@ -1084,7 +1091,11 @@ fn debug_with_spec(
             for (variant, inner) in [("Ok", ok.as_ref()), ("Err", err.as_ref())] {
                 let name = cx.fresh("fmt_value");
                 let mut pre = Vec::new();
-                let item = format_one(cx, node, Expr::name(&name), inner, spec, counts, &mut pre);
+                let item = if is_unmapped(inner) {
+                    Expr::call(Expr::raw("String"), "valueOf", vec![Expr::name(&name)])
+                } else {
+                    format_one(cx, node, Expr::name(&name), inner, spec, counts, &mut pre)
+                };
                 let text = Expr::bin(
                     Expr::bin(Expr::str_lit(&format!("{variant}(")), "+", item),
                     "+",
@@ -1372,6 +1383,27 @@ pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
             concat(parts)
         }
         Ty::Adt { .. } => Expr::call(v, "debug", vec![]),
+        // `Ordering` is an int; only its sign matters.
+        Ty::Ordering => Expr::Switch {
+            scrut: Box::new(Expr::call(Expr::raw("Integer"), "signum", vec![v])),
+            arms: vec![
+                Arm {
+                    line: 1,
+                    label: "-1".into(),
+                    body: ArmBody::Expr(Expr::str_lit("Less")),
+                },
+                Arm {
+                    line: 1,
+                    label: "0".into(),
+                    body: ArmBody::Expr(Expr::str_lit("Equal")),
+                },
+                Arm {
+                    line: 1,
+                    label: "default".into(),
+                    body: ArmBody::Expr(Expr::str_lit("Greater")),
+                },
+            ],
+        },
         _ => Expr::call(Expr::raw("String"), "valueOf", vec![v]),
     }
 }

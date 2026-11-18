@@ -1,0 +1,8 @@
+["x", "y", "z"]
+["a", "bb"]
+a+b
+[true, true, true, false, false]
+[true, false, false, true]
+[false, true, false, true, false]
+['a', 'b', 'c']
+abc
