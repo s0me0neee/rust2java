@@ -541,11 +541,7 @@ pub fn lower_iter_let(
     let Some(local) = cx.sema.to_def(ip) else {
         return false;
     };
-    let Some(scope) = ip
-        .syntax()
-        .ancestors()
-        .find(|n| ast::Fn::can_cast(n.kind()))
-    else {
+    let Some(scope) = cx.enclosing_fn(ip.syntax()) else {
         return false;
     };
     let pulled = cx

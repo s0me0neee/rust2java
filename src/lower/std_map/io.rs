@@ -54,6 +54,7 @@ pub(super) fn method(
         "read_line" if is_read_owner(owner) => Some(read_into(cx, m, false, out)),
         "read_to_string" if is_read_owner(owner) => Some(read_into(cx, m, true, out)),
         "read_to_end" if is_read_owner(owner) => Some(read_to_end(cx, m, out)),
+        "read" if is_read_owner(owner) => Some(read_bytes(cx, m, out)),
         "flush" if is_handle_owner(owner) => Some(flush(cx, m, recv_ty, out)),
         "write_all" | "write" if is_write_owner(owner) => Some(write_all(cx, m, recv_ty, out)),
         "file_name" | "path" if owner == "DirEntry" => dir_entry_method(cx, m, name, out),
@@ -197,6 +198,52 @@ fn read_to_end(cx: &mut Cx, m: &ast::MethodCallExpr, out: &mut Vec<Stmt>) -> Exp
         line,
         format!(
             "{} {result}; try {{ {read} {result} = new Ok<>({bytes}.length); }} catch (IOException {ex}) {{ {result} = new Err<>({ex}); }}",
+            result_java(&ret)
+        ),
+    );
+    Expr::name(result)
+}
+
+// `r.read(&mut buf)`: fills a prefix of `buf` and yields the count, 0 at end of input.
+fn read_bytes(cx: &mut Cx, m: &ast::MethodCallExpr, out: &mut Vec<Stmt>) -> Expr {
+    let line = cx.line(m.syntax());
+    let rdr = lower_receiver(cx, m, out);
+    let place = render(&line_arg(cx, m, out).unwrap_or_else(|| Expr::raw("null")));
+    cx.import("java.io.*");
+    let r = format!("((InputStream) {})", render(&rdr));
+    let (bytes, count, i, ex) = (
+        cx.fresh("bytes"),
+        cx.fresh("count"),
+        cx.fresh("i"),
+        cx.fresh("ex"),
+    );
+    let read = format!(
+        "byte[] {bytes} = new byte[{place}.size()]; {count} = Math.max(0, {r}.read({bytes})); \
+         for (int {i} = 0; {i} < {count}; {i}++) {place}.set({i}, {bytes}[{i}] & 255);"
+    );
+    let e = ast::Expr::MethodCallExpr(m.clone());
+    if unwrapped(cx, &e) {
+        push_raw(
+            out,
+            line,
+            format!(
+                "int {count}; try {{ {read} }} catch (IOException {ex}) {{ throw new UncheckedIOException({ex}); }}"
+            ),
+        );
+        return if unwrap_in_stmt(&e) {
+            Expr::raw("null")
+        } else {
+            Expr::name(count)
+        };
+    }
+    cx.needs_result = true;
+    let result = cx.fresh("read");
+    let ret = cx.ty(&e);
+    push_raw(
+        out,
+        line,
+        format!(
+            "{} {result}; try {{ int {count}; {read} {result} = new Ok<>({count}); }} catch (IOException {ex}) {{ {result} = new Err<>({ex}); }}",
             result_java(&ret)
         ),
     );

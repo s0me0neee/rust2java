@@ -35,7 +35,7 @@ struct Target {
 }
 
 pub fn lower_source_file(cx: &mut Cx, file: &ast::SourceFile, is_root: bool) -> Class {
-    let items: Vec<ast::Item> = file.items().collect();
+    let items: Vec<ast::Item> = file.items().filter(|i| !is_test_only(i)).collect();
     traits::collect(cx, &items);
     let mut members = Vec::new();
     lower_items(cx, &items, &mut members);
@@ -1977,6 +1977,15 @@ fn bound_java(cx: &mut Cx, b: &ast::TypeBound, param: &str) -> Option<String> {
         "Ord" | "PartialOrd" => Some(format!("Comparable<{param}>")),
         _ => None,
     }
+}
+
+// `#[test]` / `#[cfg(test)]` items never reach the binary (and RA leaves their macros unexpanded).
+fn is_test_only(item: &ast::Item) -> bool {
+    item.attrs().any(|a| {
+        a.as_simple_atom().is_some_and(|n| n == "test")
+            || a.as_simple_call()
+                .is_some_and(|(n, t)| n == "cfg" && t.syntax().text() == "(test)")
+    })
 }
 
 // --- derives -----------------------------------------------------------------------------

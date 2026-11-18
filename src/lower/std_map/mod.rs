@@ -512,7 +512,10 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
             Expr::raw("null")
         }
         k if k.contains("::from_str_radix") => from_str_radix(cx, c, k, &ret, args, out),
-        _ => cx.unsupported(c.syntax(), &format!("std function `{key}`")),
+        _ => match primitive_method_call(cx, c, key, &ret, line, out) {
+            Some(e) => e,
+            None => cx.unsupported(c.syntax(), &format!("std function `{key}`")),
+        },
     }
 }
 
@@ -590,6 +593,44 @@ fn from_str_radix(
     }
     let i = Int::from_name(owner).unwrap_or(Int::I32);
     option::parse_int(cx, s, ret, i, Some(radix), true, line, out)
+}
+
+// `f64::max(a, b)` / `char::to_digit(c, 10)`: a primitive method called through its type.
+fn primitive_method_call(
+    cx: &mut Cx,
+    c: &ast::CallExpr,
+    key: &str,
+    ret: &Ty,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) -> Option<Expr> {
+    let (owner, name) = key.split_once("::")?;
+    let t = match owner {
+        "f32" => Ty::F32,
+        "f64" => Ty::F64,
+        "char" => Ty::Char,
+        "bool" => Ty::Bool,
+        _ => Ty::Int(Int::from_name(owner)?),
+    };
+    let ast::Expr::PathExpr(p) = c.expr()? else {
+        return None;
+    };
+    let Some(ra_ap_hir::PathResolution::Def(ModuleDef::Function(f))) =
+        cx.sema.resolve_path(&p.path()?)
+    else {
+        return None;
+    };
+    f.self_param(cx.db)?;
+    let mut args = expr::call_args(cx, c, out);
+    if args.is_empty() {
+        return None;
+    }
+    let recv = args.remove(0);
+    match &t {
+        Ty::F32 | Ty::F64 => lower_float_method(cx, recv, args, t == Ty::F32, name, ret, line, out),
+        Ty::Int(i) => lower_int_method(cx, recv, args, *i, name, ret, line, out),
+        _ => lower_small_method(cx, recv, &args, &t, name, ret, line, out),
+    }
 }
 
 // ---- std paths (consts and unit variants) ----------------------------------------------------
@@ -903,21 +944,17 @@ pub fn lower_std_method(
         _ => (recv.clone(), t),
     };
     let found = match &t {
-        Ty::Int(i) => lower_int_method(
-            cx,
-            m,
-            recv.clone(),
-            args.clone(),
-            &arg_asts,
-            *i,
-            &name,
-            &ret,
-            line,
-            out,
-        ),
+        // `u8` ASCII tests and case maps share the char forms (a Java char is an int).
+        Ty::Int(Int::U8)
+            if name.starts_with("is_ascii")
+                || name.starts_with("to_ascii_")
+                || name == "eq_ignore_ascii_case" =>
+        {
+            lower_small_method(cx, recv.clone(), &args, &t, &name, &ret, line, out)
+        }
+        Ty::Int(i) => lower_int_method(cx, recv.clone(), args.clone(), *i, &name, &ret, line, out),
         Ty::F32 | Ty::F64 => lower_float_method(
             cx,
-            m,
             recv.clone(),
             args.clone(),
             t == Ty::F32,

@@ -303,11 +303,7 @@ impl<'a, 'db> Cx<'a, 'db> {
         let Some(local) = self.sema.to_def(ip) else {
             return false;
         };
-        let Some(scope) = ip
-            .syntax()
-            .ancestors()
-            .find(|n| ast::Fn::can_cast(n.kind()))
-        else {
+        let Some(scope) = self.enclosing_fn(ip.syntax()) else {
             return false;
         };
         let is_mut = ip.mut_token().is_some();
@@ -348,11 +344,7 @@ impl<'a, 'db> Cx<'a, 'db> {
         let Some(local) = self.sema.to_def(ip) else {
             return false;
         };
-        let Some(scope) = ip
-            .syntax()
-            .ancestors()
-            .find(|n| ast::Fn::can_cast(n.kind()))
-        else {
+        let Some(scope) = self.enclosing_fn(ip.syntax()) else {
             return false;
         };
         self.expanded_descendants(&scope).into_iter().filter_map(ast::ClosureExpr::cast).any(|c| {
@@ -363,6 +355,13 @@ impl<'a, 'db> Cx<'a, 'db> {
                     })
                 })
         })
+    }
+
+    // The `fn` around `node`, looking through macro expansions to their call sites.
+    pub fn enclosing_fn(&self, node: &SyntaxNode) -> Option<SyntaxNode> {
+        self.sema
+            .ancestors_with_macros(node.clone())
+            .find(|n| ast::Fn::can_cast(n.kind()))
     }
 
     // All nodes under `root`, including the expansions of macro calls (whose arguments are only

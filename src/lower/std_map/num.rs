@@ -456,17 +456,14 @@ fn unsigned_compare(i: Int, a: Expr, b: Expr) -> Expr {
 
 pub(super) fn lower_int_method(
     cx: &mut Cx,
-    m: &ast::MethodCallExpr,
     recv: Expr,
     args: Vec<Expr>,
-    arg_asts: &[ast::Expr],
     i: Int,
     name: &str,
     ret: &Ty,
     line: u32,
     out: &mut Vec<Stmt>,
 ) -> Option<Expr> {
-    let _ = (m, arg_asts);
     let long = i.is_long();
     let unsigned = i.is_unsigned();
     let b0 = args.first().cloned().unwrap_or_else(|| Expr::raw("0"));
@@ -507,6 +504,25 @@ pub(super) fn lower_int_method(
             Box::new(math("pow", vec![recv, b0])),
         )),
         "min" | "max" => Some(min_max(cx, recv, b0, i, name == "max", line, out)),
+        "is_multiple_of" => {
+            let rem = if matches!(i, Int::U32 | Int::U64 | Int::U128) {
+                unsigned_div_rem(i, recv.clone(), b0.clone(), true)
+            } else {
+                Expr::bin(recv.clone(), "%", b0.clone())
+            };
+            let test = Expr::bin(rem, "==", Expr::raw("0"));
+            let nonzero_lit = matches!(&b0, Expr::Raw(t) if t.parse::<u64>().is_ok_and(|v| v != 0));
+            Some(if nonzero_lit {
+                test
+            } else {
+                // `x.is_multiple_of(0)` is `x == 0` in Rust; Java's `%` would throw.
+                Expr::Ternary(
+                    Box::new(Expr::bin(b0, "==", Expr::raw("0"))),
+                    Box::new(Expr::bin(recv, "==", Expr::raw("0"))),
+                    Box::new(test),
+                )
+            })
+        }
         "clamp" => Some(clamp(cx, recv, b0, b1, i, line, out)),
         "rem_euclid" => Some(if unsigned {
             let rem = unsigned_div_rem(i, recv, b0, true);
@@ -1284,7 +1300,6 @@ pub(super) fn wrapping_int(recv: Expr, b: Expr, i: Int, name: &str) -> Expr {
 
 pub(super) fn lower_float_method(
     cx: &mut Cx,
-    m: &ast::MethodCallExpr,
     recv: Expr,
     args: Vec<Expr>,
     f32: bool,
@@ -1293,7 +1308,7 @@ pub(super) fn lower_float_method(
     line: u32,
     out: &mut Vec<Stmt>,
 ) -> Option<Expr> {
-    let _ = (m, ret);
+    let _ = ret;
     let cls = if f32 { "Float" } else { "Double" };
     let fty = if f32 { Ty::F32 } else { Ty::F64 };
     let math = |f: &str, a: Vec<Expr>| Expr::call(Expr::raw("Math"), f, a);

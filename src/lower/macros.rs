@@ -120,8 +120,33 @@ pub fn lower_macro_expr(cx: &mut Cx, m: &ast::MacroExpr, out: &mut Vec<Stmt>) ->
         "dbg" => lower_dbg(cx, &mc, out),
         "matches" => lower_matches(cx, &mc, out),
         "write" | "writeln" => lower_write(cx, &mc, out),
-        _ => cx.unsupported(mc.syntax(), &format!("macro `{name}!`")),
+        _ => lower_user_macro(cx, &mc, &name, out),
     }
+}
+
+// A `macro_rules!` of this crate: lower its expansion in place (every node maps to the call line).
+fn lower_user_macro(cx: &mut Cx, mc: &ast::MacroCall, name: &str, out: &mut Vec<Stmt>) -> Expr {
+    let local = cx
+        .sema
+        .resolve_macro_call(mc)
+        .is_some_and(|m| m.module(cx.db).krate(cx.db).origin(cx.db).is_local());
+    let expansion = local.then(|| cx.sema.expand_macro_call(mc)).flatten();
+    let Some(exp) = expansion else {
+        return cx.unsupported(mc.syntax(), &format!("macro `{name}!`"));
+    };
+    if let Some(e) = ast::Expr::cast(exp.value.clone()) {
+        return expr::lower_expr(cx, &e, out);
+    }
+    if let Some(stmts) = ast::MacroStmts::cast(exp.value) {
+        for s in stmts.statements() {
+            super::stmt::lower_stmt(cx, &s, out);
+        }
+        return match stmts.expr() {
+            Some(e) => expr::lower_expr(cx, &e, out),
+            None => Expr::raw("null"),
+        };
+    }
+    cx.unsupported(mc.syntax(), &format!("expansion of macro `{name}!`"))
 }
 
 fn lower_write(cx: &mut Cx, mc: &ast::MacroCall, out: &mut Vec<Stmt>) -> Expr {

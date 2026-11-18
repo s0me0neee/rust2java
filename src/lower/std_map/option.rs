@@ -449,6 +449,11 @@ pub(super) fn is_unwrapped_source(cx: &Cx, recv_ast: &ast::Expr) -> bool {
                 method_name(mc).as_str(),
                 "read_line" | "read_to_string" | "read_to_end" | "write_all" | "write" | "flush"
             ) || (method_name(mc) == "parse" && super::text::direct_parse(cx, recv_ast).is_some())
+                || (method_name(mc) == "read"
+                    && mc.receiver().is_some_and(|r| {
+                        matches!(cx.ty(&r).strip_refs(), Ty::Other(n)
+                            if matches!(n.as_str(), "Stdin" | "StdinLock" | "BufReader" | "File"))
+                    }))
         }
         // `write!`/`writeln!` perform the write and hand back a dummy `Ok`.
         ast::Expr::MacroExpr(m) => m.macro_call().is_some_and(|mc| {

@@ -367,6 +367,12 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
                 let (l, r) = (ordering_sign(l, &lt), ordering_sign(r, &rt));
                 Expr::bin(l, if negated { "!=" } else { "==" }, r)
             } else if lt.is_primitive() && rt.is_primitive() {
+                // Two boxed operands (`list.get(i) == list.get(j)`) would compare references.
+                let l = if maybe_boxed(&l) && maybe_boxed(&r) {
+                    Expr::Cast(lt.strip_refs().java(), Box::new(l))
+                } else {
+                    l
+                };
                 Expr::bin(l, if negated { "!=" } else { "==" }, r)
             } else {
                 let eq = Expr::call(l, "equals", vec![r]);
@@ -411,6 +417,31 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
             narrow_if_needed(v, &cx.ty(&ast::Expr::BinExpr(b.clone())))
         }
         BinaryOp::Assignment { .. } => unreachable!(),
+    }
+}
+
+// Calls that hand back a collection element or other boxed value.
+fn maybe_boxed(e: &Expr) -> bool {
+    match e {
+        Expr::Call { name, .. } => {
+            matches!(
+                name.as_str(),
+                "get"
+                    | "getKey"
+                    | "getValue"
+                    | "getFirst"
+                    | "getLast"
+                    | "peek"
+                    | "peekFirst"
+                    | "peekLast"
+                    | "next"
+                    | "orElseThrow"
+                    | "unwrap"
+                    | "removeLast"
+                    | "removeFirst"
+            ) || name.starts_with('_')
+        }
+        _ => false,
     }
 }
 
@@ -471,10 +502,7 @@ fn op_trait_method(a: ast::ArithOp) -> &'static str {
 // `if let Some(x) = o.as_mut()`, or `let x = o.get_or_insert(v)`.
 fn option_ref_place(cx: &mut Cx, inner: &ast::Expr, out: &mut Vec<Stmt>) -> Option<(Expr, Ty)> {
     let local = cx.local_of_path(inner)?;
-    let scope = inner
-        .syntax()
-        .ancestors()
-        .find(|n| ast::Fn::can_cast(n.kind()))?;
+    let scope = cx.enclosing_fn(inner.syntax())?;
     let ip = cx
         .expanded_descendants(&scope)
         .into_iter()

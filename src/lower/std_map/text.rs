@@ -168,14 +168,11 @@ pub(super) fn lower_small_method(
             );
             Expr::bin(Expr::bin(digit, "||", lower), "||", upper)
         }
+        // Rust's set is space, \t, \n, \x0C, \r (no vertical tab).
         "is_ascii_whitespace" => Expr::bin(
-            Expr::bin(recv.clone(), "==", Expr::raw("' '")),
-            "||",
-            Expr::bin(
-                Expr::bin(recv.clone(), ">=", Expr::raw("'\\t'")),
-                "&&",
-                Expr::bin(recv, "<=", Expr::raw("'\\r'")),
-            ),
+            Expr::call(Expr::str_lit(" \t\n\x0C\r"), "indexOf", vec![recv]),
+            ">=",
+            Expr::raw("0"),
         ),
         "is_ascii_uppercase" => Expr::bin(
             Expr::bin(recv.clone(), ">=", Expr::raw("'A'")),
@@ -610,6 +607,8 @@ pub(super) fn direct_parse(cx: &Cx, e: &ast::Expr) -> Option<&'static str> {
     };
     match t.strip_refs() {
         Ty::Int(i) => int_parser(*i),
+        // `parse::<String>()` can't fail: the empty name means "the input itself".
+        Ty::Str => Some(""),
         _ => None,
     }
 }
@@ -643,8 +642,10 @@ pub(super) fn parse_expr(
     if let Ty::Adt { java, .. } = target.strip_refs() {
         return Expr::static_call(format!("{java}.from_str"), vec![recv]);
     }
-    if let Some(f) = direct_parse(cx, &ast::Expr::MethodCallExpr(m.clone())) {
-        return Expr::static_call(f, vec![recv]);
+    match direct_parse(cx, &ast::Expr::MethodCallExpr(m.clone())) {
+        Some("") => return recv,
+        Some(f) => return Expr::static_call(f, vec![recv]),
+        None => {}
     }
     super::option::parse_result(cx, m, recv, ret, &target, line, out)
 }
