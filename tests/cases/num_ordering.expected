@@ -1,0 +1,15 @@
+Less Greater Equal
+true true true
+Greater Less
+Greater
+true
+true true
+Some(Greater) Some(Less)
+None None
+Less
+Greater
+true true
+Some(Equal)
+Less
+Equal
+Less

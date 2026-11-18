@@ -217,7 +217,12 @@ pub fn literal_expr(cx: &mut Cx, l: &ast::Literal, ty: &Ty) -> Expr {
             match *ty {
                 Ty::F32 => Expr::raw(format!("{body}.0f")),
                 Ty::F64 => Expr::raw(format!("{body}.0")),
-                Ty::Int(i) if i.is_long() => Expr::raw(format!("{body}L")),
+                Ty::Int(i) if i.is_long() => Expr::raw(
+                    std_map::unsigned_literal(i, &body).unwrap_or_else(|| format!("{body}L")),
+                ),
+                Ty::Int(i) if i.is_unsigned() => {
+                    Expr::raw(std_map::unsigned_literal(i, &body).unwrap_or(body))
+                }
                 _ => Expr::raw(body),
             }
         }
@@ -370,6 +375,8 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
             if is_ordering(&lt) || is_ordering(&rt) {
                 let (l, r) = (ordering_sign(l, &lt), ordering_sign(r, &rt));
                 Expr::bin(l, sym, r)
+            } else if let Some(cmp) = std_map::compare_expr(&lt, l.clone(), r.clone()) {
+                Expr::bin(cmp, sym, Expr::raw("0"))
             } else if lt.is_primitive() {
                 Expr::bin(l, sym, r)
             } else {
@@ -379,6 +386,9 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
         BinaryOp::ArithOp(a) => {
             if let Ty::Adt { .. } = lt.strip_refs() {
                 return Expr::call(l, op_trait_method(a), vec![r]);
+            }
+            if let Some(e) = std_map::unsigned_arith(&lt, a, l.clone(), r.clone()) {
+                return e;
             }
             let sym = arith_symbol(a, &lt);
             let v = Expr::bin(l, sym, r);
@@ -789,6 +799,10 @@ fn lower_cast(cx: &mut Cx, c: &ast::CastExpr, out: &mut Vec<Stmt>) -> Expr {
     let to = cx.type_ref(&t);
     let v = lower_expr(cx, &inner, out);
     let (from, to) = (from.strip_refs().clone(), to.strip_refs().clone());
+    // `as` casts need the source type: `300i32 as u8` truncates even though both are Java `int`.
+    if let Some(e) = std_map::num_cast(&from, &to, v.clone()) {
+        return e;
+    }
     if from.java() == to.java() {
         return v;
     }
@@ -800,7 +814,6 @@ fn lower_cast(cx: &mut Cx, c: &ast::CastExpr, out: &mut Vec<Stmt>) -> Expr {
         ),
         // Plain enums carry their Rust discriminant in a `value` field.
         (Ty::Adt { .. }, Ty::Int(_)) => Expr::Field(Box::new(v), "value".into()),
-        // Widening int->long/double is implicit in Java but explicit casts read closer to Rust.
         _ => Expr::Cast(to.java(), Box::new(v)),
     }
 }

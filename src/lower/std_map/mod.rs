@@ -27,6 +27,9 @@ use option::{lower_option_method, lower_result_method};
 use text::{lower_small_method, lower_str_method};
 
 pub use coll::{lower_array_expr, lower_entry_assign, lower_repeat, lower_slice_range};
+pub(crate) use num::{
+    compare_expr, num_cast, unsigned_arith, unsigned_display, unsigned_literal, unsigned_string,
+};
 
 type StdFnHook = fn(&mut Cx, &ast::CallExpr, &str, &Ty, &mut Vec<Stmt>) -> Option<Expr>;
 type StdMethodHook = fn(&mut Cx, &ast::MethodCallExpr, &Ty, &str, &mut Vec<Stmt>) -> Option<Expr>;
@@ -534,6 +537,9 @@ fn cmp_min_max(
         .unwrap_or_else(|| Ty::Int(Int::I32));
     let method = if max { "max" } else { "min" };
     match ty.strip_refs() {
+        Ty::Int(i) if i.is_unsigned() && !matches!(i, Int::U8) => {
+            num::min_max(cx, a, b, *i, max, line, out)
+        }
         Ty::Int(_) | Ty::F32 | Ty::F64 => Expr::call(Expr::raw("Math"), method, vec![a, b]),
         Ty::Bool => {
             let op = if max { "||" } else { "&&" };
@@ -553,11 +559,10 @@ fn cmp_min_max(
         }
         _ => {
             let (a, b) = (simple(cx, a, &ty, line, out), simple(cx, b, &ty, line, out));
-            let cond = Expr::bin(
-                Expr::call(a.clone(), "compareTo", vec![b.clone()]),
-                if max { ">=" } else { "<=" },
-                Expr::raw("0"),
-            );
+            // `Ordering` is an int, so it compares by sign rather than `compareTo`.
+            let cmp = num::compare_expr(&ty, a.clone(), b.clone())
+                .unwrap_or_else(|| Expr::call(a.clone(), "compareTo", vec![b.clone()]));
+            let cond = Expr::bin(cmp, if max { ">=" } else { "<=" }, Expr::raw("0"));
             Expr::Ternary(Box::new(cond), Box::new(a), Box::new(b))
         }
     }

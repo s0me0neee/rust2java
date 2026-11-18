@@ -1,5 +1,7 @@
 // Std mem::{swap, replace, take, drop}, size_of.
 
+use ra_ap_syntax::ast::HasGenericArgs;
+
 use super::*;
 
 // Hook for std free functions (`key` as built by `calls::std_fn_key`, e.g. `Rc::new`).
@@ -10,8 +12,48 @@ pub(super) fn fn_call(
     ret: &Ty,
     out: &mut Vec<Stmt>,
 ) -> Option<Expr> {
-    let _ = (cx, c, key, ret, out);
-    None
+    let _ = (ret, out);
+    if key != "mem::size_of" {
+        return None;
+    }
+    let ty = sizeof_type(cx, c)?;
+    Some(size_of(cx, c, &ty))
+}
+
+// The primitive sizes Rust guarantees; everything else depends on the ABI.
+fn size_of(cx: &mut Cx, c: &ast::CallExpr, ty: &Ty) -> Expr {
+    let size = match ty.strip_refs() {
+        Ty::Unit => Some(0),
+        Ty::Bool | Ty::Int(Int::I8) | Ty::Int(Int::U8) => Some(1),
+        Ty::Int(Int::I16) | Ty::Int(Int::U16) => Some(2),
+        Ty::Char | Ty::F32 | Ty::Int(Int::I32) | Ty::Int(Int::U32) => Some(4),
+        Ty::F64
+        | Ty::Int(Int::I64)
+        | Ty::Int(Int::U64)
+        | Ty::Int(Int::Isize)
+        | Ty::Int(Int::Usize) => Some(8),
+        Ty::Int(Int::I128) | Ty::Int(Int::U128) => Some(16),
+        // A reference is a plain 64-bit pointer on the supported targets.
+        Ty::Ref { .. } => Some(8),
+        _ => None,
+    };
+    match size {
+        Some(n) => Expr::raw(n.to_string()),
+        None => cx.unsupported(c.syntax(), "mem::size_of for this type"),
+    }
+}
+
+fn sizeof_type(cx: &Cx, c: &ast::CallExpr) -> Option<Ty> {
+    let ast::Expr::PathExpr(pe) = c.expr()? else {
+        return None;
+    };
+    let seg = pe.path()?.segment()?;
+    let args = seg.generic_arg_list()?;
+    let t = args.generic_args().find_map(|a| match a {
+        ast::GenericArg::TypeArg(ta) => ta.ty(),
+        _ => None,
+    })?;
+    Some(cx.type_ref(&t))
 }
 
 // Hook for std methods, before the receiver is lowered (`key` like `RefCell::borrow`).

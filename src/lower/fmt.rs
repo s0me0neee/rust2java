@@ -3,6 +3,7 @@
 use ra_ap_hir::ScopeDef;
 use ra_ap_syntax::{AstNode, AstToken, SyntaxNode, ast, ast::HasName};
 
+use super::std_map::{unsigned_display, unsigned_string};
 use super::{Cx, expr};
 use crate::jir::{Arm, ArmBody, Expr, LambdaBody, Stmt, StmtKind};
 use crate::ty::Ty;
@@ -426,6 +427,10 @@ fn lower_printf(
         if matches!(ty.strip_refs(), Ty::Other(_)) || (spec.kind == "?" && !debug_supported(&ty)) {
             return None;
         }
+        // Unsigned values need `toUnsignedString`; the concatenation path does that.
+        if spec.kind.is_empty() && matches!(ty.strip_refs(), Ty::Int(i) if unsigned_display(*i)) {
+            return None;
+        }
         let conv = if has_flags(spec) {
             printf_conv(spec, &ty, width, precision)?
         } else {
@@ -528,6 +533,7 @@ fn plain_display(spec: &Spec, ty: &Ty, v: &Expr) -> bool {
         && !ty.is_str()
         && !ty.is_float()
         && std_error_name(ty).is_none()
+        && !matches!(ty.strip_refs(), Ty::Int(i) if unsigned_display(*i))
 }
 
 // `stream.collect(...)` infers its type from the call site, which breaks overloads like println.
@@ -538,7 +544,8 @@ pub fn is_target_typed(e: &Expr) -> bool {
 // Java's `toString` already prints Rust's Debug text for these (`[1, 2, 3]`, `true`).
 fn debug_is_to_string(ty: &Ty) -> bool {
     match ty.strip_refs() {
-        Ty::Int(_) | Ty::Bool => true,
+        Ty::Int(i) => !unsigned_display(*i),
+        Ty::Bool => true,
         Ty::Vec(t) | Ty::Deque(t) => debug_is_to_string(t),
         _ => false,
     }
@@ -852,10 +859,13 @@ fn format_one(
             return cx.unsupported(node, "precision on this format type");
         }
     } else {
-        display(cx, v, ty)
+        display(cx, node, v, ty, out)
     };
     if spec.plus || width.is_some() {
-        if spec.kind.is_empty() && counts.precision.is_none() && !ty.is_str() && !ty.is_float() {
+        // `Display` of an unsigned integer is already a String; other scalars need converting.
+        let already_text =
+            ty.is_str() || matches!(ty.strip_refs(), Ty::Int(i) if unsigned_display(*i));
+        if spec.kind.is_empty() && counts.precision.is_none() && !already_text && !ty.is_float() {
             text = Expr::call(Expr::raw("String"), "valueOf", vec![text]);
         }
     } else {
@@ -928,23 +938,17 @@ fn hoist_string(cx: &mut Cx, node: &SyntaxNode, value: Expr, out: &mut Vec<Stmt>
 }
 
 // `{}`: Rust Display as a Java expression.
-pub fn display(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
+pub fn display(cx: &mut Cx, node: &SyntaxNode, v: Expr, ty: &Ty, out: &mut Vec<Stmt>) -> Expr {
     if let Some(e) = std_error_display(cx, v.clone(), ty) {
         return e;
     }
     match ty.strip_refs() {
-        Ty::F32 | Ty::F64 => {
-            cx.import("java.math.BigDecimal");
-            let bd = Expr::New {
-                ty: "BigDecimal".into(),
-                args: vec![Expr::call(Expr::raw("String"), "valueOf", vec![v])],
-            };
-            Expr::call(
-                Expr::call(bd, "stripTrailingZeros", vec![]),
-                "toPlainString",
-                vec![],
-            )
-        }
+        Ty::F32 | Ty::F64 => display_float(cx, node, v, *ty.strip_refs() == Ty::F32, out),
+        // Rust prints unsigned values as such; Java's conversion is signed.
+        Ty::Int(i) => match unsigned_string(*i, v.clone()) {
+            Some(e) => e,
+            None => v,
+        },
         _ => v,
     }
 }
@@ -1066,6 +1070,35 @@ pub fn std_error_display(cx: &mut Cx, v: Expr, ty: &Ty) -> Option<Expr> {
         )),
         Box::new(parse_error_text(Expr::name(bound))),
         Box::new(Expr::call(Expr::raw("String"), "valueOf", vec![v])),
+    ))
+}
+
+// Rust's float Display: no exponent, `-0`, `NaN`, `inf`; Java's own toString differs in all four.
+fn display_float(cx: &mut Cx, node: &SyntaxNode, v: Expr, f32: bool, out: &mut Vec<Stmt>) -> Expr {
+    cx.import("java.math.BigDecimal");
+    let simple = matches!(&v, Expr::Name(_))
+        || matches!(&v, Expr::Raw(s) if s.chars().all(|c| c.is_ascii_digit() || matches!(c, '.' | '-')));
+    let v = if simple || cx.lambda_depth > 0 {
+        v
+    } else {
+        let name = cx.fresh("fmt_f");
+        out.push(Stmt::new(
+            cx.line(node),
+            StmtKind::Local {
+                ty: if f32 { "float" } else { "double" }.into(),
+                name: name.clone(),
+                init: Some(v),
+            },
+        ));
+        Expr::name(name)
+    };
+    let cls = if f32 { "Float" } else { "Double" };
+    let r = crate::emit::render_expr(&v);
+    let plain = format!("new BigDecimal(String.valueOf({r})).stripTrailingZeros().toPlainString()");
+    Expr::raw(format!(
+        "({cls}.isNaN({r}) ? \"NaN\" : {r} == {cls}.POSITIVE_INFINITY ? \"inf\" : \
+         {r} == {cls}.NEGATIVE_INFINITY ? \"-inf\" : \
+         String.valueOf({r}).equals(\"-0.0\") ? \"-0\" : {plain})"
     ))
 }
 
@@ -1499,6 +1532,21 @@ pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
             parts.push(Expr::str_lit(")"));
             concat(parts)
         }
+        Ty::Ordering => {
+            // Rust names the variants; the Java value only keeps its sign.
+            let less = Expr::bin(v.clone(), "<", Expr::raw("0"));
+            let greater = Expr::bin(v, ">", Expr::raw("0"));
+            Expr::Ternary(
+                Box::new(less),
+                Box::new(Expr::str_lit("Less")),
+                Box::new(Expr::Ternary(
+                    Box::new(greater),
+                    Box::new(Expr::str_lit("Greater")),
+                    Box::new(Expr::str_lit("Equal")),
+                )),
+            )
+        }
+        Ty::Int(i) if unsigned_display(*i) => unsigned_string(*i, v.clone()).unwrap_or(v),
         Ty::Adt { .. } => Expr::call(v, "debug", vec![]),
         // `Ordering` is an int; only its sign matters.
         Ty::Ordering => Expr::Switch {
