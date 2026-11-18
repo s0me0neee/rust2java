@@ -5,7 +5,7 @@ mod lower;
 mod ty;
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 
 use anyhow::{Context, Result};
@@ -23,7 +23,7 @@ struct Args {
     // A cargo project directory, or one or more .rs files.
     #[arg(required = true)]
     inputs: Vec<PathBuf>,
-    #[arg(short, long, default_value = "out")]
+    #[arg(short, long, default_value = ".")]
     out: PathBuf,
     // Compile with javac and run each transpiled program.
     #[arg(long)]
@@ -110,7 +110,8 @@ fn transpile(args: &Args, project: &frontend::Project) -> Result<ExitCode> {
         }
         let java_path = dir.join(format!("{stem}.java"));
         std::fs::write(&java_path, java)?;
-        eprintln!("wrote {}", java_path.display());
+        let shown = java_path.strip_prefix(".").unwrap_or(&java_path);
+        eprintln!("wrote {}", shown.display());
         if args.line_report {
             let lines = serde_json::json!({ "rust": unit.path, "stmts": report.stmts, "drift": report.drift });
             std::fs::write(dir.join(format!("{stem}.lines.json")), lines.to_string())?;
@@ -128,7 +129,7 @@ fn transpile(args: &Args, project: &frontend::Project) -> Result<ExitCode> {
     }
     if args.run {
         for output in outputs.values() {
-            let code = compile_and_run(&args.out, output)?;
+            let code = compile_and_run(output)?;
             if code != 0 {
                 return Ok(ExitCode::from(code as u8));
             }
@@ -150,22 +151,18 @@ fn embedded_result() -> String {
     )
 }
 
-fn compile_and_run(out: &Path, output: &Output) -> Result<i32> {
-    let (sources, classes, main): (Vec<PathBuf>, PathBuf, String) = match output {
-        Output::File(path) => {
-            let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-            (
-                vec![path.clone()],
-                out.join("classes").join(&*stem),
-                "Main".into(),
-            )
-        }
+// Class files go to a temporary directory so `--run` leaves only the .java behind.
+fn compile_and_run(output: &Output) -> Result<i32> {
+    let tmp = tempfile::tempdir()?;
+    let classes = tmp.path().to_path_buf();
+    let (sources, main): (Vec<PathBuf>, String) = match output {
+        Output::File(path) => (vec![path.clone()], "Main".into()),
         Output::Package(package, dir) => {
             let sources = std::fs::read_dir(dir)?
                 .filter_map(|e| e.ok().map(|e| e.path()))
                 .filter(|p| p.extension().is_some_and(|e| e == "java"))
                 .collect();
-            (sources, out.join("classes"), format!("{package}.Main"))
+            (sources, format!("{package}.Main"))
         }
     };
     let javac = which::which("javac").context("javac not found on PATH")?;

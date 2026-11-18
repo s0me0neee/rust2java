@@ -31,15 +31,15 @@ A source-to-source transpiler that turns Rust (1.95+, edition 2021/2024) into re
 ## 2. Usage and output
 
 ```
-rust2java <cargo project dir | file.rs> -o out/ [--run]
+rust2java <cargo project dir | file.rs ...> [-o dir (default: current directory)] [--run]
 ```
 
 A bare `file.rs` is wrapped in a temporary cargo project so the frontend can load it.
 
-A crate that is one source file (every `.rs` input) becomes one Java file: `out/<name>.java`, holding a
+A crate that is one source file (every `.rs` input) becomes one Java file: `<dir>/<name>.java`, holding a
 package-private `final class Main` with no package line, plus `Result`/`Ok`/`Err` appended after the
-class when the program uses Result (§13). Run it with `java out/<name>.java`, or `--run`. The hidden
-`--line-report` flag also writes `out/<name>.lines.json` (statement line-match report, for the tests).
+class when the program uses Result (§13). Run it with `java <name>.java`, or `--run` (classes go to a temp dir). The hidden
+`--line-report` flag also writes `<dir>/<name>.lines.json` (statement line-match report, for the tests).
 
 A cargo project with several module files keeps one class per module in a package:
 
