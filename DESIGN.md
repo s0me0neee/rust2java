@@ -31,10 +31,12 @@ A source-to-source transpiler that turns Rust (1.95+, edition 2021/2024) into re
 ## 2. Usage and output
 
 ```
-rust2java <cargo project dir | file.rs ...> [-o dir (default: current directory)] [--run]
+rust2java <cargo project dir | file.rs ...> [-o dir | file.java | -] [-q] [--run [-- program args]]
 ```
 
-A bare `file.rs` is wrapped in a temporary cargo project so the frontend can load it.
+A bare `file.rs` is wrapped in a temporary cargo project so the frontend can load it. `-o` defaults to the
+current directory; `-o Foo.java` names the file (one program only), `-o -` prints the Java to stdout (single-file
+programs only). `--run` exits with the program's exit code and passes everything after `--` to it.
 
 A crate that is one source file (every `.rs` input) becomes one Java file: `<dir>/<name>.java`, holding a
 package-private `final class Main` with no package line, plus `Result`/`Ok`/`Err` appended after the
