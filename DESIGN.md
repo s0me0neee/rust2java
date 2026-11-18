@@ -368,7 +368,7 @@ The format string is compiled at transpile time into plain Java:
 | Rust | Java |
 |---|---|
 | `println!("x = {}, y = {}", x, y)` (Display of ints, strings, chars, bools) | `System.out.println("x = " + x + ", y = " + y);` |
-| `{}` of `f32`/`f64` | `new BigDecimal(String.valueOf(f)).stripTrailingZeros().toPlainString()`. Rust prints `1.0` as `1` and never uses exponent notation, and since Java 19 `String.valueOf(double)` gives the same shortest digits. NaN, ±inf and `-0.0` differ (accepted). |
+| `{}` of `f32`/`f64` | `display_float(f)`: a per-file static helper (trailer line) using `new BigDecimal(String.valueOf(f)).stripTrailingZeros().toPlainString()` plus Rust's `NaN`/`inf`/`-0` text. Rust prints `1.0` as `1` and never uses exponent notation. |
 | `{}` of a `Display` user type | concatenated directly (its `toString()`) |
 | `{:?}` | a type-directed inline expression (below) |
 | `{:#?}` | Phase C (a diagnostic until then) |
@@ -391,7 +391,7 @@ The transpiler knows the static type, so it builds the Debug string inline. Nest
 |---|---|
 | integers, `bool`, `List` of those | `x`, or `v.toString()` (Java's `[1, 2, 3]` is the same as Rust's) |
 | `String`/`&str`, `char` | `debug_str(s, '"')`, `debug_str(String.valueOf(c), '\'')`: one static helper per file, on the trailer line, with Rust's exact escaping |
-| floats | `String.valueOf(f)` (Rust's `{:?}` also prints `1.0`) |
+| floats | `debug_float(f)`: per-file static helper; Display plus a forced `.0`, exponent form outside 1e-4..1e16 |
 | `List<T>` | `v.stream().map(x -> <debug x>).collect(Collectors.joining(", ", "[", "]"))` |
 | `HashSet`/`BTreeSet` | the same, with `"{", "}"` |
 | `HashMap`/`BTreeMap` | `m.entrySet().stream().map(e -> <debug k> + ": " + <debug v>).collect(Collectors.joining(", ", "{", "}"))` |

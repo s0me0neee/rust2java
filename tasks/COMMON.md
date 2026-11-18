@@ -11,8 +11,8 @@ this brief wins.
 - **Line numbers**: every JIR `Stmt` must carry the Rust line it came from (`cx.line(node)`).
   Extra Java needed for one Rust line goes on that same line (push several `Stmt`s with the same line).
 - **Java standard library only.** No helper classes/functions. The only generated non-std code is
-  `Result.java` (src/support/Result.java), `TupleN` records (`items::need_tuple`), the `debug_str` helper
-  (`fmt::debug_quote`, for `{:?}` on str/char) and the user's own types.
+  `Result.java` (src/support/Result.java), `TupleN` records (`items::need_tuple`), the per-file `debug_str`/`display_float`/`debug_float`
+  helpers (`fmt::file_helper`, for `{:?}` on str/char and `{}`/`{:?}` on floats) and the user's own types.
   If std can't express something in one line, hoist temporaries into `out` (same line) or use a stream.
 - **Keep Rust names** (`snake_case` stays). Java keywords get `_` suffix via `escape_keyword`.
 - **Never silently mistranslate.** If something isn't supported, call `cx.unsupported(node, "what")`.

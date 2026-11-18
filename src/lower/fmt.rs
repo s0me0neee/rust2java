@@ -945,12 +945,12 @@ fn hoist_string(cx: &mut Cx, node: &SyntaxNode, value: Expr, out: &mut Vec<Stmt>
 }
 
 // `{}`: Rust Display as a Java expression.
-pub fn display(cx: &mut Cx, node: &SyntaxNode, v: Expr, ty: &Ty, out: &mut Vec<Stmt>) -> Expr {
+pub fn display(cx: &mut Cx, _node: &SyntaxNode, v: Expr, ty: &Ty, _out: &mut Vec<Stmt>) -> Expr {
     if let Some(e) = std_error_display(cx, v.clone(), ty) {
         return e;
     }
     match ty.strip_refs() {
-        Ty::F32 | Ty::F64 => display_float(cx, node, v, *ty.strip_refs() == Ty::F32, out),
+        Ty::F32 | Ty::F64 => display_float(cx, v, *ty.strip_refs() == Ty::F32),
         // Rust prints unsigned values as such; Java's conversion is signed.
         Ty::Int(i) => match unsigned_string(*i, v.clone()) {
             Some(e) => e,
@@ -1080,33 +1080,26 @@ pub fn std_error_display(cx: &mut Cx, v: Expr, ty: &Ty) -> Option<Expr> {
     ))
 }
 
+// Adds a static helper method to this file's trailer line once.
+fn file_helper(cx: &mut Cx, decl: String) {
+    if !cx.file_trailer.contains(&decl) {
+        cx.file_trailer.insert(0, decl);
+    }
+}
+
 // Rust's float Display: no exponent, `-0`, `NaN`, `inf`; Java's own toString differs in all four.
-fn display_float(cx: &mut Cx, node: &SyntaxNode, v: Expr, f32: bool, out: &mut Vec<Stmt>) -> Expr {
+fn display_float(cx: &mut Cx, v: Expr, f32: bool) -> Expr {
     cx.import("java.math.BigDecimal");
-    let simple = matches!(&v, Expr::Name(_))
-        || matches!(&v, Expr::Raw(s) if s.chars().all(|c| c.is_ascii_digit() || matches!(c, '.' | '-')));
-    let v = if simple || cx.lambda_depth > 0 {
-        v
-    } else {
-        let name = cx.fresh("fmt_f");
-        out.push(Stmt::new(
-            cx.line(node),
-            StmtKind::Local {
-                ty: if f32 { "float" } else { "double" }.into(),
-                name: name.clone(),
-                init: Some(v),
-            },
-        ));
-        Expr::name(name)
-    };
-    let cls = if f32 { "Float" } else { "Double" };
-    let r = crate::emit::render_expr(&v);
-    let plain = format!("new BigDecimal(String.valueOf({r})).stripTrailingZeros().toPlainString()");
-    Expr::raw(format!(
-        "({cls}.isNaN({r}) ? \"NaN\" : {r} == {cls}.POSITIVE_INFINITY ? \"inf\" : \
-         {r} == {cls}.NEGATIVE_INFINITY ? \"-inf\" : \
-         String.valueOf({r}).equals(\"-0.0\") ? \"-0\" : {plain})"
-    ))
+    let t = if f32 { "float" } else { "double" };
+    file_helper(
+        cx,
+        format!(
+            "static String display_float({t} x) {{ String s = String.valueOf(x); return s.equals(\"NaN\") ? s \
+             : s.equals(\"Infinity\") ? \"inf\" : s.equals(\"-Infinity\") ? \"-inf\" : s.equals(\"-0.0\") ? \"-0\" \
+             : new BigDecimal(s).stripTrailingZeros().toPlainString(); }}"
+        ),
+    );
+    Expr::static_call("display_float", vec![v])
 }
 
 pub fn debug_supported(ty: &Ty) -> bool {
@@ -1298,9 +1291,7 @@ fn debug_quote(cx: &mut Cx, value: Expr, quote: char) -> Expr {
     let helper = "static String debug_str(String s, char q) { StringBuilder b = new StringBuilder().append(q); \
                   s.codePoints().forEach(c -> b.append(c == q ? \"\\\\\" + q : c == '\\\\' ? \"\\\\\\\\\" : c == '\\n' ? \"\\\\n\" : c == '\\r' ? \"\\\\r\" : c == '\\t' ? \"\\\\t\" : c == 0 ? \"\\\\0\" \
                   : Character.isISOControl(c) ? \"\\\\u{\" + Integer.toHexString(c) + \"}\" : Character.toString(c))); return b.append(q).toString(); }";
-    if !cx.file_trailer.iter().any(|t| t == helper) {
-        cx.file_trailer.insert(0, helper.to_string());
-    }
+    file_helper(cx, helper.to_string());
     let value = if quote == '\'' {
         Expr::call(Expr::raw("String"), "valueOf", vec![value])
     } else {
@@ -1327,82 +1318,20 @@ fn debug_sequence(cx: &mut Cx, v: Expr, inner: &Ty, open: &str, close: &str) -> 
     Expr::call(mapped, "collect", vec![joining])
 }
 
-fn debug_float(cx: &mut Cx, v: Expr) -> Expr {
+// Rust's float Debug: Display plus a forced `.0`, and an exponent outside 1e-4..1e16.
+fn debug_float(cx: &mut Cx, v: Expr, f32: bool) -> Expr {
     cx.import("java.math.BigDecimal");
-    let text = Expr::call(Expr::raw("String"), "valueOf", vec![v.clone()]);
-    let plain = Expr::call(
-        Expr::call(
-            Expr::New {
-                ty: "BigDecimal".into(),
-                args: vec![text.clone()],
-            },
-            "stripTrailingZeros",
-            vec![],
-        ),
-        "toPlainString",
-        vec![],
-    );
-    let fraction = Expr::Ternary(
-        Box::new(Expr::call(
-            plain.clone(),
-            "contains",
-            vec![Expr::str_lit(".")],
-        )),
-        Box::new(plain.clone()),
-        Box::new(Expr::bin(plain, "+", Expr::str_lit(".0"))),
-    );
-    let scientific = Expr::call(
-        Expr::call(
-            text.clone(),
-            "replace",
-            vec![Expr::str_lit("E"), Expr::str_lit("e")],
-        ),
-        "replace",
-        vec![Expr::str_lit(".0e"), Expr::str_lit("e")],
-    );
-    let abs = Expr::call(Expr::raw("Math"), "abs", vec![v.clone()]);
-    let scientific_range = Expr::bin(
-        Expr::bin(abs.clone(), ">=", Expr::raw("1e16")),
-        "||",
-        Expr::bin(
-            Expr::bin(abs.clone(), ">", Expr::raw("0.0")),
-            "&&",
-            Expr::bin(abs, "<", Expr::raw("1e-4")),
+    let t = if f32 { "float" } else { "double" };
+    file_helper(
+        cx,
+        format!(
+            "static String debug_float({t} x) {{ String s = String.valueOf(x); if (s.equals(\"NaN\") || s.equals(\"-0.0\")) return s; \
+             if (s.endsWith(\"Infinity\")) return s.startsWith(\"-\") ? \"-inf\" : \"inf\"; double a = Math.abs(x); \
+             if (a >= 1e16 || a > 0 && a < 1e-4) return s.replace(\"E\", \"e\").replace(\".0e\", \"e\"); \
+             String p = new BigDecimal(s).stripTrailingZeros().toPlainString(); return p.contains(\".\") ? p : p + \".0\"; }}"
         ),
     );
-    let finite = Expr::Ternary(
-        Box::new(scientific_range),
-        Box::new(scientific),
-        Box::new(fraction),
-    );
-    let special = Expr::Ternary(
-        Box::new(Expr::call(
-            text.clone(),
-            "equals",
-            vec![Expr::str_lit("Infinity")],
-        )),
-        Box::new(Expr::str_lit("inf")),
-        Box::new(Expr::Ternary(
-            Box::new(Expr::call(
-                text.clone(),
-                "equals",
-                vec![Expr::str_lit("-Infinity")],
-            )),
-            Box::new(Expr::str_lit("-inf")),
-            Box::new(text.clone()),
-        )),
-    );
-    let is_special = Expr::bin(
-        Expr::call(Expr::raw("Double"), "isFinite", vec![v]),
-        "==",
-        Expr::raw("false"),
-    );
-    let nonzero = Expr::Ternary(Box::new(is_special), Box::new(special), Box::new(finite));
-    Expr::Ternary(
-        Box::new(Expr::call(text, "equals", vec![Expr::str_lit("-0.0")])),
-        Box::new(Expr::str_lit("-0.0")),
-        Box::new(nonzero),
-    )
+    Expr::static_call("debug_float", vec![v])
 }
 
 // Debug text as the right operand of a String `+`, where Java's own toString suffices.
@@ -1420,7 +1349,7 @@ pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
         Ty::Unit => Expr::str_lit("()"),
         Ty::Str => debug_quote(cx, v, '"'),
         Ty::Char => debug_quote(cx, v, '\''),
-        Ty::F32 | Ty::F64 => debug_float(cx, v),
+        Ty::F32 | Ty::F64 => debug_float(cx, v, *ty.strip_refs() == Ty::F32),
         Ty::Vec(inner) | Ty::Deque(inner) => debug_sequence(cx, v, inner, "[", "]"),
         Ty::Set { t, .. } => debug_sequence(cx, v, t, "{", "}"),
         Ty::Map { k, v: value, .. } => {
