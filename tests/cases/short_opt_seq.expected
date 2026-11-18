@@ -1,0 +1,13 @@
+Some(10) Some(30) Some(20)
+None Some(10)
+None None None
+30
+20
+10
+[] None None
+[2, 2, 13]
+Some(2) None
+13 2
+Some(13)
+Some("alice") Some("bob")
+["alice", "bob!"]
