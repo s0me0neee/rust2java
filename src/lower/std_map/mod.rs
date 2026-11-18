@@ -228,6 +228,11 @@ fn ordered_new(cx: &mut Cx, ty: &Ty) -> Option<Expr> {
 
 // A set/map filled from a list (of pairs, for a map); later duplicate keys win, as in Rust.
 fn ordered_from(cx: &mut Cx, src: Expr, ty: &Ty) -> Expr {
+    collect_into(cx, Expr::call(src, "stream", vec![]), ty)
+}
+
+// `stream.collect(..)` into the Java collection for `ty` (`X::from_iter` / `From` conversions).
+fn collect_into(cx: &mut Cx, stream: Expr, ty: &Ty) -> Expr {
     let new = match ordered_new(cx, ty) {
         Some(e) => format!("() -> {}", render(&e)),
         None => match ty.strip_refs() {
@@ -239,6 +244,7 @@ fn ordered_from(cx: &mut Cx, src: Expr, ty: &Ty) -> Expr {
                 };
                 format!("{}{kind}::new", if *ordered { "Tree" } else { "Hash" })
             }
+            Ty::Deque(_) => "ArrayDeque::new".into(),
             _ => "ArrayList::new".into(),
         },
     };
@@ -251,11 +257,7 @@ fn ordered_from(cx: &mut Cx, src: Expr, ty: &Ty) -> Expr {
         }
         _ => format!("Collectors.toCollection({new})"),
     };
-    Expr::call(
-        Expr::call(src, "stream", vec![]),
-        "collect",
-        vec![Expr::raw(collector)],
-    )
+    Expr::call(stream, "collect", vec![Expr::raw(collector)])
 }
 
 fn clone_expr(e: Expr, ty: &Ty) -> Expr {
@@ -452,6 +454,11 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
             ty: "ArrayList<>".into(),
             args: vec![args[0].clone()],
         },
+        "HashSet::from_iter"
+        | "BTreeSet::from_iter"
+        | "HashMap::from_iter"
+        | "BTreeMap::from_iter"
+        | "VecDeque::from_iter" => collect_into(cx, args[0].clone(), &ret),
         "Vec::from_iter" | "Vec::collect" => Expr::call(
             args[0].clone(),
             "collect",

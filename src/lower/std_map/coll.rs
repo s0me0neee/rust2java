@@ -194,6 +194,12 @@ pub(super) fn method(
     key: &str,
     out: &mut Vec<Stmt>,
 ) -> Option<Expr> {
+    let name = key.rsplit("::").next().unwrap_or(key);
+    if name == "and_modify" || matches!(name, "or_insert" | "or_insert_with" | "or_default") {
+        if let Some(e) = and_modify(cx, m, name, out) {
+            return Some(e);
+        }
+    }
     if let Ty::Vec(elem) = recv_ty.strip_refs()
         && let Some(ast::Expr::MethodCallExpr(contiguous)) = m.receiver()
         && method_name(&contiguous) == "make_contiguous"
@@ -555,6 +561,115 @@ pub(super) fn entry_method(
     Some(Expr::call(map, "computeIfAbsent", vec![key, f]))
 }
 
+// `m.entry(k).and_modify(f)` -> `computeIfPresent`; with `.or_insert*(v)` after it -> `compute`.
+// `f` must be `|x| *x op= e` / `|x| *x = e` (a new value) or mutate an object value in place.
+fn and_modify(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    name: &str,
+    out: &mut Vec<Stmt>,
+) -> Option<Expr> {
+    let modify = if name == "and_modify" {
+        m.clone()
+    } else {
+        match m.receiver()? {
+            ast::Expr::MethodCallExpr(r) if method_name(&r) == "and_modify" => r,
+            _ => return None,
+        }
+    };
+    let ast::Expr::MethodCallExpr(entry) = modify.receiver()? else {
+        return None;
+    };
+    if method_name(&entry) != "entry" {
+        return None;
+    }
+    let ast::Expr::ClosureExpr(f) = modify.arg_list()?.args().next()? else {
+        return Some(cx.unsupported(modify.syntax(), "`and_modify` without a closure literal"));
+    };
+    let map_ast = entry.receiver()?;
+    let v_ty = match cx.ty(&map_ast).strip_refs() {
+        Ty::Map { v, .. } => (**v).clone(),
+        _ => return None,
+    };
+    let map = expr::lower_expr(cx, &map_ast, out);
+    let key = expr::lower_expr(cx, &entry.arg_list()?.args().next()?, out);
+    let (k, x) = (cx.fresh("key"), cx.fresh("value"));
+    let Some(updated) = modified_value(cx, &f, &x, &v_ty) else {
+        return Some(cx.unsupported(f.syntax(), "`and_modify` closure shape"));
+    };
+    if name == "and_modify" {
+        let lambda = Expr::Lambda {
+            params: vec![k, x],
+            body: LambdaBody::Expr(Box::new(updated)),
+        };
+        return Some(Expr::call(map, "computeIfPresent", vec![key, lambda]));
+    }
+    let fresh = match name {
+        "or_insert" => expr::lower_expr(cx, &m.arg_list()?.args().next()?, out),
+        "or_insert_with" => ctor_value(cx, &m.arg_list()?.args().next()?, &v_ty, out)?,
+        _ => default_value(&v_ty),
+    };
+    let body = conditional(
+        Expr::bin(Expr::name(&x), "==", Expr::raw("null")),
+        fresh,
+        updated,
+    );
+    let lambda = Expr::Lambda {
+        params: vec![k, x],
+        body: LambdaBody::Expr(Box::new(body)),
+    };
+    Some(Expr::call(map, "compute", vec![key, lambda]))
+}
+
+// The value after `f` ran on the current value `x` (a Java name).
+fn modified_value(cx: &mut Cx, f: &ast::ClosureExpr, x: &str, v_ty: &Ty) -> Option<Expr> {
+    let ast::Pat::IdentPat(p) = f.param_list()?.params().next()?.pat()? else {
+        return None;
+    };
+    let p_name = ast::HasName::name(&p)?.text().to_string();
+    let mut body = f.body()?;
+    // `{ *x += 1 }` / `{ *x += 1; }`
+    if let ast::Expr::BlockExpr(b) = &body {
+        let list = b.stmt_list()?;
+        let stmts: Vec<ast::Stmt> = list.statements().collect();
+        body = match (stmts.as_slice(), list.tail_expr()) {
+            ([], Some(t)) => t,
+            ([ast::Stmt::ExprStmt(s)], None) => s.expr()?,
+            _ => return None,
+        };
+    }
+    cx.push_scope();
+    cx.declare_as(&p_name, x);
+    let value = (|| {
+        let ast::Expr::BinExpr(b) = &body else {
+            return None;
+        };
+        let Some(ast::BinaryOp::Assignment { op }) = b.op_kind() else {
+            return None;
+        };
+        let ast::Expr::PrefixExpr(d) = b.lhs()? else {
+            return None;
+        };
+        if d.op_kind() != Some(ast::UnaryOp::Deref) {
+            return None;
+        }
+        let mut no_out = Vec::new();
+        let rhs = expr::lower_expr_as(cx, &b.rhs()?, v_ty, &mut no_out);
+        if !no_out.is_empty() {
+            return None;
+        }
+        Some(match op {
+            None => rhs,
+            Some(op) => {
+                let sym = expr::arith_symbol(op, v_ty);
+                expr::narrow_if_needed(Expr::bin(Expr::name(x), sym, rhs), v_ty)
+            }
+        })
+    })();
+    cx.pop_scope();
+    value
+}
+
 // Value produced by a `FnOnce() -> T` argument such as `Vec::new` or `|| expr`.
 pub(super) fn ctor_value(cx: &mut Cx, a: &ast::Expr, ty: &Ty, out: &mut Vec<Stmt>) -> Option<Expr> {
     if let ast::Expr::ClosureExpr(c) = a {
@@ -910,7 +1025,7 @@ pub(super) fn lower_vec_method(
                 ret,
             ))
         }
-        "to_vec" => Some(clone_list(cx, recv, elem)),
+        "to_vec" | "to_owned" => Some(clone_list(cx, recv, elem)),
         "concat" if matches!(elem.strip_refs(), Ty::Vec(t) if super::super::is_cell_value_ty(t)) => {
             let flat = Expr::call(
                 Expr::call(recv, "stream", vec![]),

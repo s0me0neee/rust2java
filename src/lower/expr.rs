@@ -545,7 +545,7 @@ fn ordering_operands(l: Expr, lt: &Ty, r: Expr, rt: &Ty) -> (Expr, Expr) {
     (ordering_sign(l, lt), ordering_sign(r, rt))
 }
 
-fn arith_symbol(a: ast::ArithOp, lt: &Ty) -> &'static str {
+pub fn arith_symbol(a: ast::ArithOp, lt: &Ty) -> &'static str {
     use ast::ArithOp::*;
     match a {
         Add => "+",
@@ -635,7 +635,7 @@ fn plain_place(e: &ast::Expr) -> bool {
 }
 
 // Java promotes byte/short arithmetic to int; cast back so the value fits its Rust type.
-fn narrow_if_needed(v: Expr, ty: &Ty) -> Expr {
+pub fn narrow_if_needed(v: Expr, ty: &Ty) -> Expr {
     match ty.strip_refs() {
         Ty::Int(i @ (Int::I8 | Int::I16 | Int::U16)) => Expr::Cast(i.java().into(), Box::new(v)),
         _ => v,
