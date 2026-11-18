@@ -1,0 +1,31 @@
+sku      name             cat      qty    price     value
+----------------------------------------------------------
+B-001    cookbook         books      5    24.00    120.00
+B-002    atlas            books      1    39.99     39.99
+F-001    coffee           food      20     7.75    155.00
+F-002    tea              food       0     5.50      0.00
+T-001    hammer           tools     12     9.50    114.00
+T-002    screwdriver      tools      3     4.25     12.75
+total value: 441.74
+sales so far: 0.00
+sold 5 x T-001 for 47.50
+sale failed: F-002: only 0 left
+sale failed: F-002: only 0 left
+sale failed: no such sku: Z-999
+sale failed: B-002: only 1 left
+sale failed: quantity must be positive, got 0
+restocked F-002 to 10
+tools   2 items     79.25
+    hammer        7
+    screwdriver    3
+food    2 items    210.00
+    coffee       20
+    tea          10
+books   2 items    175.99
+    cookbook      5
+    atlas         1
+low stock: ["B-002", "T-002"]
+sales total: 47.50
+true
+skus: 6
+first sku: B-001

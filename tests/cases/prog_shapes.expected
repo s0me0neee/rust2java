@@ -1,0 +1,17 @@
+rejected degenerate triangle
+circle    area     3.14 perimeter     6.28
+circle    area    19.63 perimeter    15.71
+rectangle area    12.00 perimeter    14.00
+rectangle area    15.00 perimeter    23.00
+triangle  area     6.00 perimeter    12.00
+total area: 55.78
+round shapes: 2
+largest: circle (19.63)
+by area: circle(19.6) > rectangle(15.0) > rectangle(12.0) > triangle(6.0) > circle(3.1)
+mean area/perimeter: 0.752
+first in sorted: Some("circle")
+circles: 2
+circle display: Circle(r = 3.0)
+rectangle display: Rectangle(2 x 2)
+similar area: false
+values total: 7.25

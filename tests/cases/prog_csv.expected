@@ -1,0 +1,20 @@
+skipped: column `hours` is not a number: "notanumber"
+skipped: row 8: negative hours or rate
+parsed 6 rows, 2 errors
+total hours 122.5, total pay 3915.00
+eng            2     47.5     2112.50
+ops            2     55.0     1202.50
+sales          2     20.0      600.00
+top earners: alice (1487.50), dave (910.00), carol (625.00)
+over 20 hours: 2
+line  1: alice    eng        35.0h at 46.75 => 1636.25
+line  2: bob      sales      20.0h at 33.00 => 660.00
+line  3: carol    eng        12.5h at 55.00 => 687.50
+line  4: dave     ops        40.0h at 25.03 => 1001.20
+line  5: eve      sales      0.0h at 0.00 => 0.00
+line  9: henry    ops        15.0h at 21.45 => 321.75
+average pay: 652.50
+[alice   |  35.0| 1487.50]
+[bob     |  20.0|  600.00]
+eng rows: 2
+expected error: missing field `rate`

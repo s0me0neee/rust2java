@@ -22,6 +22,7 @@ struct FieldInfo {
     name: String,
     ty: Ty,
     vis: String,
+    plain_enum: bool,
 }
 
 // The Java type an impl block's items belong to.
@@ -319,6 +320,19 @@ fn canonical_ctor(name: &str, fields: &[FieldInfo]) -> String {
     )
 }
 
+// Java enum constants have no callable `clone()`; copying the reference is already a clone.
+fn ty_is_plain_enum(cx: &Cx, t: &ast::Type) -> bool {
+    let Some(ty) = cx.sema.resolve_type(t) else {
+        return false;
+    };
+    let Some(Adt::Enum(e)) = ty.as_adt() else {
+        return false;
+    };
+    e.variants(cx.db)
+        .iter()
+        .all(|v| v.kind(cx.db) == StructKind::Unit)
+}
+
 fn field_list_info(cx: &mut Cx, list: Option<ast::FieldList>) -> Vec<FieldInfo> {
     let mut out = Vec::new();
     match list {
@@ -336,11 +350,13 @@ fn field_list_info(cx: &mut Cx, list: Option<ast::FieldList>) -> Vec<FieldInfo> 
                     String::new()
                 };
                 super::std_map::ptr::note_fn(cx, f.syntax(), &ty);
+                let plain_enum = f.ty().is_some_and(|t| ty_is_plain_enum(cx, &t));
                 out.push(FieldInfo {
                     line: cx.line(f.syntax()),
                     name,
                     ty,
                     vis,
+                    plain_enum,
                 });
             }
         }
@@ -355,11 +371,13 @@ fn field_list_info(cx: &mut Cx, list: Option<ast::FieldList>) -> Vec<FieldInfo> 
                 } else {
                     String::new()
                 };
+                let plain_enum = f.ty().is_some_and(|t| ty_is_plain_enum(cx, &t));
                 out.push(FieldInfo {
                     line: cx.line(f.syntax()),
                     name: format!("_{i}"),
                     ty,
                     vis,
+                    plain_enum,
                 });
             }
         }
@@ -1593,9 +1611,15 @@ pub fn lower_record_expr(cx: &mut Cx, r: &ast::RecordExpr, out: &mut Vec<Stmt>) 
 
 fn diamond(cx: &Cx, target: &str, ty: &Ty) -> String {
     match ty.strip_refs() {
+        // Explicit arguments: javac cannot infer a recursive bound like `T extends Comparable<T>`.
         Ty::Adt { args, .. } if !args.is_empty() => {
             let _ = cx;
-            format!("{target}<>")
+            let rendered: Vec<String> = args.iter().map(|a| a.boxed()).collect();
+            if rendered.iter().any(|a| a.contains('?')) {
+                format!("{target}<>")
+            } else {
+                format!("{target}<{}>", rendered.join(", "))
+            }
         }
         _ => target.to_string(),
     }
@@ -2003,7 +2027,13 @@ fn derive_methods(
             _ => {
                 let args: Vec<String> = fields
                     .iter()
-                    .map(|f| clone_value(&f.ty, &format!("this.{}", f.name)))
+                    .map(|f| {
+                        if f.plain_enum {
+                            format!("this.{}", f.name)
+                        } else {
+                            clone_value(&f.ty, &format!("this.{}", f.name))
+                        }
+                    })
                     .collect();
                 format!(
                     "public {name}{generics} clone() {{ return new {name}({}); }}",

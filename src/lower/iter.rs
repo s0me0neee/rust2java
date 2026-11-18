@@ -1595,9 +1595,13 @@ fn lower_pulled(
                 "({it}.hasNext() && ({p}).test({peeked}) ? Optional.<{t}>of({it}.next()) : Optional.<{t}>empty())"
             ))
         }
-        _ => cx.unsupported(
-            m.syntax(),
-            &format!("`{name}` on an iterator that is also pulled with next()"),
-        ),
+        // Anything else consumes what is left of the pulled iterator as a stream.
+        _ => {
+            let rest = Expr::raw(format!("{items}.subList({it}.nextIndex(), {items}.size())"));
+            let src = Expr::call(rest, "stream", vec![]);
+            let line = cx.line(m.syntax());
+            let ret_ty = cx.ty(&ast::Expr::MethodCallExpr(m.clone()));
+            lower_adaptor_core(cx, m, &name, src, item, &ret_ty, line, out)
+        }
     }
 }

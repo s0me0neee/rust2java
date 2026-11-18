@@ -1,0 +1,13 @@
+17 distinct words, 25 tokens
+the   |   4 ####
+dog   |   2 ##
+don't |   2 ##
+fox   |   2 ##
+stop  |   2 ##
+first: away
+last: world
+long words: 2, sum: 25
+ 3 letters: 3
+ 4 letters: 6
+ 5 letters: 6
+ 9 letters: 2

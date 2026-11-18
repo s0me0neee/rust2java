@@ -1,0 +1,2 @@
+Ok(Remove(5))
+Err("invalid digit found in string")

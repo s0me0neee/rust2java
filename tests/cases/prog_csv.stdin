@@ -1,0 +1,9 @@
+alice,eng,35,42.5
+bob,sales,20,30
+carol,eng,12.5,50
+dave,ops,40,22.75
+eve,sales,0,0
+
+frank,eng,notanumber,44
+gina,ops,-3,20
+henry,ops,15,19.5

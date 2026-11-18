@@ -131,13 +131,17 @@ pub(super) fn lower_option_method(
                 Ty::Result(_, e) => e.boxed(),
                 _ => "Object".into(),
             };
-            Some(Expr::raw(format!(
-                "{}.<Result<{}, {}>>map({v} -> new Ok<>({v})).orElse(new Err<>({}))",
-                render(&recv),
-                ok_ty,
-                err_ty,
-                render(&b0)
-            )))
+            let result_ty = format!("Result<{}, {}>", ok_ty, err_ty);
+            let mapped = Expr::call(
+                recv,
+                format!("<{result_ty}>map"),
+                vec![Expr::raw(format!("{v} -> new Ok<>({v})"))],
+            );
+            Some(Expr::call(
+                mapped,
+                "orElse",
+                vec![Expr::raw(format!("new Err<>({})", render(&b0)))],
+            ))
         }
         "ok_or_else" => {
             cx.needs_result = true;
@@ -150,12 +154,11 @@ pub(super) fn lower_option_method(
                 Ty::Result(_, e) => (**e).clone(),
                 _ => Ty::Other("?".into()),
             };
-            let mapped = Expr::raw(format!(
-                "{}.<Result<{}, {}>>map({v} -> new Ok<>({v}))",
-                render(&recv),
-                ok_ty,
-                err_ty.boxed()
-            ));
+            let mapped = Expr::call(
+                recv,
+                format!("<Result<{}, {}>>map", ok_ty, err_ty.boxed()),
+                vec![Expr::raw(format!("{v} -> new Ok<>({v})"))],
+            );
             let fallback = lambda_call(b0, &err_ty);
             Some(Expr::call(
                 mapped,

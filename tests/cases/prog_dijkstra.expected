@@ -1,0 +1,32 @@
+nodes: 8, directed links: 10
+settled 8 of 8 nodes
+a           0
+b           4
+c           2
+d           9
+e           5
+f          10
+g          12
+h          15
+reachable: 8, average 7.125
+farthest: Some("h")
+a: a
+b: a -> b
+c: a -> c
+d: a -> c -> e -> d
+e: a -> c -> e
+f: a -> c -> e -> f
+g: a -> c -> e -> f -> g
+h: a -> c -> e -> f -> g -> h
+   0: a
+   2: c
+   4: b
+   5: e
+   9: d
+  10: f
+  12: g
+  15: h
+mst nodes (in order): ["a", "c", "e", "b", "d", "f", "g", "h"]
+mst weight: 23
+settled 8 of 8 nodes
+from h: 8 nodes reached
