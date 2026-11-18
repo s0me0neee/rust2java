@@ -315,6 +315,7 @@ fn field_list_info(cx: &mut Cx, list: Option<ast::FieldList>) -> Vec<FieldInfo> 
                 } else {
                     String::new()
                 };
+                super::std_map::ptr::note_fn(cx, f.syntax(), &ty);
                 out.push(FieldInfo {
                     line: cx.line(f.syntax()),
                     name,
@@ -909,16 +910,34 @@ fn lower_fn_inner(
     };
     let mut params = Vec::new();
     let mut prelude = Vec::new();
+    // `F: Fn(i32) -> i32` parameters are the functional interface itself, so `f(x)` can call it.
+    let fn_bounds = super::std_map::ptr::fn_bounds(cx, f);
     if let Some((ty, pname)) = &self_param {
         params.push(format!("{ty} {}", cx.declare(pname)));
     }
     if let Some(pl) = f.param_list() {
         for p in pl.params() {
-            let ty = p
-                .ty()
+            let ast_ty = p.ty();
+            let ty = ast_ty
+                .clone()
                 .map(|t| cx.type_ref(&t))
                 .unwrap_or(Ty::Other("?".into()));
-            let jty = param_type(cx, &ty);
+            // `Cell<i32>`/`RefCell<i32>` parameters take the one-element array.
+            let cell = ast_ty
+                .as_ref()
+                .and_then(|t| super::std_map::ptr::array_cell_type_ref(cx, t));
+            super::std_map::ptr::note_fn(cx, p.syntax(), &ty);
+            let bound = match &ty {
+                Ty::Param(name) => fn_bounds.iter().find(|(n, _)| n == name).map(|(_, t)| t),
+                _ => None,
+            };
+            if let Some(bound_ty) = bound {
+                super::std_map::ptr::note_fn(cx, p.syntax(), bound_ty);
+            }
+            let jty = match &cell {
+                Some(inner) => format!("{}[]", inner.java()),
+                None => bound.map(Ty::java).unwrap_or_else(|| param_type(cx, &ty)),
+            };
             match p.pat() {
                 Some(ast::Pat::IdentPat(ip)) if ip.pat().is_none() => {
                     let n = ip
@@ -926,7 +945,9 @@ fn lower_fn_inner(
                         .map(|n| n.text().to_string())
                         .unwrap_or_else(|| "_".into());
                     params.push(format!("{jty} {}", cx.declare(&n)));
-                    if is_cell_param(&ty) {
+                    if cell.is_some() {
+                        cx.mark_cell_handle(&ip);
+                    } else if is_cell_param(&ty) {
                         cx.mark_cell(&ip);
                     }
                 }
@@ -946,10 +967,11 @@ fn lower_fn_inner(
         }
     }
     let generics = wrap_generics(&generics);
-    let ret_java = if ret.is_unit() {
-        "void".to_string()
-    } else {
-        ret.java()
+    super::std_map::ptr::note_fn(cx, f.syntax(), &ret);
+    let ret_java = match super::std_map::ptr::array_cell_ret(cx, f) {
+        Some(inner) => format!("{}[]", inner.java()),
+        None if ret.is_unit() => "void".to_string(),
+        None => ret.java(),
     };
     let header = format!(
         "{modifiers}{generics}{ret_java} {}({})",

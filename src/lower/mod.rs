@@ -60,6 +60,8 @@ pub struct Cx<'a, 'db> {
     pub switch_depth: u32,
     // Locals stored in one-element arrays (`int[] n = {0}`): `&mut` targets and closure-mutated vars.
     pub cells: HashSet<ra_ap_hir::Local<'db>>,
+    // Locals that *are* a one-element array: `Cell<i32>`/`RefCell<i32>` handles (`int[] c = {0}`).
+    pub cell_handles: HashSet<ra_ap_hir::Local<'db>>,
     // >0 while lowering a closure body: statements hoisted to `out` would run only once, outside it.
     pub lambda_depth: u32,
     // Iterator locals pulled with `next()`/`peek()`: Java `ListIterator` + the backing list's name.
@@ -127,6 +129,7 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         loops: Vec::new(),
         switch_depth: 0,
         cells: HashSet::new(),
+        cell_handles: HashSet::new(),
         lambda_depth: 0,
         pulled_iters: HashMap::new(),
         elem_aliases: HashMap::new(),
@@ -263,6 +266,7 @@ impl<'a, 'db> Cx<'a, 'db> {
         self.method_names.clear();
         self.tmp_counter = 0;
         self.cells.clear();
+        self.cell_handles.clear();
         self.pulled_iters.clear();
         self.elem_aliases.clear();
     }
@@ -374,6 +378,26 @@ impl<'a, 'db> Cx<'a, 'db> {
         }
     }
 
+    // Marks `x` in `let x: Cell<i32>` as naming the one-element array itself (not its element).
+    pub fn mark_cell_handle(&mut self, ip: &ast::IdentPat) {
+        if let Some(local) = self.sema.to_def(ip) {
+            self.cell_handles.insert(local);
+        }
+    }
+
+    // Java name of the array if `e` is a path to a `Cell`/`RefCell` handle local.
+    pub fn handle_path(&self, e: &ast::Expr) -> Option<String> {
+        let ast::Expr::PathExpr(pe) = e else {
+            return None;
+        };
+        match self.sema.resolve_path(&pe.path()?) {
+            Some(ra_ap_hir::PathResolution::Local(l)) if self.cell_handles.contains(&l) => {
+                Some(self.lookup(l.name(self.db).as_str()))
+            }
+            _ => None,
+        }
+    }
+
     // Java name of the cell array if `e` is a path to a cell local.
     pub fn cell_path(&self, e: &ast::Expr) -> Option<String> {
         let ast::Expr::PathExpr(pe) = e else {
@@ -452,6 +476,13 @@ impl<'a, 'db> Cx<'a, 'db> {
                 self.method_names.insert(name.clone());
                 return name;
             }
+        }
+    }
+
+    // Binds a Rust name to an existing Java name (a `move` closure's copy of a cell).
+    pub fn bind_name(&mut self, rust: &str, java: &str) {
+        if let Some(s) = self.scopes.last_mut() {
+            s.insert(rust.to_string(), java.to_string());
         }
     }
 

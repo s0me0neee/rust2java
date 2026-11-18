@@ -258,6 +258,10 @@ fn lower_format_impl(
         } else {
             cx.ty(&e)
         };
+        if super::std_map::ptr::cell_value(cx, &e) {
+            // Rust prints `Cell { value: 5 }`; a pointer to the backing array would be wrong.
+            let _ = cx.unsupported(e.syntax(), "Debug/Display of a `Cell`/`RefCell` value");
+        }
         let mut pre = Vec::new();
         let v = expr::lower_expr(cx, &e, &mut pre);
         args.push((a.name().map(|n| n.text().to_string()), v, ty, pre));
@@ -716,6 +720,9 @@ fn captured(cx: &mut Cx, node: &SyntaxNode, name: &str) -> (Expr, Ty) {
     let java = cx.lookup(name);
     match found {
         Some((t, is_cell)) => {
+            if super::std_map::ptr::cell_value_type(cx, &t) {
+                cx.unsupported(node, "Debug/Display of a `Cell`/`RefCell` value");
+            }
             let e = if is_cell {
                 Expr::raw(format!("{java}[0]"))
             } else {

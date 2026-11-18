@@ -174,7 +174,10 @@ pub fn lower_method_call(cx: &mut Cx, m: &ast::MethodCallExpr, out: &mut Vec<Stm
 
 // `*x`: references are transparent in Java; `&mut` cells (one-element arrays) read `[0]`.
 pub fn deref_place(cx: &mut Cx, inner: &ast::Expr, v: Expr) -> Expr {
-    if super::items::is_cell(cx, inner) {
+    if super::items::is_cell(cx, inner)
+        || cx.handle_path(inner).is_some()
+        || (std_map::ptr::is_array(cx, inner).is_some() && std_map::ptr::is_handle(cx, inner))
+    {
         return Expr::raw(format!("{}[0]", crate::emit::render_expr(&v)));
     }
     v

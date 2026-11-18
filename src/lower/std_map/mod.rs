@@ -13,7 +13,7 @@ mod io;
 mod mem;
 mod num;
 mod option;
-mod ptr;
+pub(crate) mod ptr;
 mod text;
 
 use coll::{

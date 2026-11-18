@@ -23,6 +23,12 @@ pub fn lower_expr(cx: &mut Cx, e: &ast::Expr, out: &mut Vec<Stmt>) -> Expr {
             Some(inner) if r.mut_token().is_some() && cx.cell_path(&inner).is_some() => {
                 Expr::name(cx.cell_path(&inner).unwrap())
             }
+            // A `Cell`/`RefCell` handle is already the shared array.
+            Some(inner) if cx.handle_path(&inner).is_some() => lower_expr(cx, &inner, out),
+            Some(inner) if std_map::ptr::bare_cell_field(cx, &inner) => cx.unsupported(
+                r.syntax(),
+                "reference to a `Cell`/`RefCell` field (its Java field is a plain value)",
+            ),
             Some(inner) if r.mut_token().is_some() && super::is_cell_value_ty(&cx.ty(&inner)) => cx
                 .unsupported(
                     r.syntax(),
@@ -40,7 +46,7 @@ pub fn lower_expr(cx: &mut Cx, e: &ast::Expr, out: &mut Vec<Stmt>) -> Expr {
         ast::Expr::FieldExpr(f) => lower_field(cx, f, out),
         ast::Expr::IndexExpr(i) => lower_index(cx, i, out),
         ast::Expr::CastExpr(c) => lower_cast(cx, c, out),
-        ast::Expr::ClosureExpr(c) => lower_closure(cx, c),
+        ast::Expr::ClosureExpr(c) => lower_closure(cx, c, out),
         ast::Expr::TupleExpr(t) => {
             let ty = cx.ty(e);
             let args: Vec<Expr> = t.fields().map(|f| lower_expr(cx, &f, out)).collect();
@@ -296,7 +302,9 @@ pub fn lower_path_expr(cx: &mut Cx, p: &ast::PathExpr) -> Expr {
                 );
             }
             let name = cx.lookup(local.name(cx.db).as_str());
-            if cx.cells.contains(&local) {
+            if cx.cell_handles.contains(&local) {
+                Expr::name(name)
+            } else if cx.cells.contains(&local) {
                 Expr::raw(format!("{name}[0]"))
             } else {
                 Expr::name(name)
@@ -320,6 +328,9 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
     let rt = cx.ty(&rhs);
     let l = lower_expr(cx, &lhs, out);
     let r = lower_expr(cx, &rhs, out);
+    // `Cell`/`RefCell` handles compare their contents, not the backing arrays.
+    let l = std_map::ptr::content_value(cx, &lhs, l);
+    let r = std_map::ptr::content_value(cx, &rhs, r);
     match op {
         BinaryOp::LogicOp(LogicOp::And) => Expr::bin(l, "&&", r),
         BinaryOp::LogicOp(LogicOp::Or) => Expr::bin(l, "||", r),
@@ -495,6 +506,16 @@ pub fn place_assign(
         }
         ast::Expr::PrefixExpr(p) if p.op_kind() == Some(ast::UnaryOp::Deref) => {
             let inner = p.expr().unwrap();
+            if let ast::Expr::MethodCallExpr(m) = super::strip_parens(&inner)
+                && m.name_ref().is_some_and(|n| n.text() == "borrow_mut")
+                && m.receiver()
+                    .is_some_and(|r| std_map::ptr::shared_object(cx, &r))
+            {
+                return cx.unsupported(
+                    lhs.syntax(),
+                    "replacing a shared object through `borrow_mut`",
+                );
+            }
             let place = lower_expr(cx, &inner, out);
             Expr::Assign(
                 Box::new(super::calls::deref_place(cx, &inner, place)),
@@ -547,8 +568,13 @@ fn lower_prefix(cx: &mut Cx, p: &ast::PrefixExpr, out: &mut Vec<Stmt>) -> Expr {
             }
         }
         Some(ast::UnaryOp::Deref) => {
+            // `*c` on a `Cell`/`RefCell` handle: the array's only element.
+            if std_map::ptr::is_array(cx, &inner).is_some() && std_map::ptr::is_handle(cx, &inner) {
+                return Expr::raw(format!("{}[0]", crate::emit::render_expr(&v)));
+            }
             // Cells (`n[0]`) and iter_mut aliases (`v.get(i)`) were resolved when lowering `inner`.
             let resolved = cx.cell_path(&inner).is_some()
+                || cx.handle_path(&inner).is_some()
                 || cx
                     .local_of_path(&inner)
                     .is_some_and(|l| cx.elem_aliases.contains_key(&l));
@@ -666,11 +692,65 @@ fn lower_cast(cx: &mut Cx, c: &ast::CastExpr, out: &mut Vec<Stmt>) -> Expr {
     }
 }
 
-pub fn lower_closure(cx: &mut Cx, c: &ast::ClosureExpr) -> Expr {
+pub fn lower_closure(cx: &mut Cx, c: &ast::ClosureExpr, out: &mut Vec<Stmt>) -> Expr {
+    std_map::ptr::note_fn(cx, c.syntax(), &cx.ty(&ast::Expr::ClosureExpr(c.clone())));
+    // `move` takes immutable captures by value; Java lambdas would share the cell array.
+    let copies = moved_cell_copies(cx, c, out);
+    cx.push_scope();
+    for (rust, java) in copies {
+        cx.bind_name(&rust, &java);
+    }
     cx.lambda_depth += 1;
     let e = lower_closure_inner(cx, c);
     cx.lambda_depth -= 1;
+    cx.pop_scope();
     e
+}
+
+fn moved_cell_copies(
+    cx: &mut Cx,
+    c: &ast::ClosureExpr,
+    out: &mut Vec<Stmt>,
+) -> Vec<(String, String)> {
+    if c.move_token().is_none() {
+        return Vec::new();
+    }
+    let line = cx.line(c.syntax());
+    let mut seen = std::collections::HashSet::new();
+    let mut copies = Vec::new();
+    let nodes = cx.expanded_descendants(c.syntax());
+    // A closure's own parameters and local bindings are not free captures, even if
+    // they become cells when a nested closure captures them.
+    let bound: std::collections::HashSet<_> = nodes
+        .iter()
+        .filter_map(|n| ast::IdentPat::cast(n.clone()))
+        .filter_map(|p| cx.sema.to_def(&p))
+        .collect();
+    for pe in nodes.into_iter().filter_map(ast::PathExpr::cast) {
+        let Some(local) = cx.local_of_path(&ast::Expr::PathExpr(pe.clone())) else {
+            continue;
+        };
+        if bound.contains(&local) || !cx.cells.contains(&local) || !seen.insert(local) {
+            continue;
+        }
+        let ty = cx.convert(&local.ty(cx.db));
+        // A `&mut` reference is copied as the same array; only plain values are copied.
+        if matches!(ty, Ty::Ref { .. }) {
+            continue;
+        }
+        let name = cx.lookup(local.name(cx.db).as_str());
+        let copy = cx.fresh(&format!("{name}_moved"));
+        out.push(Stmt::new(
+            line,
+            StmtKind::Local {
+                ty: format!("{}[]", ty.java()),
+                name: copy.clone(),
+                init: Some(Expr::raw(format!("{{{name}[0]}}"))),
+            },
+        ));
+        copies.push((local.name(cx.db).as_str().to_string(), copy));
+    }
+    copies
 }
 
 fn strip_ref_pats(p: ast::Pat) -> ast::Pat {
