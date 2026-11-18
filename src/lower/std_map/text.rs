@@ -608,13 +608,21 @@ pub(super) fn direct_parse(cx: &Cx, e: &ast::Expr) -> Option<&'static str> {
     let Ty::Result(t, _) = cx.ty(e) else {
         return None;
     };
-    Some(match t.strip_refs() {
-        Ty::Int(Int::I8) => "Byte.parseByte",
-        Ty::Int(Int::I16) => "Short.parseShort",
-        Ty::Int(Int::I32) => "Integer.parseInt",
-        Ty::Int(Int::I64) => "Long.parseLong",
-        Ty::Int(Int::U32 | Int::Usize) => "Integer.parseUnsignedInt",
-        Ty::Int(Int::U64) => "Long.parseUnsignedLong",
+    match t.strip_refs() {
+        Ty::Int(i) => int_parser(*i),
+        _ => None,
+    }
+}
+
+// Java parsers whose accepted inputs and range match Rust's `parse` for that type.
+pub(super) fn int_parser(i: Int) -> Option<&'static str> {
+    Some(match i {
+        Int::I8 => "Byte.parseByte",
+        Int::I16 => "Short.parseShort",
+        Int::I32 => "Integer.parseInt",
+        Int::I64 => "Long.parseLong",
+        Int::U32 | Int::Usize => "Integer.parseUnsignedInt",
+        Int::U64 => "Long.parseUnsignedLong",
         _ => return None,
     })
 }

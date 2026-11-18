@@ -475,6 +475,20 @@ pub(super) fn is_unwrapped_source(cx: &Cx, recv_ast: &ast::Expr) -> bool {
 // ---- parse errors ----------------------------------------------------------------------------
 
 // Parses into the Rust error text, so `{}` matches rustc; `{:?}` maps it back to the kind.
+// `.ok()`, `.is_ok()`, `.unwrap_or(..)` never look at the error, so its Rust text isn't built.
+fn error_discarded(m: &ast::MethodCallExpr) -> bool {
+    m.syntax()
+        .parent()
+        .and_then(ast::MethodCallExpr::cast)
+        .is_some_and(|p| {
+            p.receiver().is_some_and(|r| r.syntax() == m.syntax())
+                && matches!(
+                    method_name(&p).as_str(),
+                    "ok" | "is_ok" | "is_err" | "unwrap_or" | "unwrap_or_default"
+                )
+        })
+}
+
 pub(super) fn parse_result(
     cx: &mut Cx,
     m: &ast::MethodCallExpr,
@@ -485,7 +499,10 @@ pub(super) fn parse_result(
     out: &mut Vec<Stmt>,
 ) -> Expr {
     match target.strip_refs() {
-        Ty::Int(i) => parse_int(cx, input, ret, *i, None, line, out),
+        Ty::Int(i) => {
+            let exact = !error_discarded(m);
+            parse_int(cx, input, ret, *i, None, exact, line, out)
+        }
         Ty::F32 | Ty::F64 => {
             parse_float(cx, input, ret, target.strip_refs() == &Ty::F32, line, out)
         }
@@ -524,10 +541,28 @@ pub(super) fn parse_int(
     ret: &Ty,
     i: Int,
     radix: Option<Expr>,
+    exact: bool,
     line: u32,
     out: &mut Vec<Stmt>,
 ) -> Expr {
     cx.needs_result = true;
+    if !exact
+        && radix.is_none()
+        && let Some(f) = super::text::int_parser(i)
+    {
+        let ty = result_java(ret);
+        let res = cx.fresh("res");
+        let ex = cx.fresh("ex");
+        push_raw(
+            out,
+            line,
+            format!(
+                "{ty} {res}; try {{ {res} = new Ok<>({f}({})); }} catch (NumberFormatException {ex}) {{ {res} = new Err<>({ex}); }}",
+                render(&input)
+            ),
+        );
+        return Expr::name(res);
+    }
     let s = cx.fresh("text");
     out.push(Stmt::new(
         line,
@@ -567,7 +602,11 @@ pub(super) fn parse_int(
             .filter(|v| (2..=36).contains(v)),
         _ => None,
     });
-    let failure = int_error(&s, unsigned, radix_val, radix.is_some());
+    let failure = if exact {
+        int_error(&s, unsigned, radix_val, radix.is_some())
+    } else {
+        String::new()
+    };
     push_raw(
         out,
         line,

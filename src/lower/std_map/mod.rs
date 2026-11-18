@@ -589,7 +589,7 @@ fn from_str_radix(
         return Expr::static_call(f, vec![s, radix]);
     }
     let i = Int::from_name(owner).unwrap_or(Int::I32);
-    option::parse_int(cx, s, ret, i, Some(radix), line, out)
+    option::parse_int(cx, s, ret, i, Some(radix), true, line, out)
 }
 
 // ---- std paths (consts and unit variants) ----------------------------------------------------
