@@ -660,11 +660,14 @@ pub(super) fn lower_vec_method(
                 let sub = lower_slice_range(cx, recv, &Ty::Vec(Box::new(elem.clone())), r, out);
                 return Some(opt_of(sub));
             }
-            // `skip(i).findFirst()` yields `Optional.empty()` past the end, like Rust's `get`.
-            Some(Expr::call(
-                Expr::call(Expr::call(recv, "stream", vec![]), "skip", vec![b0]),
-                "findFirst",
-                vec![],
+            // Not `stream().skip(i).findFirst()`: that walks i elements, making index loops quadratic.
+            let recv = simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out);
+            let i = simple(cx, b0, &Ty::Int(Int::Usize), line, out);
+            let cond = Expr::bin(i.clone(), "<", Expr::call(recv.clone(), "size", vec![]));
+            Some(conditional(
+                cond,
+                opt_of(Expr::call(recv, "get", vec![i])),
+                opt_empty(witness.as_ref()),
             ))
         }
         "first" | "first_mut" => Some(Expr::call(
