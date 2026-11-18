@@ -142,12 +142,18 @@ fn lower_write(cx: &mut Cx, mc: &ast::MacroCall, out: &mut Vec<Stmt>) -> Expr {
             None => break,
         }
     }
+    let newline = macro_name(mc) == "writeln";
     let target_ty = cx.ty(&target);
+    let io_sink = super::std_map::is_io_target(&target_ty);
     let target_value = expr::lower_expr(cx, &target, out);
-    let Some(fa) = fmt::format_args_of(cx, mc) else {
-        return cx.unsupported(mc.syntax(), "write! format arguments");
+    let target_value = super::std_map::output_handle(cx, &target_ty, target_value);
+    let sink = target_value.clone();
+    // `writeln!`'s expansion already ends the template with `\n`; Java's println adds its own.
+    let text = match fmt::format_args_of(cx, mc) {
+        Some(fa) if newline && io_sink => fmt::lower_format_ln(cx, &fa, out),
+        Some(fa) => fmt::lower_format(cx, &fa, out),
+        None => Expr::str_lit(""),
     };
-    let text = fmt::lower_format(cx, &fa, out);
     let write = if target_ty.is_str() {
         if !matches!(target, ast::Expr::PathExpr(_)) {
             return cx.unsupported(mc.syntax(), "write! non-local String target");
@@ -157,15 +163,85 @@ fn lower_write(cx: &mut Cx, mc: &ast::MacroCall, out: &mut Vec<Stmt>) -> Expr {
         || matches!(target_ty.strip_refs(), Ty::Adt { name, .. } if name == "Formatter")
     {
         Expr::call(target_value, "append", vec![text])
+    } else if io_sink {
+        // PrintStream/PrintWriter: `write!` prints without a newline, `writeln!` with one.
+        let method = if newline { "println" } else { "print" };
+        let args = if newline && fmt::is_empty_string(&text) {
+            vec![]
+        } else {
+            vec![text]
+        };
+        Expr::call(target_value, method, args)
     } else {
         return cx.unsupported(mc.syntax(), "write! target type");
     };
     out.push(Stmt::new(cx.line(mc.syntax()), StmtKind::Expr(write)));
-    cx.needs_result = true;
-    Expr::New {
-        ty: "Ok<>".into(),
-        args: vec![Expr::Cast("Void".into(), Box::new(Expr::raw("null")))],
+    if io_sink {
+        if write_result_ignored(mc) {
+            return Expr::raw("null");
+        }
+        let ret = Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Other("io::Error".into())));
+        let result = super::std_map::write_status(
+            cx,
+            cx.line(mc.syntax()),
+            sink,
+            Expr::raw("null"),
+            &ret,
+            out,
+        );
+        return if write_result_dropped(mc) {
+            Expr::call(result, "unwrap", vec![])
+        } else {
+            result
+        };
     }
+    if write_result_dropped(mc) {
+        // `writeln!(..).unwrap()` / a bare `writeln!(..)`: the write is the whole effect.
+        return Expr::raw("null");
+    }
+    cx.needs_result = true;
+    Expr::Cast(
+        "Result<Void, Object>".into(),
+        Box::new(Expr::New {
+            ty: "Ok<Void, Object>".into(),
+            args: vec![Expr::raw("null")],
+        }),
+    )
+}
+
+fn write_result_ignored(mc: &ast::MacroCall) -> bool {
+    mc.syntax()
+        .parent()
+        .and_then(|p| p.parent())
+        .is_some_and(|p| {
+            ast::ExprStmt::can_cast(p.kind())
+                || ast::LetStmt::cast(p)
+                    .is_some_and(|l| matches!(l.pat(), Some(ast::Pat::WildcardPat(_))))
+        })
+}
+
+// Whether nothing observes `write!`'s `Result` (statement position or `.unwrap()`).
+fn write_result_dropped(mc: &ast::MacroCall) -> bool {
+    if write_result_ignored(mc) {
+        return true;
+    }
+    let Some(me) = mc.syntax().parent().and_then(ast::MacroExpr::cast) else {
+        return false;
+    };
+    let Some(parent) = me.syntax().parent() else {
+        return false;
+    };
+    if ast::ExprStmt::can_cast(parent.kind()) {
+        return true;
+    }
+    ast::MethodCallExpr::cast(parent).is_some_and(|m| {
+        m.receiver()
+            .is_some_and(|r| r.syntax().text_range() == me.syntax().text_range())
+            && matches!(
+                m.name_ref().map(|n| n.text().to_string()).as_deref(),
+                Some("unwrap" | "expect")
+            )
+    })
 }
 
 fn expanded_node<T: AstNode>(cx: &Cx, mc: &ast::MacroCall) -> Option<T> {

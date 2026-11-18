@@ -519,7 +519,10 @@ pub fn lower_iter_method(
     key: &str,
     out: &mut Vec<Stmt>,
 ) -> Option<Expr> {
-    let _ = key;
+    // `Result::unwrap`/`Option::map` can hand back an iterator; they belong to std_map.
+    if key.starts_with("Option::") || key.starts_with("Result::") {
+        return None;
+    }
     let name = method_name(m);
     let recv_ast = m.receiver()?;
     let ret_ty = cx.ty(&ast::Expr::MethodCallExpr(m.clone()));
@@ -655,9 +658,12 @@ fn lower_source(
             ))
         }
         (Ty::Str, "lines") => Expr::call(recv, "lines", vec![]),
-        (Ty::Other(t), "lines") if t.contains("Stdin") => {
-            super::std_map::need_stdin(cx);
-            Expr::call(Expr::raw("STDIN"), "lines", vec![])
+        (Ty::Other(_), "lines" | "bytes") if super::std_map::is_reader_source(recv_ty) => {
+            if name == "bytes" {
+                super::std_map::bytes_stream(cx, recv)
+            } else {
+                super::std_map::lines_stream(cx, recv)
+            }
         }
         (Ty::Str, "split_whitespace" | "split_ascii_whitespace") => {
             let w = cx.fresh("w");
@@ -817,9 +823,17 @@ fn lower_adaptor(
                 None => cx.unsupported(m.syntax(), "flat_map result type"),
             }
         }
-        "flatten" => match to_stream_fn(cx, &item) {
-            Some(ts) => call("flatMap", vec![ts]),
-            None => cx.unsupported(m.syntax(), "flatten item type"),
+        "flatten" => match item.strip_refs() {
+            // A `Result` yields its `Ok` value and drops the error, like Rust's `flatten`.
+            Ty::Result(..) => {
+                let r = cx.fresh("r");
+                let ok = call("filter", vec![Expr::raw(format!("{r} -> {r}.is_ok()"))]);
+                Expr::call(ok, "map", vec![Expr::raw(format!("{r} -> {r}.unwrap()"))])
+            }
+            _ => match to_stream_fn(cx, &item) {
+                Some(ts) => call("flatMap", vec![ts]),
+                None => cx.unsupported(m.syntax(), "flatten item type"),
+            },
         },
         "enumerate" => {
             if cx.lambda_depth > 0 {
@@ -1253,19 +1267,21 @@ fn lower_pulled(
 ) -> Expr {
     let it = render(&expr::lower_expr(cx, recv_ast, out));
     let item = item_of(recv_ty);
+    // Explicit type arguments: the `?:` has no target type at a call's receiver.
+    let t = item.boxed();
     let peeked = format!("{items}.get({it}.nextIndex())");
     let args = arg_exprs(m);
     match name {
         "next" => Expr::raw(format!(
-            "({it}.hasNext() ? Optional.of({it}.next()) : Optional.empty())"
+            "({it}.hasNext() ? Optional.<{t}>of({it}.next()) : Optional.<{t}>empty())"
         )),
         "peek" => Expr::raw(format!(
-            "({it}.hasNext() ? Optional.of({peeked}) : Optional.empty())"
+            "({it}.hasNext() ? Optional.<{t}>of({peeked}) : Optional.<{t}>empty())"
         )),
         "next_if_eq" => {
             let x = render(&lower_arg(cx, &args[0], out));
             Expr::raw(format!(
-                "({it}.hasNext() && {peeked}.equals({x}) ? Optional.of({it}.next()) : Optional.empty())"
+                "({it}.hasNext() && {peeked}.equals({x}) ? Optional.<{t}>of({it}.next()) : Optional.<{t}>empty())"
             ))
         }
         "next_if" => {
@@ -1275,7 +1291,7 @@ fn lower_pulled(
                 Box::new(f),
             ));
             Expr::raw(format!(
-                "({it}.hasNext() && ({p}).test({peeked}) ? Optional.of({it}.next()) : Optional.empty())"
+                "({it}.hasNext() && ({p}).test({peeked}) ? Optional.<{t}>of({it}.next()) : Optional.<{t}>empty())"
             ))
         }
         _ => cx.unsupported(

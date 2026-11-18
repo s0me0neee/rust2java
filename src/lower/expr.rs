@@ -252,9 +252,18 @@ pub fn literal_expr(cx: &mut Cx, l: &ast::Literal, ty: &Ty) -> Expr {
             Ok(v) => Expr::raw(java_string_literal(&v)),
             Err(_) => cx.unsupported(node, "string literal"),
         },
-        ast::LiteralKind::ByteString(_) | ast::LiteralKind::CString(_) => {
-            cx.unsupported(node, "byte/C string literal")
-        }
+        ast::LiteralKind::ByteString(s) => match s.value() {
+            Ok(bytes) => Expr::raw(format!(
+                "Arrays.<Integer>asList({})",
+                bytes
+                    .iter()
+                    .map(u8::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            Err(_) => cx.unsupported(node, "byte string literal"),
+        },
+        ast::LiteralKind::CString(_) => cx.unsupported(node, "C string literal"),
     }
 }
 

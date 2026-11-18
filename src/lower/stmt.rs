@@ -62,6 +62,12 @@ pub fn lower_let(cx: &mut Cx, l: &ast::LetStmt, out: &mut Vec<Stmt>) {
         pat::lower_let_else(cx, l, out);
         return;
     }
+    if matches!(p, ast::Pat::WildcardPat(_)) {
+        if let Some(init) = l.initializer() {
+            lower_to_dest(cx, &init, &Dest::Discard, out);
+        }
+        return;
+    }
     let ty = match l.ty() {
         Some(t) => cx.type_ref(&t),
         None => cx.pat_ty(&p),
@@ -85,7 +91,12 @@ pub fn lower_let(cx: &mut Cx, l: &ast::LetStmt, out: &mut Vec<Stmt>) {
         lower_cell_let(cx, l, ip, &rust_name, &ty, out);
         return;
     }
-    let jty = decl_type(&ty);
+    // `var` can't be initialized with a bare `null`, which is what a `()` value becomes.
+    let jty = if ty.is_unit() {
+        "Object".into()
+    } else {
+        decl_type(&ty)
+    };
     match l.initializer() {
         None => {
             let name = cx.declare(&rust_name);
@@ -183,7 +194,8 @@ pub fn decl_type(ty: &Ty) -> String {
 
 // For declarations without initializer, where `var` is not allowed.
 pub fn decl_type_explicit(ty: &Ty) -> String {
-    if ty.is_nameable() && !ty.is_unit() {
+    // Iterator items may contain opaque I/O errors, but Stream<Result<..., Object>> is nameable.
+    if matches!(ty.strip_refs(), Ty::Iter(_)) || (ty.is_nameable() && !ty.is_unit()) {
         ty.java()
     } else {
         "Object".into()

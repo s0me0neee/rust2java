@@ -202,8 +202,21 @@ pub(super) fn is_unwrapped_source(cx: &Cx, recv_ast: &ast::Expr) -> bool {
     match recv_ast {
         ast::Expr::MethodCallExpr(mc) => matches!(
             method_name(mc).as_str(),
-            "parse" | "read_line" | "read_to_string"
+            "parse"
+                | "read_line"
+                | "read_to_string"
+                | "read_to_end"
+                | "write_all"
+                | "write"
+                | "flush"
         ),
+        // `write!`/`writeln!` perform the write and hand back a dummy `Ok`.
+        ast::Expr::MacroExpr(m) => m.macro_call().is_some_and(|mc| {
+            matches!(
+                super::super::macros::macro_name(&mc).as_str(),
+                "write" | "writeln"
+            )
+        }),
         ast::Expr::CallExpr(c) => {
             let text = c
                 .expr()
@@ -214,6 +227,9 @@ pub(super) fn is_unwrapped_source(cx: &Cx, recv_ast: &ast::Expr) -> bool {
                 || text.ends_with("from_utf8")
                 || text.ends_with("fs::write")
                 || text.ends_with("write")
+                || text.ends_with("File::open")
+                || text.ends_with("File::create")
+                || text.ends_with("read_dir")
         }
         _ => false,
     }
