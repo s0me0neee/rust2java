@@ -11,7 +11,7 @@ use crate::ty::{Int, Ty};
 pub(crate) mod coll;
 pub mod io;
 mod mem;
-mod num;
+pub(crate) mod num;
 mod option;
 pub(crate) mod ptr;
 mod text;

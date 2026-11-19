@@ -1116,6 +1116,20 @@ pub(super) fn lower_vec_method(
         "sort_by_cached_key" => Some(Expr::call(Expr::raw("Comparator"), "comparing", vec![b0])),
         "reverse" => Some(Expr::call(Expr::raw("Collections"), "reverse", vec![recv])),
         "contains" => Some(Expr::call(recv, "contains", vec![b0])),
+        // Slice prefix/suffix: the same-length sublist compared with `equals`.
+        "starts_with" | "ends_with" => {
+            let v = simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out);
+            let w = simple(cx, b0, &Ty::Vec(Box::new(elem.clone())), line, out);
+            let (vs, ws) = (render(&v), render(&w));
+            let part = if name == "starts_with" {
+                format!("{vs}.subList(0, {ws}.size())")
+            } else {
+                format!("{vs}.subList({vs}.size() - {ws}.size(), {vs}.size())")
+            };
+            Some(Expr::raw(format!(
+                "({vs}.size() >= {ws}.size() && {part}.equals({ws}))"
+            )))
+        }
         "binary_search_by" => Some(cx.unsupported(m.syntax(), "binary_search_by")),
         "binary_search" => {
             if cx.lambda_depth > 0 {

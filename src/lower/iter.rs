@@ -702,6 +702,45 @@ pub fn lower_iter_method(
     let name = method_name(m);
     let recv_ast = m.receiver()?;
     let ret_ty = cx.ty(&ast::Expr::MethodCallExpr(m.clone()));
+    // `(a..b).contains(&x)`: two comparisons.
+    if name == "contains"
+        && let ast::Expr::RangeExpr(r) = strip_parens(&recv_ast)
+        && let Some(x) = arg_exprs(m).first()
+    {
+        use ast::RangeItem;
+        let line = cx.line(m.syntax());
+        let ty = cx.ty(x).strip_refs().clone();
+        let xv = lower_arg(cx, x, out);
+        let xv = ensure_simple(cx, xv, &ty, line, out);
+        let cmp = |a: Expr, op: &'static str, b: Expr| match super::std_map::num::compare_expr(
+            &ty,
+            a.clone(),
+            b.clone(),
+        ) {
+            Some(c) => Expr::bin(c, op, Expr::raw("0")),
+            None => Expr::bin(a, op, b),
+        };
+        let mut conds = Vec::new();
+        if let Some(start) = r.start() {
+            let s = lower_arg(cx, &start, out);
+            conds.push(cmp(xv.clone(), ">=", s));
+        }
+        if let Some(end) = r.end() {
+            let e = lower_arg(cx, &end, out);
+            let op = if r.op_kind() == Some(ast::RangeOp::Inclusive) {
+                "<="
+            } else {
+                "<"
+            };
+            conds.push(cmp(xv.clone(), op, e));
+        }
+        return Some(
+            conds
+                .into_iter()
+                .reduce(|a, b| Expr::bin(a, "&&", b))
+                .unwrap_or_else(|| Expr::raw("true")),
+        );
+    }
     // `v.chunks_exact(k).remainder()`: the last `len % k` elements.
     if name == "remainder"
         && let ast::Expr::MethodCallExpr(chunks) = strip_parens(&recv_ast)
@@ -1616,7 +1655,18 @@ fn lower_adaptor_core(
         }
         "fold" => {
             let init_ty = cx.ty(&args[0]);
-            let init = expr::lower_expr_as(cx, &args[0], &init_ty, out);
+            let init = match expr::lower_expr_as(cx, &args[0], &init_ty, out) {
+                // `fold(HashMap::new(), ..)`: `reduce` gives the diamond no target type.
+                Expr::New { ty, args } if ty.ends_with("<>") && init_ty.is_nameable() => {
+                    let java = init_ty.java();
+                    let targs = java.find('<').map(|i| &java[i..]).unwrap_or("<>");
+                    Expr::New {
+                        ty: format!("{}{targs}", ty.trim_end_matches("<>")),
+                        args,
+                    }
+                }
+                e => e,
+            };
             let f = lower_arg(cx, &args[1], out);
             let (a, b) = (cx.fresh("a"), cx.fresh("b"));
             // The combiner is never called on a sequential stream.

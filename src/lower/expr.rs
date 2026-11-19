@@ -439,6 +439,48 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
     let lt = cx.ty(&lhs);
     let rt = cx.ty(&rhs);
     let l = lower_expr(cx, &lhs, out);
+    // `a && <rhs needing statements>`: the statements may only run when `a` allows it
+    // (`i < v.len() && matches!(v[i], ..)` must not index first).
+    if let BinaryOp::LogicOp(lop) = op {
+        let mut rhs_out = Vec::new();
+        let r = lower_expr(cx, &rhs, &mut rhs_out);
+        if rhs_out.is_empty() {
+            out.extend(rhs_out);
+            let sym = if lop == LogicOp::And { "&&" } else { "||" };
+            return Expr::bin(l, sym, r);
+        }
+        let line = cx.line(b.syntax());
+        let t = cx.fresh("cond");
+        out.push(Stmt::new(
+            line,
+            StmtKind::Local {
+                ty: "boolean".into(),
+                name: t.clone(),
+                init: Some(l),
+            },
+        ));
+        rhs_out.push(Stmt::new(
+            line,
+            StmtKind::Expr(Expr::Assign(Box::new(Expr::name(&t)), "=", Box::new(r))),
+        ));
+        let cond = if lop == LogicOp::And {
+            Expr::name(&t)
+        } else {
+            Expr::Unary("!", Box::new(Expr::name(&t)))
+        };
+        out.push(Stmt::new(
+            line,
+            StmtKind::If {
+                cond,
+                then: crate::jir::Block {
+                    stmts: rhs_out,
+                    close_line: line,
+                },
+                els: None,
+            },
+        ));
+        return Expr::name(t);
+    }
     let r = lower_expr(cx, &rhs, out);
     // `Cell`/`RefCell` handles compare their contents, not the backing arrays.
     let l = std_map::ptr::content_value(cx, &lhs, l);

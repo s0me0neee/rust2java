@@ -1,0 +1,29 @@
+{
+  "n": -125,
+  "name": "demo",
+  "nested": {
+    "x": [
+      1,
+      [
+        2,
+        []
+      ]
+    ],
+    "y": null
+  },
+  "ok": true,
+  "tags": [
+    "a",
+    "b\n"
+  ]
+}
+depth 5
+keys ["n", "name", "nested", "ok", "tags"]
+Some(Arr([Str("a"), Str("b\n")]))
+[1, 2      -> Err("bad array at 5")
+{"a" 1}    -> Err("expected ':' at 5")
+tru        -> Err("bad literal at 0")
+"open      -> Err("unterminated string")
+[1 2]      -> Err("bad array at 3")
+-          -> Err("invalid float literal for \"-\"")
+true

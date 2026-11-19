@@ -25,6 +25,36 @@ pub(super) fn fn_call(
                 Expr::call(Expr::raw("String"), "valueOf", vec![arg])
             })
         }
+        // Bytes (a `List<Integer>` of char codes, see `as_bytes`) back to text; ASCII is valid
+        // UTF-8, so the `Result` is always `Ok`.
+        "converts::from_utf8" | "String::from_utf8" | "String::from_utf8_lossy" => {
+            let bytes = expr::call_args(cx, c, out).into_iter().next()?;
+            let b = cx.fresh_param("b");
+            cx.release_param(&b);
+            let text = Expr::raw(format!(
+                "{}.stream().map({b} -> String.valueOf((char) (int) {b})).collect(Collectors.joining())",
+                crate::emit::render_expr(&bytes)
+            ));
+            // `.unwrap()` on a Result with an opaque std error is already dropped.
+            let unwrapped = c
+                .syntax()
+                .parent()
+                .and_then(ast::MethodCallExpr::cast)
+                .is_some_and(|p| {
+                    matches!(
+                        p.name_ref().map(|n| n.text().to_string()).as_deref(),
+                        Some("unwrap" | "expect")
+                    )
+                });
+            if key.ends_with("_lossy") || unwrapped {
+                return Some(text);
+            }
+            cx.needs_result = true;
+            Some(Expr::New {
+                ty: "Ok<>".into(),
+                args: vec![text],
+            })
+        }
         // `char::from(u8)`: the argument may be a boxed `Integer` when iterating a list.
         "char::from" => {
             let args = expr::call_args(cx, c, out);
