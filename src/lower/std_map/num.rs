@@ -771,6 +771,24 @@ pub(super) fn lower_int_method(
                 diff
             })
         }
+        // `|x|` always fits the unsigned type: Java's `Math.abs(MIN)` is MIN, i.e. 2^(n-1) unsigned.
+        "unsigned_abs" => Some(Expr::call(Expr::raw("Math"), "abs", vec![recv])),
+        // `(wrapped, overflowed)`: the wrapping result, and whether the checked one is None.
+        "overflowing_add" | "overflowing_sub" | "overflowing_mul" => {
+            let op = &name["overflowing_".len()..];
+            let (a, b) = (
+                simple(cx, recv, &Ty::Int(i), line, out),
+                simple(cx, b0, &Ty::Int(i), line, out),
+            );
+            let wrapped = wrapping_int(a.clone(), b.clone(), i, &format!("wrapping_{op}"));
+            let opt = Ty::Option(Box::new(Ty::Int(i)));
+            let checked = checked_int(cx, a, b, b1, i, &format!("checked_{op}"), &opt, line, out);
+            Some(Expr::call(
+                Expr::raw("Map"),
+                "entry",
+                vec![wrapped, Expr::call(checked, "isEmpty", vec![])],
+            ))
+        }
         _ if name.starts_with("checked_") => {
             Some(checked_int(cx, recv, b0, b1, i, name, ret, line, out))
         }
@@ -1478,13 +1496,7 @@ pub(super) fn lower_float_method(
                 "({cls}.isNaN({ar}) || {cls}.isNaN({br}) ? Optional.<Integer>empty() : Optional.of({cls}.compare({ar}, {br})))"
             ))
         }
-        "to_string" => {
-            cx.import("java.math.BigDecimal");
-            Expr::raw(format!(
-                "new BigDecimal(String.valueOf({})).stripTrailingZeros().toPlainString()",
-                render(&recv)
-            ))
-        }
+        "to_string" => crate::lower::fmt::display_float(cx, recv, fty == Ty::F32),
         "clone" | "to_owned" => recv,
         _ => return None,
     })

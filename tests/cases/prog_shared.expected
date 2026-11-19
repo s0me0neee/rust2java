@@ -1,0 +1,12 @@
+Ok(())
+Err("bob has insufficient funds")
+Err("no account 9")
+alice=71 bob=50 total=121
+[100, -30] [20, 30]
+logged=3 counted=3
+  OPEN ALICE 100
+  OPEN BOB 20
+  TRANSFER 1->2 30
+[10, 21, 32]
+tally=12
+alice #1

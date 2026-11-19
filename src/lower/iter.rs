@@ -1717,6 +1717,12 @@ fn lower_sum_product(
                 ],
             )
         }
+        // A crate type implements `Sum`/`Product` itself: its static `sum(Stream)` / `product(Stream)`.
+        Ty::Adt { java, .. } => Expr::call(
+            Expr::raw(java.clone()),
+            if product { "product" } else { "sum" },
+            vec![src.clone()],
+        ),
         _ => cx.unsupported(m.syntax(), "sum/product of this type"),
     }
 }

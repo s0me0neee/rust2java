@@ -885,7 +885,11 @@ fn format_one(
     }
     let numeric = matches!(ty.strip_refs(), Ty::Int(_) | Ty::F32 | Ty::F64);
     if spec.alternate && spec.kind == "?" {
-        return cx.unsupported(node, "pretty Debug format");
+        if width.is_some() || precision.is_some() || spec.plus || spec.zero {
+            return cx.unsupported(node, "flags on a pretty Debug format");
+        }
+        let compact = debug(cx, v, ty);
+        return debug_pretty(cx, compact);
     }
     if spec.kind == "?" {
         if !debug_supported(ty) {
@@ -1278,23 +1282,23 @@ fn file_helper(cx: &mut Cx, decl: String) {
     }
 }
 
-// Rust's float Display; NaN/inf throw in BigDecimal and -0.0 prints `0` (accepted).
-fn display_float(cx: &mut Cx, v: Expr, f32: bool) -> Expr {
+// Rust's float Display: shortest digits without exponent, `NaN`/`inf`/`-inf`, and `-0`.
+pub(crate) fn display_float(cx: &mut Cx, v: Expr, f32: bool) -> Expr {
     cx.import("java.math.BigDecimal");
     // `BigDecimal.valueOf(float)` would widen first and print the double's extra digits.
-    let big = if f32 {
-        Expr::New {
-            ty: "BigDecimal".into(),
-            args: vec![Expr::call(Expr::raw("String"), "valueOf", vec![v])],
-        }
+    let (t, cls, big) = if f32 {
+        ("float", "Float", "new BigDecimal(String.valueOf(x))")
     } else {
-        Expr::call(Expr::raw("BigDecimal"), "valueOf", vec![v])
+        ("double", "Double", "BigDecimal.valueOf(x)")
     };
-    Expr::call(
-        Expr::call(big, "stripTrailingZeros", vec![]),
-        "toPlainString",
-        vec![],
-    )
+    file_helper(
+        cx,
+        format!(
+            "static String display_float({t} x) {{ if ({cls}.isNaN(x)) return \"NaN\"; if ({cls}.isInfinite(x)) return x > 0 ? \"inf\" : \"-inf\"; \
+             if (x == 0) return 1 / x < 0 ? \"-0\" : \"0\"; return {big}.stripTrailingZeros().toPlainString(); }}"
+        ),
+    );
+    Expr::static_call("display_float", vec![v])
 }
 
 pub fn debug_supported(ty: &Ty) -> bool {
@@ -1527,6 +1531,26 @@ fn debug_sequence(cx: &mut Cx, v: Expr, inner: &Ty, open: &str, close: &str) -> 
         ],
     );
     Expr::call(mapped, "collect", vec![joining])
+}
+
+// `{:#?}`: the compact Debug text re-indented the way Rust's alternate form lays it out (one
+// item per line, trailing commas), skipping over quoted strings and chars.
+fn debug_pretty(cx: &mut Cx, compact: Expr) -> Expr {
+    let helper = concat!(
+        r#"static String debug_pretty(String s) { StringBuilder b = new StringBuilder(); int depth = 0; char q = 0; "#,
+        r#"for (int i = 0; i < s.length(); i++) { char c = s.charAt(i); "#,
+        r#"if (q != 0) { b.append(c); if (c == '\\') b.append(s.charAt(++i)); else if (c == q) q = 0; continue; } "#,
+        r#"if (c == '"' || c == '\'') { q = c; b.append(c); continue; } "#,
+        r#"if (c == '{' || c == '[' || c == '(') { char close = c == '{' ? '}' : c == '[' ? ']' : ')'; "#,
+        r#"if (i + 1 < s.length() && s.charAt(i + 1) == close) { b.append(c).append(close); i++; continue; } "#,
+        r#"depth++; b.append(c).append('\n').append("    ".repeat(depth)); if (c == '{' && i + 1 < s.length() && s.charAt(i + 1) == ' ') i++; continue; } "#,
+        r#"if (c == '}' || c == ']' || c == ')') { depth--; while (b.charAt(b.length() - 1) == ' ' || b.charAt(b.length() - 1) == '\n') b.setLength(b.length() - 1); "#,
+        r#"if (b.charAt(b.length() - 1) != ',') b.append(','); b.append('\n').append("    ".repeat(depth)).append(c); continue; } "#,
+        r#"if (c == ',') { b.append(",\n").append("    ".repeat(depth)); if (i + 1 < s.length() && s.charAt(i + 1) == ' ') i++; continue; } "#,
+        r#"b.append(c); } return b.toString(); }"#,
+    );
+    file_helper(cx, helper.to_string());
+    Expr::static_call("debug_pretty", vec![compact])
 }
 
 // Rust's float Debug: Display plus a forced `.0`, and an exponent outside 1e-4..1e16.

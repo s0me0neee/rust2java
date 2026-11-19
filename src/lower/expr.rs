@@ -1328,6 +1328,11 @@ fn lower_cast(cx: &mut Cx, c: &ast::CastExpr, out: &mut Vec<Stmt>) -> Expr {
     if let Some(e) = std_map::num_cast(&from, &to, v.clone()) {
         return e;
     }
+    // `Box::new(|x| ..) as Box<dyn Fn(i32)>`: the cast gives javac the lambda's target type
+    // (a closure returning this one can't be inferred otherwise).
+    if matches!(to, Ty::Fn { .. }) && matches!(v, Expr::Lambda { .. }) {
+        return Expr::Cast(to.java(), Box::new(v));
+    }
     if from.java() == to.java() {
         return v;
     }

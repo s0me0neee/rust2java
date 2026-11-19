@@ -294,6 +294,9 @@ pub fn convert(sema: &Semantics<'_, RootDatabase>, from: Module, ty: &ra_ap_hir:
             && p.trait_bounds(db)
                 .iter()
                 .any(|t| matches!(t.name(db).as_str(), "Fn" | "FnMut" | "FnOnce")))
+        // `I: Iterator<Item = T>` is a `Stream<T>`.
+        && !(ty.clone().iterator_item(db).is_some()
+            && p.trait_bounds(db).iter().any(|t| t.name(db).as_str() == "Iterator"))
     {
         return Ty::Param(p.name(db).as_str().to_string());
     }

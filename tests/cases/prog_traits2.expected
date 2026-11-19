@@ -1,0 +1,10 @@
+["2Spades", "2Spades", "10Clubs", "10Hearts", "14Diamonds"]
+[(2, 3), (2, 3), (10, 2), (14, 1), (10, 0)]
+4 unique, suits {Clubs, Diamonds, Hearts, Spades}, max Some(Card { rank: 14, suit: Diamonds })
+true true
+[Clubs, Diamonds, Hearts, Spades] [2, 2]
+Config { name: "svc", retries: 3, verbose: false, ratio: 0.0, tags: [] }
+Config { name: "svc", retries: 3, verbose: true, ratio: 0.0, tags: ["a"] }
+Config { name: "", retries: 0, verbose: false, ratio: 0.0, tags: [] }
+false true true
+Money { cents: 450 } Money { cents: 900 } true

@@ -2337,6 +2337,21 @@ fn bound_java(cx: &mut Cx, b: &ast::TypeBound, param: &str) -> Option<String> {
     if let Some(ra_ap_hir::PathResolution::Def(ModuleDef::Trait(tr))) = cx.sema.resolve_path(&path)
     {
         if tr.module(cx.db).krate(cx.db).origin(cx.db).is_local() {
+            // `impl Summary for i32`: Integer can't implement the interface, so a generic `T`
+            // could never be such a value in Java.
+            let foreign = ra_ap_hir::Impl::all_for_trait(cx.db, tr)
+                .into_iter()
+                .any(|imp| {
+                    !imp.self_ty(cx.db)
+                        .as_adt()
+                        .is_some_and(|a| a.module(cx.db).krate(cx.db).origin(cx.db).is_local())
+                });
+            if foreign {
+                cx.unsupported(
+                    b.syntax(),
+                    "generic bound on a trait that is implemented for std types",
+                );
+            }
             return Some(trait_java_name(cx.db, cx.module, tr));
         }
     }
