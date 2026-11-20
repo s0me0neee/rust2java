@@ -63,7 +63,11 @@ pub fn print_file(
 
 // Renders a standalone expression (for building raw statement text).
 pub fn render_expr(e: &Expr) -> String {
-    let mut p = Printer::default();
+    // Flat: line breaks inside raw text would shift every later statement off its Rust line.
+    let mut p = Printer {
+        flat: true,
+        ..Default::default()
+    };
     p.expr(e, 0);
     p.out
 }

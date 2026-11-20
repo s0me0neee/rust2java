@@ -1523,6 +1523,8 @@ pub(super) fn lower_float_method(
             Box::new(math("ceil", vec![recv.clone()])),
             Box::new(math("floor", vec![recv])),
         )),
+        // Java's `%` keeps the dividend's sign, like `x - x.trunc()`.
+        "fract" => Expr::bin(recv, "%", Expr::raw(if f32 { "1.0f" } else { "1.0" })),
         "round" => {
             let s = simple(cx, recv, &fty, line, out);
             let r = render(&s);

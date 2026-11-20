@@ -1173,6 +1173,22 @@ pub(super) fn lower_vec_method(
                 );
                 return Some(Expr::call(recv, "sort", vec![f]));
             }
+            // A key function value (`let key = |s| (s.len(), ..)`): order its tuple keys too.
+            let key_ty = key_ty.or_else(|| match arg_asts.first().map(|a| cx.ty(a)) {
+                Some(Ty::Fn { ret, .. }) => Some(*ret),
+                _ => None,
+            });
+            if let Some(t) = &key_ty
+                && matches!(t.strip_refs(), Ty::Tuple(_))
+                && let Some(order) = ord_comparator(cx, t)
+            {
+                let f = Expr::call(
+                    Expr::raw("Comparator"),
+                    "comparing",
+                    vec![typed_lambda(b0, elem), Expr::raw(order)],
+                );
+                return Some(Expr::call(recv, "sort", vec![f]));
+            }
             let cmp = match key_ty.as_ref().map(|t| t.strip_refs().clone()) {
                 Some(Ty::Int(i)) if i.is_long() => "comparingLong",
                 Some(Ty::Int(_)) => "comparingInt",

@@ -1,0 +1,14 @@
+n=[42] s=[hi] f=[2.5]
+[Fahrenheit(-40.0), Fahrenheit(32.0), Fahrenheit(97.88000000000001), Fahrenheit(212.0)]
+true true
+4 -> Ok(Even(4))
+7 -> Err("7 is odd")
+-2 -> Err("-2 is negative")
+0 -> Ok(Even(0))
+Ok(Even(10))
+3 bo Some(3) true
+0.9.12 < 1.2.3-beta < 1.2.3 < 1.10.0 < 2.0.0-rc1
+Some("2.0.0-rc1")
+Some(Less)
+Settings { width: 80, title: "", tags: [], scale: None }
+Settings { width: 80, title: "t", tags: [], scale: Some(1.5) }

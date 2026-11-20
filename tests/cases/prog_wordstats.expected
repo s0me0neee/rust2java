@@ -1,0 +1,15 @@
+lines=5 words=47 chars=227 bytes=227
+     the  7 #######
+     fox  4 ####
+   quick  4 ####
+     and  3 ###
+     dog  3 ###
+longest line Some((4, 62))
+blank lines 1
+sentences 6
+first: "The quick brown fox"
+7 letters: ["numbers"]
+6 letters: ["appear", "places", "sleeps"]
+5 letters: ["again", "brown", "jumps", "quick", "words"]
+capitalized 7 digit sum 16
+vowel ratio 0.353

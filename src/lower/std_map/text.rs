@@ -759,6 +759,48 @@ pub(super) fn lower_str_method(
         }
         "trim" => return Some(Expr::call(recv, "strip", vec![])),
         // A literal char/str pattern: one `replaceAll`, the regex escaped here.
+        // A char predicate: move the two ends inward while it holds.
+        "trim_matches" | "trim_start_matches" | "trim_end_matches"
+            if arg_asts.first().is_some_and(|a| {
+                matches!(strip_parens(a), ast::Expr::ClosureExpr(_))
+                    || matches!(cx.ty(a).strip_refs(), Ty::Fn { .. })
+            }) =>
+        {
+            if cx.lambda_depth > 0 {
+                return Some(cx.unsupported(
+                    _m.syntax(),
+                    "`trim_matches` with a predicate inside a closure",
+                ));
+            }
+            let sv = simple(cx, recv, &Ty::Str, line, out);
+            let s = render(&sv);
+            let pred = push_local(
+                cx,
+                line,
+                "Function<Character, Boolean>".into(),
+                Some(b0),
+                out,
+                "pred",
+            );
+            let (start, end) = (cx.fresh("start"), cx.fresh("end"));
+            let mut code = format!("int {start} = 0, {end} = {s}.length();");
+            if name != "trim_end_matches" {
+                code += &format!(
+                    " while ({start} < {end} && {pred}.apply({s}.charAt({start}))) {start}++;"
+                );
+            }
+            if name != "trim_start_matches" {
+                code += &format!(
+                    " while ({end} > {start} && {pred}.apply({s}.charAt({end} - 1))) {end}--;"
+                );
+            }
+            push_raw(out, line, code);
+            return Some(Expr::call(
+                sv,
+                "substring",
+                vec![Expr::name(start), Expr::name(end)],
+            ));
+        }
         "trim_matches" | "trim_start_matches" | "trim_end_matches" => {
             let pat = match arg_asts.first() {
                 Some(ast::Expr::Literal(l)) => match l.kind() {

@@ -579,15 +579,60 @@ fn lower_handle_let(
 pub fn decl_type(ty: &Ty) -> String {
     if ty.is_nameable() && !ty.is_unit() {
         ty.java()
+    } else if let Some(t) = formatter_fn_type(ty) {
+        t
     } else {
         "var".into()
     }
 }
 
+// A local closure over a `Formatter` (`let wrap = |e, f: &mut Formatter| -> fmt::Result`): Java
+// can't declare a lambda with `var`; the Formatter is the StringBuilder and fmt::Result is Void.
+fn formatter_fn_type(ty: &Ty) -> Option<String> {
+    let Ty::Fn { params, ret } = ty.strip_refs() else {
+        return None;
+    };
+    let sb = || Ty::Adt {
+        name: "Formatter".into(),
+        java: "StringBuilder".into(),
+        args: vec![],
+    };
+    let mut saw = false;
+    let params: Vec<Ty> = params
+        .iter()
+        .map(|p| match p.strip_refs() {
+            Ty::Other(s) if s.contains("Formatter") => {
+                saw = true;
+                sb()
+            }
+            t => t.clone(),
+        })
+        .collect();
+    let ret = match ret.strip_refs() {
+        Ty::Result(ok, err) if ok.is_unit() && matches!(**err, Ty::Other(_)) => Ty::Adt {
+            name: "Void".into(),
+            java: "Void".into(),
+            args: vec![],
+        },
+        t => t.clone(),
+    };
+    let f = Ty::Fn {
+        params,
+        ret: Box::new(ret),
+    };
+    (saw && f.is_nameable()).then(|| f.java())
+}
+
 // For declarations without initializer, where `var` is not allowed.
 pub fn decl_type_explicit(ty: &Ty) -> String {
     // Iterator items may contain opaque I/O errors, but Stream<Result<..., Object>> is nameable.
-    if matches!(ty.strip_refs(), Ty::Iter(_)) || (ty.is_nameable() && !ty.is_unit()) {
+    // Likewise `Result<T, Object>` for a std error payload (`ParseIntError`).
+    let std_error_result = matches!(ty.strip_refs(), Ty::Result(ok, err)
+        if ok.is_nameable() && matches!(**err, Ty::Other(_)));
+    if matches!(ty.strip_refs(), Ty::Iter(_))
+        || std_error_result
+        || (ty.is_nameable() && !ty.is_unit())
+    {
         ty.java()
     } else {
         "Object".into()

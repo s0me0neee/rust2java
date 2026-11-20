@@ -1,0 +1,15 @@
+3*x^2 + 1*y + 0
+3*x^2 + y
+Err("unbound y")
+Ok(10.5)
+d/dx = 3*2*x
+d/dy = 1
+["x", "y"] depth 4
+--(a + a) => 2*a
+7          digit 7
+12         int 12
+2.5        digit 2.5
+1 + 2      constant sum
+q*4        product of depth 2
+zz         Var("zz")
+(a + 1)^3
