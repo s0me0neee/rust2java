@@ -7,7 +7,8 @@ fn unsupported_formatting_is_reported() {
     std::fs::write(
         &source,
         r#"fn main() {
-    println!("{:#?}", vec![1]);
+    let x = 1;
+    println!("{:p}", &x);
     println!("{:e}", 1.0);
 }"#,
     )
@@ -20,6 +21,6 @@ fn unsupported_formatting_is_reported() {
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success());
-    assert!(stderr.contains("pretty Debug format"), "{stderr}");
+    assert!(stderr.contains("format spec `{:p}`"), "{stderr}");
     assert!(stderr.contains("format spec `{:e}`"), "{stderr}");
 }
