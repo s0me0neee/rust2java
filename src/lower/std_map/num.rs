@@ -712,6 +712,47 @@ pub(super) fn lower_int_method(
             line,
             out,
         )),
+        "to_be_bytes" | "to_le_bytes" | "to_ne_bytes" => {
+            // `[u8; N]` is a list of 0..=255 ints, most significant first for big-endian.
+            let x = super::simple(cx, recv, &Ty::Int(i), line, out);
+            let n = width / 8;
+            let bytes: Vec<Expr> = (0..n)
+                .map(|k| {
+                    let shift = if name == "to_be_bytes" {
+                        8 * (n - 1 - k)
+                    } else {
+                        8 * k
+                    };
+                    let shifted = if shift == 0 {
+                        x.clone()
+                    } else {
+                        Expr::bin(x.clone(), ">>>", Expr::raw(shift.to_string()))
+                    };
+                    let byte = Expr::bin(shifted, "&", Expr::raw("0xFF"));
+                    if long {
+                        Expr::Cast("int".into(), Box::new(byte))
+                    } else {
+                        byte
+                    }
+                })
+                .collect();
+            let list = Expr::call(Expr::raw("List"), "of", bytes);
+            Some(Expr::New {
+                ty: "ArrayList<>".into(),
+                args: vec![list],
+            })
+        }
+        "next_power_of_two" => {
+            let x = super::simple(cx, recv, &Ty::Int(i), line, out);
+            let xs = render(&x);
+            Some(narrow(
+                Expr::raw(format!(
+                    "({xs} <= 1 ? 1 : {}.highestOneBit({xs} - 1) << 1)",
+                    if long { "Long" } else { "Integer" }
+                )),
+                i,
+            ))
+        }
         "is_power_of_two" => {
             let nonzero = if unsigned {
                 Expr::bin(recv.clone(), "!=", Expr::raw("0"))
@@ -805,6 +846,27 @@ fn bit_width(i: Int) -> u32 {
         Int::I32 | Int::U32 => 32,
         _ => 64,
     }
+}
+
+// `u32::from_be_bytes(b)`: the list folded most significant byte first.
+pub(super) fn from_bytes(key: &str, bytes: Expr) -> Option<Expr> {
+    let (owner, name) = key.split_once("::")?;
+    let i = Int::from_name(owner)?;
+    let src = if name == "from_le_bytes" {
+        Expr::call(bytes, "reversed", vec![])
+    } else {
+        bytes
+    };
+    let (map, unit) = if i.is_long() {
+        ("mapToLong", "0L")
+    } else {
+        ("mapToInt", "0")
+    };
+    let folded = Expr::raw(format!(
+        "{}.stream().{map}(b -> b).reduce({unit}, (a, b) -> a << 8 | b)",
+        render(&src)
+    ));
+    Some(narrow(folded, i))
 }
 
 // Java's bit helpers always work on 32/64 bits; mask narrow values and their sign bits away.
@@ -1248,7 +1310,7 @@ pub(super) fn saturating_int(recv: Expr, b: Expr, i: Int, name: &str) -> Expr {
                 math(
                     "min",
                     vec![
-                        Expr::bin(Expr::Cast("long".into(), Box::new(recv)), "+", b),
+                        Expr::bin(unsigned_wide(i, recv), "+", unsigned_wide(i, b)),
                         Expr::raw("65535L"),
                     ],
                 ),
@@ -1258,7 +1320,7 @@ pub(super) fn saturating_int(recv: Expr, b: Expr, i: Int, name: &str) -> Expr {
                 int_cast(math(
                     "min",
                     vec![
-                        Expr::bin(unsigned_wide(i, recv), "+", b),
+                        Expr::bin(unsigned_wide(i, recv), "+", unsigned_wide(i, b)),
                         Expr::raw("4294967295L"),
                     ],
                 )),
@@ -1293,6 +1355,18 @@ pub(super) fn saturating_int(recv: Expr, b: Expr, i: Int, name: &str) -> Expr {
                         Expr::bin(recv, "-", b),
                         Expr::raw("0"),
                     ))
+                } else if i == Int::U16 {
+                    // A u16 is a signed Java `short`: compare the unsigned values.
+                    narrow(
+                        math(
+                            "max",
+                            vec![
+                                Expr::bin(unsigned_wide(i, recv), "-", unsigned_wide(i, b)),
+                                Expr::raw("0L"),
+                            ],
+                        ),
+                        i,
+                    )
                 } else {
                     narrow(
                         math("max", vec![Expr::bin(recv, "-", b), Expr::raw("0")]),
@@ -1325,7 +1399,7 @@ pub(super) fn saturating_int(recv: Expr, b: Expr, i: Int, name: &str) -> Expr {
                 math(
                     "min",
                     vec![
-                        Expr::bin(Expr::Cast("long".into(), Box::new(recv)), "*", b),
+                        Expr::bin(unsigned_wide(i, recv), "*", unsigned_wide(i, b)),
                         Expr::raw("65535L"),
                     ],
                 ),
@@ -1335,7 +1409,7 @@ pub(super) fn saturating_int(recv: Expr, b: Expr, i: Int, name: &str) -> Expr {
                 int_cast(math(
                     "min",
                     vec![
-                        Expr::bin(unsigned_wide(i, recv), "*", b),
+                        Expr::bin(unsigned_wide(i, recv), "*", unsigned_wide(i, b)),
                         Expr::raw("4294967295L"),
                     ],
                 )),

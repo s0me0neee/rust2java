@@ -1,0 +1,9 @@
+4 cols, 6 rows, score at Some(3)
+berlin    2 2.9418
+paris     2 2.3080
+line 5: missing age
+line 7: bad number "x"
+true
+alice|bob|carol|dave|erin|frank alice
+ABCDEF
+Some("paris")

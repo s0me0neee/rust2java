@@ -1,0 +1,22 @@
+n -> library (ok)
+  [moved n]
+  [TOOK 2 IN LIBRARY]
+e -> vault (ok)
+  [moved e]
+  [TOOK 3 IN VAULT]
+x -> vault (blocked)
+  [moved x]
+b -> library (ok)
+  [moved b]
+b -> hall (ok)
+  [moved b]
+b -> hall (blocked)
+  [moved b]
+n -> library (ok)
+  [moved n]
+  [TOOK 0 IN LIBRARY]
+bag ["book", "gem", "gold", "key", "scroll"]
+hall: visits=0 items=["lamp"] exits=['n']
+library: visits=2 items=[] exits=['e']
+vault: visits=1 items=[] exits=[]
+Some("library")

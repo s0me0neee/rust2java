@@ -795,14 +795,24 @@ fn lower_chain(
         return;
     }
     let value = place(cx, scrut, out);
+    // `A(x) | B(x) => body` binds in each alternative: one test per alternative, same body.
+    let alts: Vec<(Option<ast::Pat>, &ast::MatchArm)> = arms
+        .iter()
+        .flat_map(|arm| match arm.pat() {
+            Some(ast::Pat::OrPat(op)) if op.pats().any(|p| binds_any(cx, &p)) => {
+                op.pats().map(|p| (Some(p), arm)).collect::<Vec<_>>()
+            }
+            p => vec![(p, arm)],
+        })
+        .collect();
     let mut els: Option<Box<Stmt>> = None;
-    for (i, arm) in arms.iter().enumerate().rev() {
+    for (i, (pat, arm)) in alts.iter().enumerate().rev() {
         let aline = cx.line(arm.syntax());
         // rustc already checked exhaustiveness: nothing else can reach the last arm.
-        let last = i + 1 == arms.len();
+        let last = i + 1 == alts.len();
         cx.push_scope();
         let mut lowered = PatLowering::default();
-        let mut conds = match arm.pat() {
+        let mut conds = match pat.clone() {
             Some(p) if !last => lower_pat(cx, &p, value.clone(), Mode::If, &mut lowered),
             Some(p) => {
                 lower_pat(cx, &p, value.clone(), Mode::Extract, &mut lowered);

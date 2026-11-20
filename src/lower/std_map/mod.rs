@@ -665,6 +665,15 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
             Expr::raw("null")
         }
         k if k.contains("::from_str_radix") => from_str_radix(cx, c, k, &ret, args, out),
+        k if k.ends_with("::from_be_bytes")
+            || k.ends_with("::from_le_bytes")
+            || k.ends_with("::from_ne_bytes") =>
+        {
+            match args.into_iter().next().and_then(|b| num::from_bytes(k, b)) {
+                Some(e) => e,
+                None => cx.unsupported(c.syntax(), &format!("std function `{key}`")),
+            }
+        }
         _ => match primitive_method_call(cx, c, key, &ret, line, out) {
             Some(e) => e,
             None => cx.unsupported(c.syntax(), &format!("std function `{key}`")),

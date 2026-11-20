@@ -438,6 +438,12 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
     }
     let lt = cx.ty(&lhs);
     let rt = cx.ty(&rhs);
+    // `T: Add<Output = T>`: Java has no operators on a type variable.
+    if let BinaryOp::ArithOp(_) = op
+        && matches!(lt.strip_refs(), Ty::Param(_))
+    {
+        return cx.unsupported(b.syntax(), "arithmetic on a generic type parameter");
+    }
     let l = lower_expr(cx, &lhs, out);
     // `a && <rhs needing statements>`: the statements may only run when `a` allows it
     // (`i < v.len() && matches!(v[i], ..)` must not index first).

@@ -174,6 +174,7 @@ The test harness reports, for every Rust statement, whether it landed on its exa
 | pairs `(A, B)` | `Map.Entry<A, B>`, built with `Map.entry(a, b)`. `t.0` and `t.1` become `getKey()` and `getValue()`. This also lines up with map iteration, which already yields entries. |
 | tuples `(A, B, C, …)` | a generated `record Tuple3<A, B, C>(A _0, B _1, C _2)`, emitted only for the arities the program uses |
 | `Box<T>`, `Rc<T>`, `Arc<T>` | `T` |
+| `Weak<T>` | `T` as well: `Rc::downgrade(&r)` is `r`, `w.upgrade()` is `Optional.ofNullable(w)` (empty only for `Weak::new()`). The GC keeps the target alive, so Rust's dropped-target `None` is never observed. |
 | `RefCell<T>`, `Cell<T>` | `T`, or a one-element array cell (§8). `borrow()` and `borrow_mut()` disappear. |
 | `&T`, `&mut T` | `T`, or a cell when `&mut` points at a primitive or `String` (§8) |
 | `std::cmp::Ordering` | `int` from `compare`/`compareTo`. `Less`/`Equal`/`Greater` become `< 0`, `== 0`, `> 0`, and `match` on it becomes an `if` chain. |

@@ -1,0 +1,14 @@
+[-8, -3, 0, 1, 5, 5, 9, 12]
+[-1, 1, 2, 5, 5, 6, 9]
+["apple", "banana", "fig", "kiwi", "pear"]
+[3, 1, 2, 7, 9]
+5 -> Ok(4) true
+6 -> Err(6) false
+-10 -> Err(0) false
+100 -> Err(8) false
+Some(0) None
+[(1, 'z'), (1, 'y'), (2, 'b'), (2, 'a')]
+partition 4 chunks [-11, 11, 21]
+[-8, 0, 12] [-3, 1, 5, 5, 9] rev [12, 9, 5, 5, 1, 0, -3, -8]
+[1, 5, 5, 9, 12, -8, -3, 0] max Some(12) min_by_key Some(0)
+false [12, 9, 5, 1, 0, -3, -8] true

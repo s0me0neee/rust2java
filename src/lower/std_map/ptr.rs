@@ -355,6 +355,19 @@ fn lower_rc(
             node,
             "`Rc::strong_count`/`weak_count`: Java has no reference counts",
         ),
+        // A `Weak` is the same Java reference (the GC handles cycles), so `upgrade` only fails
+        // for `Weak::new()`; Rust's "dropped" state is never observed.
+        "downgrade" | "upgrade" if args.len() == 1 => {
+            if is_array(cx, &args[0]).is_some() {
+                return cx.unsupported(node, "`Weak` to a `Cell`/`RefCell` value");
+            }
+            let v = expr::lower_expr(cx, &args[0], out);
+            if name == "downgrade" {
+                v
+            } else {
+                Expr::call(Expr::raw("Optional"), "ofNullable", vec![v])
+            }
+        }
         "downgrade" | "upgrade" => cx.unsupported(node, "`Weak` pointers"),
         "get_mut" | "make_mut" | "try_unwrap" | "into_raw" | "from_raw" | "as_ptr" | "alloc" => {
             cx.unsupported(node, &format!("`{key}`"))

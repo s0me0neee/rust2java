@@ -1153,7 +1153,7 @@ pub(super) fn lower_vec_method(
             let cmp = ord_comparator(cx, elem).unwrap_or_else(|| "null".into());
             Some(Expr::call(recv, "sort", vec![Expr::raw(cmp)]))
         }
-        "sort_by" => Some(Expr::call(recv, "sort", vec![b0])),
+        "sort_by" | "sort_unstable_by" => Some(Expr::call(recv, "sort", vec![b0])),
         "sort_by_key" | "sort_unstable_by_key" => {
             let key_ty = match arg_asts.first() {
                 Some(ast::Expr::ClosureExpr(c)) => c.body().map(|b| cx.ty(&b)),
@@ -1246,7 +1246,26 @@ pub(super) fn lower_vec_method(
                 },
             ))
         }
-        "split_at" => {
+        "extend_from_slice" => Some(Expr::call(recv, "addAll", vec![b0])),
+        // Rust leaves the other elements in an unspecified order; sorting them all is one choice.
+        "select_nth_unstable"
+            if m.syntax()
+                .parent()
+                .is_some_and(|p| ast::ExprStmt::can_cast(p.kind())) =>
+        {
+            Some(Expr::call(recv, "sort", vec![Expr::raw("null")]))
+        }
+        // The slice is partitioned by the predicate, so the point is the length of its true prefix.
+        "partition_point" => Some(Expr::Cast(
+            "int".into(),
+            Box::new(Expr::call(
+                Expr::call(Expr::call(recv, "stream", vec![]), "takeWhile", vec![b0]),
+                "count",
+                vec![],
+            )),
+        )),
+        // `subList` views write through, like the two `&mut` halves.
+        "split_at" | "split_at_mut" => {
             let recv = simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out);
             let i = simple(cx, b0, &Ty::Int(Int::Usize), line, out);
             let a = Expr::call(recv.clone(), "subList", vec![Expr::raw("0"), i.clone()]);

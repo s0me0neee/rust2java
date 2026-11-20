@@ -386,6 +386,70 @@ fn iter_mut_of_list(cx: &Cx, e: &ast::Expr) -> Option<ast::Expr> {
     }
 }
 
+// `v.iter_mut().for_each(|x| *x += k);` over numbers/Strings: the index loop that
+// `for x in v.iter_mut()` becomes, with the closure body as the loop body.
+fn iter_mut_for_each(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    recv_ast: &ast::Expr,
+    out: &mut Vec<Stmt>,
+) -> Option<Expr> {
+    if cx.lambda_depth > 0
+        || !m
+            .syntax()
+            .parent()
+            .is_some_and(|p| ast::ExprStmt::can_cast(p.kind()))
+    {
+        return None;
+    }
+    let list_ast = iter_mut_of_list(cx, recv_ast)?;
+    let Some(ast::Expr::ClosureExpr(c)) = arg_exprs(m).into_iter().next() else {
+        return None;
+    };
+    let params: Vec<ast::Param> = c.param_list()?.params().collect();
+    let [param] = params.as_slice() else {
+        return None;
+    };
+    let Some(ast::Pat::IdentPat(ip)) = param.pat() else {
+        return None;
+    };
+    let name = ip.name()?.text().to_string();
+    let body = c.body()?;
+    // A `return` would leave the closure call, which is a `continue` here; keep it simple.
+    if body
+        .syntax()
+        .descendants()
+        .any(|n| ast::ReturnExpr::can_cast(n.kind()))
+    {
+        return None;
+    }
+    let line = cx.line(m.syntax());
+    let list = expr::lower_expr(cx, &list_ast, out);
+    let list_ty = cx.ty(&list_ast);
+    let list = ensure_simple(cx, list, &list_ty, line, out);
+    let idx = cx.fresh("i");
+    let header = format!("int {idx} = 0; {idx} < {}.size(); {idx}++", render(&list));
+    cx.push_scope();
+    let _ = cx.declare(&name);
+    if let Some(local) = cx.sema.to_def(&ip) {
+        cx.elem_aliases
+            .insert(local, (render(&list), idx, super::ElemAliasKind::List));
+    }
+    let mut stmts = Vec::new();
+    stmt::lower_to_dest(cx, &body, &Dest::Discard, &mut stmts);
+    cx.pop_scope();
+    let close_line = cx.end_line(body.syntax());
+    out.push(Stmt::new(
+        line,
+        StmtKind::For {
+            label: None,
+            header,
+            body: Block { stmts, close_line },
+        },
+    ));
+    Some(Expr::raw("null"))
+}
+
 // `v.iter()` / `v.iter_mut()` / `v.into_iter()` / `&v` where v is a list: returns `v`.
 fn list_receiver_of_iter(cx: &Cx, e: &ast::Expr) -> Option<ast::Expr> {
     let target = match strip_parens(e) {
@@ -702,6 +766,11 @@ pub fn lower_iter_method(
     let name = method_name(m);
     let recv_ast = m.receiver()?;
     let ret_ty = cx.ty(&ast::Expr::MethodCallExpr(m.clone()));
+    if name == "for_each"
+        && let Some(e) = iter_mut_for_each(cx, m, &recv_ast, out)
+    {
+        return Some(e);
+    }
     // `(a..b).contains(&x)`: two comparisons.
     if name == "contains"
         && let ast::Expr::RangeExpr(r) = strip_parens(&recv_ast)
