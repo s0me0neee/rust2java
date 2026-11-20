@@ -169,7 +169,10 @@ pub fn hoist(cx: &mut Cx, e: &ast::Expr, out: &mut Vec<Stmt>) -> Expr {
         stmt::lower_to_dest(cx, e, &Dest::Discard, out);
         return Expr::raw("null");
     }
-    let tmp = cx.fresh("tmp");
+    let hint = super::name_hint(e)
+        .or_else(|| super::context_hint(e))
+        .unwrap_or_else(|| "tmp".into());
+    let tmp = cx.fresh(&hint);
     out.push(Stmt::new(
         line,
         StmtKind::Local {
@@ -1581,7 +1584,7 @@ fn lower_closure_inner(cx: &mut Cx, c: &ast::ClosureExpr) -> Expr {
                 Some(ast::Pat::WildcardPat(_)) | None => params.push(cx.fresh("unused")),
                 Some(other) => {
                     // Destructuring parameter: bind a fresh name, unpack inside the body.
-                    let tmp = cx.fresh("arg");
+                    let tmp = cx.fresh(super::pat_hint(&other));
                     params.push(tmp.clone());
                     pat::bind_pattern(cx, &other, Expr::name(tmp), &mut prelude);
                 }

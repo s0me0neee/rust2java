@@ -1274,7 +1274,7 @@ fn index_mut_setter(cx: &mut Cx, f: &ast::Fn, target: &Target) -> Option<Method>
             }
             // `(r, c): (usize, usize)`: bound from the parameter like an ordinary fn's.
             Some(other) => {
-                let tmp = cx.fresh("arg");
+                let tmp = cx.fresh(super::pat_hint(&other));
                 jparams.push(format!("{jty} {tmp}"));
                 super::pat::bind_pattern(cx, &other, Expr::name(tmp), &mut prelude);
             }
@@ -1531,7 +1531,7 @@ fn lower_fn_sig(
                     }
                 }
                 Some(other) => {
-                    let tmp = cx.fresh("arg");
+                    let tmp = cx.fresh(super::pat_hint(&other));
                     params.push(format!("{jty} {tmp}"));
                     super::pat::bind_pattern(cx, &other, Expr::name(tmp), &mut prelude);
                 }

@@ -653,6 +653,21 @@ pub(super) fn parse_result(
     line: u32,
     out: &mut Vec<Stmt>,
 ) -> Expr {
+    cx.pending_name = cx.take_let_target(m.syntax());
+    let e = parse_result_inner(cx, m, input, ret, target, line, out);
+    cx.pending_name = None;
+    e
+}
+
+fn parse_result_inner(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    input: Expr,
+    ret: &Ty,
+    target: &Ty,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) -> Expr {
     match target.strip_refs() {
         Ty::Int(i) => {
             let exact = !error_discarded(m);
@@ -670,7 +685,7 @@ pub(super) fn parse_result(
         Ty::Bool => {
             cx.needs_result = true;
             let ty = result_java(ret);
-            let name = cx.fresh("res");
+            let name = cx.result_name();
             push_raw(
                 out,
                 line,
@@ -684,7 +699,7 @@ pub(super) fn parse_result(
         Ty::Char => {
             cx.needs_result = true;
             let ty = result_java(ret);
-            let name = cx.fresh("res");
+            let name = cx.result_name();
             push_raw(
                 out,
                 line,
@@ -712,8 +727,8 @@ pub(super) fn parse_int(
         && let Some(f) = super::text::int_parser(i)
     {
         let ty = result_java(ret);
-        let res = cx.fresh("res");
-        let ex = cx.fresh("ex");
+        let res = cx.result_name();
+        let ex = cx.fresh_param("ex");
         push_raw(
             out,
             line,
@@ -722,21 +737,28 @@ pub(super) fn parse_int(
                 render(&input)
             ),
         );
+        cx.release_param(&ex);
         return Expr::name(res);
     }
-    let s = cx.fresh("text");
-    out.push(Stmt::new(
-        line,
-        StmtKind::Local {
-            ty: "String".into(),
-            name: s.clone(),
-            init: Some(input),
-        },
-    ));
+    // The input is read more than once; a plain name or literal needs no copy.
+    let s = if super::is_simple(&input) {
+        render(&input)
+    } else {
+        let s = cx.fresh("text");
+        out.push(Stmt::new(
+            line,
+            StmtKind::Local {
+                ty: "String".into(),
+                name: s.clone(),
+                init: Some(input),
+            },
+        ));
+        s
+    };
     let ty = result_java(ret);
-    let res = cx.fresh("res");
-    let raw = cx.fresh("num");
-    let ex = cx.fresh("ex");
+    let res = cx.result_name();
+    let raw = cx.fresh_param("num");
+    let ex = cx.fresh_param("ex");
     let parsed = match (&radix, i) {
         (Some(r), Int::U64 | Int::U128) => format!("Long.parseUnsignedLong({s}, {})", render(r)),
         (Some(r), _) => format!("Long.parseLong({s}, {})", render(r)),
@@ -785,6 +807,8 @@ pub(super) fn parse_int(
             "{ty} {res}; try {{ {body} }} catch (NumberFormatException {ex}) {{ {res} = new Err<>(new NumberFormatException({failure})); }}"
         ),
     );
+    cx.release_param(&ex);
+    cx.release_param(&raw);
     Expr::name(res)
 }
 
@@ -799,8 +823,8 @@ pub(super) fn parse_float(
 ) -> Expr {
     cx.needs_result = true;
     let ty = result_java(ret);
-    let res = cx.fresh("res");
-    let ex = cx.fresh("ex");
+    let res = cx.result_name();
+    let ex = cx.fresh_param("ex");
     let parser = if f32 {
         "Float.parseFloat"
     } else {
@@ -815,17 +839,24 @@ pub(super) fn parse_float(
                 render(&input)
             ),
         );
+        cx.release_param(&ex);
         return Expr::name(res);
     }
-    let s = cx.fresh("text");
-    out.push(Stmt::new(
-        line,
-        StmtKind::Local {
-            ty: "String".into(),
-            name: s.clone(),
-            init: Some(input),
-        },
-    ));
+    // The input is read more than once; a plain name or literal needs no copy.
+    let s = if super::is_simple(&input) {
+        render(&input)
+    } else {
+        let s = cx.fresh("text");
+        out.push(Stmt::new(
+            line,
+            StmtKind::Local {
+                ty: "String".into(),
+                name: s.clone(),
+                init: Some(input),
+            },
+        ));
+        s
+    };
     let failure = format!(
         "({s}.isEmpty() ? \"cannot parse float from empty string\" : \"invalid float literal\")"
     );
@@ -836,6 +867,7 @@ pub(super) fn parse_float(
             "{ty} {res}; try {{ {res} = new Ok<>({parser}({s})); }} catch (NumberFormatException {ex}) {{ {res} = new Err<>(new NumberFormatException({failure})); }}"
         ),
     );
+    cx.release_param(&ex);
     Expr::name(res)
 }
 

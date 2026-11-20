@@ -251,6 +251,7 @@ fn lower_format_impl(
     }
     // Arguments in source order; each keeps the statements its own lowering hoisted.
     let mut args: Vec<(Option<String>, Expr, Ty, Vec<Stmt>)> = Vec::new();
+    let mut hints: Vec<Option<String>> = Vec::new();
     for a in fa.args() {
         let Some(e) = a.expr() else { continue };
         let ty = if matches!(&e, ast::Expr::MacroExpr(m) if m.macro_call().is_some_and(|mc| matches!(super::macros::macro_name(&mc).as_str(), "format_args" | "format_args_nl")))
@@ -265,15 +266,17 @@ fn lower_format_impl(
         }
         let mut pre = Vec::new();
         let v = expr::lower_expr(cx, &e, &mut pre);
-        args.push((a.name().map(|n| n.text().to_string()), v, ty, pre));
+        let named = a.name().map(|n| n.text().to_string());
+        hints.push(named.clone().or_else(|| super::name_hint(&e)));
+        args.push((named, v, ty, pre));
     }
     let temps = args_needing_temps(&pieces, &specs, &args);
     let mut positional: Vec<(Expr, Ty)> = Vec::new();
     let mut named: Vec<(String, Expr, Ty)> = Vec::new();
-    for ((name, v, ty, pre), temp) in args.into_iter().zip(temps) {
+    for (((name, v, ty, pre), temp), hint) in args.into_iter().zip(temps).zip(hints) {
         out.extend(pre);
         let v = if temp {
-            let tmp = cx.fresh("fmt_arg");
+            let tmp = cx.fresh(hint.as_deref().unwrap_or("fmt_arg"));
             out.push(Stmt::new(
                 cx.line(fa.syntax()),
                 StmtKind::Local {
@@ -1093,6 +1096,10 @@ fn format_one(
 }
 
 fn hoist_string(cx: &mut Cx, node: &SyntaxNode, value: Expr, out: &mut Vec<Stmt>) -> Expr {
+    // A plain name or literal can be read twice as it is.
+    if is_pure(&value) {
+        return value;
+    }
     let name = cx.fresh("fmt_text");
     out.push(Stmt::new(
         cx.line(node),
@@ -1640,10 +1647,13 @@ pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
             )
         }
         Ty::Result(ok, err) => {
-            let ok_name = cx.fresh("fmt_ok");
-            let err_name = cx.fresh("fmt_err");
+            // Arm bindings, scoped to their arm like lambda parameters.
+            let ok_name = cx.fresh_param("fmt_ok");
+            let err_name = cx.fresh_param("fmt_err");
             let ok_value = debug_operand(cx, Expr::name(&ok_name), ok);
             let err_value = debug_operand(cx, Expr::name(&err_name), err);
+            cx.release_param(&ok_name);
+            cx.release_param(&err_name);
             let wrap = |name: &str, value| {
                 concat(vec![
                     Expr::str_lit(&format!("{name}(")),

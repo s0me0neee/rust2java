@@ -240,8 +240,9 @@ fn chain_value(
     if is_place(&v) {
         return v;
     }
+    let hint = super::name_hint(init).unwrap_or_else(|| "val".into());
     if first {
-        let tmp = cx.fresh("val");
+        let tmp = cx.fresh(&hint);
         out.push(Stmt::new(
             line,
             StmtKind::Local {
@@ -253,7 +254,7 @@ fn chain_value(
         return Expr::name(tmp);
     }
     // Later components must stay inside the test: earlier components may guard this one.
-    let tmp = cx.fresh("val");
+    let tmp = cx.fresh(&hint);
     out.push(Stmt::new(
         line,
         StmtKind::Local {
@@ -280,6 +281,7 @@ fn assign_test(assign: Expr, ty: &Ty) -> Expr {
 fn is_place(e: &Expr) -> bool {
     match e {
         Expr::Name(_) => true,
+        Expr::Raw(r) => r == "this",
         Expr::Field(base, _) => is_place(base),
         _ => false,
     }
@@ -428,7 +430,7 @@ fn get_idiom(cx: &mut Cx, p: &ast::Pat, init: &ast::Expr) -> Option<(Expr, Optio
 }
 
 // Locals, literals, field reads and arithmetic on them: safe to evaluate twice.
-fn is_pure(e: &ast::Expr) -> bool {
+pub(crate) fn is_pure(e: &ast::Expr) -> bool {
     match e {
         ast::Expr::PathExpr(_) | ast::Expr::Literal(_) => true,
         ast::Expr::ParenExpr(p) => p.expr().is_some_and(|x| is_pure(&x)),
@@ -1858,9 +1860,13 @@ fn try_result(
     let Some(want) = want else {
         return cx.unsupported(node.syntax(), "`?` outside a function returning Result");
     };
-    let ok_name = cx.fresh("val");
-    let err_name = cx.fresh("error");
-    let tmp = cx.fresh("ok_value");
+    let ok_name = cx.fresh_param("val");
+    let err_name = cx.fresh_param("error");
+    let hint = node
+        .expr()
+        .and_then(|e| super::name_hint(&e))
+        .unwrap_or_else(|| "ok_value".into());
+    let tmp = try_target(cx, node).unwrap_or_else(|| cx.fresh(&hint));
     let unit = ok.is_unit();
     if !unit {
         out.push(Stmt::new(
@@ -1899,7 +1905,7 @@ fn try_result(
                 ArmBody::Expr(Expr::Assign(
                     Box::new(Expr::name(tmp.clone())),
                     "=",
-                    Box::new(Expr::name(ok_name)),
+                    Box::new(Expr::name(ok_name.clone())),
                 ))
             },
         },
@@ -1913,11 +1919,19 @@ fn try_result(
         },
     ];
     out.push(Stmt::new(line, StmtKind::Switch { scrut: v, arms }));
+    // The arm bindings end with the switch; later switches may reuse the words.
+    cx.release_param(&ok_name);
+    cx.release_param(&err_name);
     if unit {
         Expr::raw("null")
     } else {
         Expr::name(tmp)
     }
+}
+
+// The `let` binding a `?` initializes directly, declared now that its operand is lowered.
+fn try_target(cx: &mut Cx, node: &ast::TryExpr) -> Option<String> {
+    cx.take_let_target(node.syntax())
 }
 
 // `Box<dyn Error>` erases to its payload; no `From` conversion is involved.
@@ -1976,7 +1990,11 @@ fn try_option(
     if inner_ty.is_unit() {
         return Expr::raw("null");
     }
-    let tmp = cx.fresh("some_value");
+    let hint = node
+        .expr()
+        .and_then(|e| super::name_hint(&e))
+        .unwrap_or_else(|| "some_value".into());
+    let tmp = try_target(cx, node).unwrap_or_else(|| cx.fresh(&hint));
     out.push(Stmt::new(
         line,
         StmtKind::Local {
@@ -2002,7 +2020,7 @@ pub(crate) fn place(cx: &mut Cx, e: &ast::Expr, out: &mut Vec<Stmt>) -> Expr {
     if is_place(&v) {
         return v;
     }
-    let tmp = cx.fresh("m");
+    let tmp = cx.fresh(&super::name_hint(e).unwrap_or_else(|| "m".into()));
     out.push(Stmt::new(
         line,
         StmtKind::Local {

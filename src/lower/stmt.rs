@@ -18,10 +18,14 @@ pub enum Dest {
 
 pub fn lower_block(cx: &mut Cx, b: &ast::BlockExpr, dest: &Dest) -> Block {
     cx.push_scope();
+    // Everything declared here lives in this Java block, so a sibling block or a later
+    // statement may use the same names again (`n` in two match arms instead of `n`, `n2`).
+    let taken = cx.method_names.clone();
     let mut stmts = Vec::new();
     if let Some(list) = b.stmt_list() {
         lower_stmt_list(cx, &list, dest, &mut stmts);
     }
+    cx.method_names = taken;
     cx.pop_scope();
     Block {
         stmts,
@@ -143,6 +147,74 @@ fn is_list_literal(e: &ast::Expr) -> bool {
     }
 }
 
+// `let (a, b) = (x, y);` as two plain locals, when `x`/`y` don't read `a`/`b` (a swap would).
+fn lower_tuple_literal_let(
+    cx: &mut Cx,
+    l: &ast::LetStmt,
+    tp: &ast::TuplePat,
+    out: &mut Vec<Stmt>,
+) -> bool {
+    let Some(ast::Expr::TupleExpr(te)) = l.initializer().map(|i| super::strip_parens(&i)) else {
+        return false;
+    };
+    let pats: Vec<ast::Pat> = tp.fields().collect();
+    let elems: Vec<ast::Expr> = te.fields().collect();
+    if pats.len() != elems.len() || pats.len() < 2 {
+        return false;
+    }
+    let mut names = Vec::new();
+    for p in &pats {
+        match p {
+            ast::Pat::WildcardPat(_) => {}
+            ast::Pat::IdentPat(ip)
+                if ip.pat().is_none()
+                    && ip.ref_token().is_none()
+                    && !cx.binding_needs_cell(ip, &cx.pat_ty(p))
+                    && !cx.binding_is_builder(ip) =>
+            {
+                match ip.name() {
+                    Some(n) => names.push(n.text().to_string()),
+                    None => return false,
+                }
+            }
+            _ => return false,
+        }
+    }
+    let reads_bound = elems.iter().any(|e| {
+        e.syntax()
+            .descendants()
+            .filter_map(ast::PathExpr::cast)
+            .any(|pe| names.iter().any(|n| pe.syntax().text() == n.as_str()))
+    });
+    if reads_bound || elems.iter().any(is_control_flow) {
+        return false;
+    }
+    let line = cx.line(l.syntax());
+    for (p, e) in pats.iter().zip(&elems) {
+        let ast::Pat::IdentPat(ip) = p else {
+            lower_to_dest(cx, e, &Dest::Discard, out);
+            continue;
+        };
+        let ty = cx.pat_ty(p);
+        let v = expr::lower_expr_as(cx, e, &ty, out);
+        let v = if matches!(ty.strip_refs(), Ty::Option(_)) {
+            expr::unwitness_empty(v)
+        } else {
+            v
+        };
+        let name = cx.declare(&ip.name().unwrap().text());
+        out.push(Stmt::new(
+            line,
+            StmtKind::Local {
+                ty: decl_type(&ty),
+                name,
+                init: Some(v),
+            },
+        ));
+    }
+    true
+}
+
 pub fn lower_let(cx: &mut Cx, l: &ast::LetStmt, out: &mut Vec<Stmt>) {
     let line = cx.line(l.syntax());
     let Some(p) = l.pat() else { return };
@@ -160,6 +232,11 @@ pub fn lower_let(cx: &mut Cx, l: &ast::LetStmt, out: &mut Vec<Stmt>) {
         Some(t) => cx.type_ref(&t),
         None => cx.pat_ty(&p),
     };
+    if let ast::Pat::TuplePat(tp) = &p
+        && lower_tuple_literal_let(cx, l, tp, out)
+    {
+        return;
+    }
     let ast::Pat::IdentPat(ip) = &p else {
         pat::lower_destructuring_let(cx, l, out);
         return;
@@ -284,8 +361,24 @@ pub fn lower_let(cx: &mut Cx, l: &ast::LetStmt, out: &mut Vec<Stmt>) {
         }
         Some(init) => {
             cx.read_only_literal = is_list_literal(&init) && cx.binding_read_only(ip);
+            // `let have = *self.balance()?;`: the deref of a copied value lowers to the value.
+            let target = match super::strip_parens(&init) {
+                ast::Expr::PrefixExpr(pe) if pe.op_kind() == Some(ast::UnaryOp::Deref) => pe
+                    .expr()
+                    .map(|i| super::strip_parens(&i))
+                    .unwrap_or(init.clone()),
+                other => other,
+            };
+            cx.try_let = Some((target.syntax().clone(), rust_name.clone()));
             // The initializer is lowered before declaring so `let x = x + 1` sees the old `x`.
             let e = expr::lower_expr_as(cx, &init, &ty, out);
+            cx.try_let = None;
+            if let Some(java) = cx.try_let_declared.take()
+                && matches!(&e, Expr::Name(n) if *n == java)
+            {
+                cx.read_only_literal = false;
+                return;
+            }
             let e = if matches!(ty.strip_refs(), Ty::Option(_)) {
                 expr::unwitness_empty(e)
             } else {

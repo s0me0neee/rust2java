@@ -118,13 +118,16 @@ fn simple(cx: &mut Cx, e: Expr, ty: &Ty, line: u32, out: &mut Vec<Stmt>) -> Expr
     if is_simple(&e) || cx.lambda_depth > 0 {
         return e;
     }
-    let name = push_local(cx, line, super::stmt::decl_type(ty), Some(e), out, "tmp");
+    let hint = super::expr_hint(&e).unwrap_or_else(|| "tmp".into());
+    let name = push_local(cx, line, super::stmt::decl_type(ty), Some(e), out, &hint);
     Expr::name(name)
 }
 
 fn is_simple(e: &Expr) -> bool {
     match e {
         Expr::Name(_) => true,
+        // `this.src`, `p.pos`: reading a field twice is as cheap and pure as reading a local.
+        Expr::Field(base, _) => is_simple(base),
         Expr::Raw(s) => {
             s.starts_with('"')
                 || s.starts_with('\'')

@@ -102,6 +102,12 @@ pub struct Cx<'a, 'db> {
     pub stdin_lines: bool,
     // The array literal being lowered initializes a binding that is only ever read: `List.of`.
     pub read_only_literal: bool,
+    // `let x = <init>;` where lowering `init` ends in a fresh local (`?`, `parse`): that local is
+    // declared as `x` itself. Set by the let, taken via `take_let_target`.
+    pub try_let: Option<(SyntaxNode, String)>,
+    pub try_let_declared: Option<String>,
+    // A name chosen by the caller for the next parse result (see `result_name`).
+    pub pending_name: Option<String>,
     // Every identifier in the Rust file: generated names never take one of these.
     file_idents: HashSet<String>,
 }
@@ -206,12 +212,37 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         uses_args: false,
         stdin_lines: false,
         read_only_literal: false,
+        try_let: None,
+        try_let_declared: None,
+        pending_name: None,
+        // Names a later Rust binding (or an unqualified const/static) will claim; function, type
+        // and field names live in other Java namespaces.
         file_idents: file
             .syntax()
-            .descendants_with_tokens()
-            .filter_map(|e| e.into_token())
-            .filter(|t| t.kind() == SyntaxKind::IDENT)
-            .map(|t| t.text().to_string())
+            .descendants()
+            .filter_map(|n| {
+                use ast::HasName;
+                if let Some(ip) = ast::IdentPat::cast(n.clone()) {
+                    ip.name()
+                } else if let Some(c) = ast::Const::cast(n.clone()) {
+                    c.name()
+                } else {
+                    ast::Static::cast(n).and_then(|s| s.name())
+                }
+            })
+            .map(|n| n.text().to_string())
+            // Macro bodies and arguments are token trees: their bindings aren't IdentPats.
+            .chain(
+                file.syntax()
+                    .descendants_with_tokens()
+                    .filter_map(|e| e.into_token())
+                    .filter(|t| {
+                        t.kind() == SyntaxKind::IDENT
+                            && t.parent_ancestors()
+                                .any(|a| a.kind() == SyntaxKind::TOKEN_TREE)
+                    })
+                    .map(|t| t.text().to_string()),
+            )
             .collect(),
     };
     cx.stdin_lines = !std_map::io::has_byte_reads(&cx, file.syntax());
@@ -761,6 +792,25 @@ impl<'a, 'db> Cx<'a, 'db> {
     }
 
     // A generated lambda parameter: avoids locals and enclosing lambdas' parameters only.
+    // The `let` binding that `node` (the let's initializer) may declare directly.
+    pub fn take_let_target(&mut self, node: &SyntaxNode) -> Option<String> {
+        match &self.try_let {
+            Some((n, _)) if n == node => {}
+            _ => return None,
+        }
+        let (_, rust) = self.try_let.take()?;
+        let java = self.declare(&rust);
+        self.try_let_declared = Some(java.clone());
+        Some(java)
+    }
+
+    // The local holding a parse result: the pending `let` name, else a fresh `result`.
+    pub fn result_name(&mut self) -> String {
+        self.pending_name
+            .take()
+            .unwrap_or_else(|| self.fresh("res"))
+    }
+
     pub fn fresh_param(&mut self, base: &str) -> String {
         self.param_mode = true;
         let n = self.fresh(base);
@@ -917,6 +967,11 @@ fn natural_name(base: &str) -> &str {
         "fmt_entry" => "entry",
         "fmt_char" => "ch",
         "fmt_text" => "text",
+        "fmt_ok" => "ok",
+        "fmt_err" => "err",
+        "fmt_pad" => "pad",
+        "fmt_count" => "count",
+        "fmt_value" => "value",
         "fmt_arg" => "arg",
         "fmt_f" => "f",
         "err_value" => "err",
@@ -925,6 +980,231 @@ fn natural_name(base: &str) -> &str {
         "tmp" => "tmp",
         "unused" | "ignored" => "unused",
         other => other,
+    }
+}
+
+// A readable name for a temporary holding `e`, taken from the callee, method or field it reads
+// (`depth(a)` -> `depth`, `p.speed()` -> `speed`, `words[i]` -> `word`). None when nothing fits.
+pub fn name_hint(e: &ast::Expr) -> Option<String> {
+    let raw = match strip_parens(e) {
+        ast::Expr::MethodCallExpr(m) => {
+            let name = m.name_ref()?.text().to_string();
+            if matches!(
+                name.as_str(),
+                "unwrap"
+                    | "expect"
+                    | "clone"
+                    | "cloned"
+                    | "copied"
+                    | "to_owned"
+                    | "as_ref"
+                    | "as_mut"
+                    | "as_str"
+                    | "as_slice"
+                    | "borrow"
+                    | "borrow_mut"
+                    | "unwrap_or"
+                    | "unwrap_or_default"
+                    | "unwrap_or_else"
+                    | "into"
+                    | "iter"
+                    | "into_iter"
+                    | "iter_mut"
+                    | "trim"
+                    | "ok"
+                    | "lock"
+                    | "deref"
+                    | "to_string"
+                    | "rev"
+                    | "collect"
+                    | "ok_or"
+                    | "ok_or_else"
+                    | "map_err"
+                    | "context"
+                    | "with_context"
+            ) {
+                return m.receiver().and_then(|r| name_hint(&r));
+            }
+            // Verbs name what they hand back (`stack.pop()` -> `popped`, `words.get(i)` -> `word`).
+            match name.as_str() {
+                "pop" | "pop_front" | "pop_back" | "pop_first" | "pop_last" => "popped".into(),
+                "next" | "next_back" => "next".into(),
+                "peek" | "peek_mut" => "peeked".into(),
+                "find" | "find_map" => "found".into(),
+                "remove" | "swap_remove" => "removed".into(),
+                "take" | "replace" => "taken".into(),
+                "get" | "get_mut" => {
+                    let base = match m.receiver()? {
+                        ast::Expr::PathExpr(p) => {
+                            p.path()?.segment()?.name_ref()?.text().to_string()
+                        }
+                        ast::Expr::FieldExpr(f) => f.name_ref()?.text().to_string(),
+                        _ => return None,
+                    };
+                    singular(&base)?
+                }
+                _ => name,
+            }
+        }
+        ast::Expr::CallExpr(c) => {
+            let ast::Expr::PathExpr(p) = c.expr()? else {
+                return None;
+            };
+            let path = p.path()?;
+            let last = path.segment()?.name_ref()?.text().to_string();
+            match last.as_str() {
+                "Some" | "Ok" | "Err" | "Box" | "Rc" | "Arc" | "RefCell" | "Cell" => {
+                    use ast::HasArgList;
+                    return c.arg_list()?.args().next().and_then(|a| name_hint(&a));
+                }
+                "new" | "default" | "from" | "with_capacity" | "from_str" => {
+                    let owner = path.qualifier()?.segment()?.name_ref()?.text().to_string();
+                    snake(&owner)
+                }
+                l if l.starts_with(char::is_uppercase) => snake(l),
+                _ => last,
+            }
+        }
+        ast::Expr::FieldExpr(f) => {
+            let name = f.name_ref()?.text().to_string();
+            if name.starts_with(|c: char| c.is_ascii_digit()) {
+                return f.expr().and_then(|b| name_hint(&b));
+            }
+            name
+        }
+        ast::Expr::IndexExpr(ix) => {
+            let base = match ix.base()? {
+                ast::Expr::PathExpr(p) => p.path()?.segment()?.name_ref()?.text().to_string(),
+                b => name_hint(&b)?,
+            };
+            singular(&base)?
+        }
+        ast::Expr::TryExpr(t) => return name_hint(&t.expr()?),
+        ast::Expr::RefExpr(r) => return name_hint(&r.expr()?),
+        ast::Expr::PrefixExpr(p) if p.op_kind() == Some(ast::UnaryOp::Deref) => {
+            return name_hint(&p.expr()?);
+        }
+        ast::Expr::MacroExpr(m) => match m
+            .macro_call()?
+            .path()?
+            .segment()?
+            .name_ref()?
+            .text()
+            .to_string()
+            .as_str()
+        {
+            "format" => "text".into(),
+            "vec" => "items".into(),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    clean_hint(&raw)
+}
+
+// A name for a value from where it goes: `tokens.push(<e>)` -> `token`, `P { x: <e> }` -> `x`,
+// `return <e>` -> `result`. Used when the value itself (a `match`, an `if`) says nothing.
+pub fn context_hint(e: &ast::Expr) -> Option<String> {
+    let parent = e.syntax().parent()?;
+    if let Some(f) = ast::RecordExprField::cast(parent.clone()) {
+        return clean_hint(&f.field_name()?.text());
+    }
+    if ast::ReturnExpr::can_cast(parent.kind()) {
+        return Some("result".into());
+    }
+    let call = ast::ArgList::cast(parent)?.syntax().parent()?;
+    let m = ast::MethodCallExpr::cast(call)?;
+    let method = m.name_ref()?.text().to_string();
+    if !matches!(
+        method.as_str(),
+        "push" | "push_back" | "push_front" | "insert" | "add"
+    ) {
+        return None;
+    }
+    let base = match m.receiver()? {
+        ast::Expr::PathExpr(p) => p.path()?.segment()?.name_ref()?.text().to_string(),
+        ast::Expr::FieldExpr(f) => f.name_ref()?.text().to_string(),
+        _ => return None,
+    };
+    singular(&base)
+}
+
+// The hint for a Java expression (when the Rust one is gone): the user method or field it reads.
+pub fn expr_hint(e: &jir::Expr) -> Option<String> {
+    match e {
+        jir::Expr::Field(_, f) => clean_hint(f),
+        jir::Expr::Call { recv, name, .. } => {
+            let own = match recv.as_deref() {
+                None | Some(jir::Expr::Name(_)) => true,
+                Some(jir::Expr::Raw(r)) => r == "this",
+                _ => false,
+            };
+            // Java library names (`size`, `getKey`, `valueOf`) say little about the value.
+            if own
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit())
+                && !matches!(
+                    name.as_str(),
+                    "get" | "size" | "length" | "of" | "apply" | "test" | "next"
+                )
+            {
+                clean_hint(name)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn clean_hint(raw: &str) -> Option<String> {
+    let mut s = raw.trim_end_matches("_mut");
+    for prefix in ["get_", "to_", "as_", "into_"] {
+        if let Some(rest) = s.strip_prefix(prefix)
+            && !rest.is_empty()
+        {
+            s = rest;
+        }
+    }
+    let ok = !s.is_empty()
+        && s.len() <= 24
+        && s.starts_with(|c: char| c.is_ascii_lowercase())
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        && !matches!(s, "self" | "new" | "main" | "fmt" | "call" | "default");
+    ok.then(|| s.to_string())
+}
+
+// `HashMap` -> `hash_map`.
+fn snake(name: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_uppercase() {
+            if i > 0 {
+                out.push('_');
+            }
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+// `words` -> `word`; None when the name isn't a plain plural.
+fn singular(name: &str) -> Option<String> {
+    let s = name.strip_suffix('s')?;
+    (s.len() >= 2 && !s.ends_with('s')).then(|| s.to_string())
+}
+
+// The name for a destructured parameter (`|(i, l)|`, `|Point { x, y }|`).
+pub fn pat_hint(p: &ast::Pat) -> &'static str {
+    match p {
+        ast::Pat::TuplePat(t) if t.fields().count() == 2 => "pair",
+        ast::Pat::TuplePat(_) => "tuple",
+        ast::Pat::RefPat(r) => r.pat().map_or("arg", |p| pat_hint(&p)),
+        _ => "arg",
     }
 }
 

@@ -957,6 +957,44 @@ pub fn lower_entry_assign(
         _ => return None,
     };
     let line = cx.line(lhs.syntax());
+    // `*m.entry(k).or_insert(0) += x` (the counting idiom) is `m.merge(k, x, Integer::sum)`.
+    // Rust reads `x` before `k`; with either side pure the order can't show.
+    let zero_default = match method_name(mc).as_str() {
+        "or_default" => true,
+        "or_insert" => mc
+            .arg_list()
+            .and_then(|a| a.args().next())
+            .is_some_and(|a| {
+                matches!(&a, ast::Expr::Literal(l) if {
+                    let t = l.syntax().text().to_string();
+                    let digits = t.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+                    digits.trim_end_matches(['0', '.', '_']).is_empty() && !digits.is_empty()
+                })
+            }),
+        _ => false,
+    };
+    let sum = match v_ty.strip_refs() {
+        Ty::Int(i) if !matches!(i.java(), "byte" | "short") => Some(if i.is_long() {
+            "Long::sum"
+        } else {
+            "Integer::sum"
+        }),
+        Ty::F64 => Some("Double::sum"),
+        _ => None,
+    };
+    if zero_default
+        && let Some(sum) = sum
+        && matches!(symbol, Some("+" | "-"))
+        && (crate::lower::pat::is_pure(rhs) || crate::lower::pat::is_pure(&key_ast))
+    {
+        let map = expr::lower_expr(cx, &map_ast, out);
+        let key = expr::lower_expr(cx, &key_ast, out);
+        let mut value = expr::lower_expr_as(cx, rhs, &v_ty, out);
+        if symbol == Some("-") {
+            value = Expr::Unary("-", Box::new(value));
+        }
+        return Some(Expr::call(map, "merge", vec![key, value, Expr::raw(sum)]));
+    }
     let rhs = expr::lower_expr_as(cx, rhs, &v_ty, out);
     let rhs = push_local(cx, line, v_ty.java(), Some(rhs), out, "value");
     let map = expr::lower_expr(cx, &map_ast, out);
@@ -1827,7 +1865,18 @@ pub fn lower_repeat(
 ) -> Expr {
     let elem_ty = cx.ty(elem);
     let n = expr::lower_expr(cx, count, out);
-    let n = simple(cx, n, &Ty::Int(Int::Usize), cx.line(node), out);
+    let n = if super::is_simple(&n) || cx.lambda_depth > 0 {
+        n
+    } else {
+        Expr::name(push_local(
+            cx,
+            cx.line(node),
+            "int".into(),
+            Some(n),
+            out,
+            "len",
+        ))
+    };
     if crate::lower::is_cell_value_ty(&elem_ty) || matches!(elem_ty.strip_refs(), Ty::Option(_)) {
         let x = expr::lower_expr(cx, elem, out);
         let copies = Expr::call(Expr::raw("Collections"), "nCopies", vec![n, x]);
