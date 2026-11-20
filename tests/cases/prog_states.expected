@@ -1,0 +1,12 @@
+Red > Green > Yellow > Yellow > Red > Off > Off > Red > Green
+reds 3 final_off false
+[3, 3, 3] Win(Rock)
+["keyword", "private", "symbol", "ident", "bracket", "number", "symbol", "digit", "bracket", "symbol", "zero", "bracket", "ident", "bracket"]
+["let", "_x1", "foo", "y_2"] nums=2
+Some(Sym('}'))
+0 -> missing
+4 -> ok 12
+14 -> err: 14 is cursed
+5 -> big 15
+Ok([3, 6, 9]) Err("7 is cursed")
+Ok(Some(6)) Ok(None)

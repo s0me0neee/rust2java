@@ -1,0 +1,19 @@
+"aaabccddddde" -> "3ab2c5de" -> ok=true
+"abc" -> "abc" -> ok=true
+"" -> "" -> ok=true
+"zzzzzzzzzzzz" -> "12z" -> ok=true
+Khoor, Zruog! abc | Hello, World! xyz
+act     cat/act/tac
+eggloo  google/gogole
+eilnst  listen/silent/enlist
+  A man, a plan, a canal: Panama true
+                      race a car false
+                 No 'x' in Nixon true
+"geeksskeeg" "aba"
+The Quick Brown Fox
+doubles 0 vowels 5
+fedcb 7
+[     3.142] [6   ] [ mid  ]
+0034689 7 Some('c')
+Some("brown fox") Some(17) Some(("the", "quick brown fox"))
+3+5+5+3

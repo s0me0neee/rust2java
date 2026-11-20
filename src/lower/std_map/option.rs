@@ -29,6 +29,15 @@ pub(super) fn method(
 }
 
 fn lambda_call(lambda: Expr, ret: &Ty) -> Expr {
+    // `|| expr` is the expression itself: it runs inside the caller's own lambda anyway.
+    if let Expr::Lambda {
+        params,
+        body: LambdaBody::Expr(body),
+    } = &lambda
+        && params.is_empty()
+    {
+        return (**body).clone();
+    }
     Expr::call(
         Expr::Cast(format!("Supplier<{}>", ret.boxed()), Box::new(lambda)),
         "get",
@@ -177,6 +186,37 @@ pub(super) fn lower_option_method(
             ))
         }
         "as_ref" | "as_mut" | "as_deref" | "cloned" | "copied" => Some(recv),
+        // `Option<Result<T, E>>` -> `Result<Option<T>, E>`.
+        "transpose" => {
+            let Ty::Result(ok, err) = ret.strip_refs() else {
+                return None;
+            };
+            cx.needs_result = true;
+            // `Optional.of(new Ok<>(3))` infers `Ok<Integer, Object>`; a typed local fixes it.
+            let recv = match recv {
+                Expr::Name(_) => recv,
+                _ if cx.lambda_depth > 0 => recv,
+                _ => {
+                    let Ty::Option(value) = ok.strip_refs() else {
+                        return None;
+                    };
+                    let opt = Ty::Option(Box::new(Ty::Result(value.clone(), err.clone())));
+                    let ty = stmt::decl_type_explicit(&opt);
+                    Expr::name(push_local(cx, line, ty, Some(recv), out, "opt"))
+                }
+            };
+            let r = cx.fresh("r");
+            let mapped = Expr::call(
+                recv,
+                format!("<Result<{}, {}>>map", ok.boxed(), err.boxed()),
+                vec![Expr::raw(format!("{r} -> {r}.map(Optional::of)"))],
+            );
+            Some(Expr::call(
+                mapped,
+                "orElseGet",
+                vec![Expr::raw("() -> new Ok<>(Optional.empty())")],
+            ))
+        }
         "flatten" => {
             // `Option<Option<T>>`: `orElse` yields the contained `Option<T>`; its type parameter
             // target-types the empty argument.

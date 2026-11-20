@@ -557,6 +557,50 @@ pub(super) fn lower_str_method(
             );
             return Some(Expr::name(n));
         }
+        "extend" => {
+            let stream = match arg0_ty.strip_refs() {
+                Ty::Iter(_) => b0,
+                Ty::Vec(_) | Ty::Deque(_) | Ty::Set { .. } => Expr::call(b0, "stream", vec![]),
+                _ => return None,
+            };
+            let item = match arg0_ty.strip_refs() {
+                Ty::Iter(t) | Ty::Vec(t) | Ty::Deque(t) | Ty::Set { t, .. } => (**t).clone(),
+                _ => return None,
+            };
+            let stream = if matches!(item.strip_refs(), Ty::Char) {
+                Expr::call(stream, "map", vec![Expr::raw("String::valueOf")])
+            } else {
+                stream
+            };
+            let text = Expr::call(stream, "collect", vec![Expr::raw("Collectors.joining()")]);
+            return Some(expr::place_assign(cx, recv_ast, "+=", text, out));
+        }
+        "replace_range" => {
+            let Some(ast::Expr::RangeExpr(range)) = arg_asts.first().map(strip_parens) else {
+                return None;
+            };
+            let p = expr::lower_expr(cx, recv_ast, out);
+            let p = simple(cx, p, &Ty::Str, line, out);
+            let start = match range.start() {
+                Some(s) => expr::lower_expr(cx, &s, out),
+                None => Expr::raw("0"),
+            };
+            let end = match range.end() {
+                Some(e) => {
+                    let e = expr::lower_expr(cx, &e, out);
+                    if range.op_kind() == Some(ast::RangeOp::Inclusive) {
+                        Expr::bin(e, "+", Expr::raw("1"))
+                    } else {
+                        e
+                    }
+                }
+                None => Expr::call(p.clone(), "length", vec![]),
+            };
+            let pre = Expr::call(p.clone(), "substring", vec![Expr::raw("0"), start]);
+            let post = Expr::call(p, "substring", vec![end]);
+            let v = Expr::bin(Expr::bin(pre, "+", b1), "+", post);
+            return Some(expr::place_assign(cx, recv_ast, "=", v, out));
+        }
         "truncate" => {
             let p = expr::lower_expr(cx, recv_ast, out);
             let n = simple(cx, b0, &Ty::Int(Int::Usize), line, out);

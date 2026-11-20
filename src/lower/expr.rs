@@ -963,6 +963,17 @@ pub fn place_assign(
                     "writing through a `&mut` binding to a value Java can't share",
                 );
             }
+            if let Some(e) = std_map::lower_slot_assign(cx, &inner, sym, r.clone(), out) {
+                return e;
+            }
+            if is_call_result(&inner)
+                && matches!(cx.ty(&inner), Ty::Ref { mutable: true, ref inner } if super::is_mut_ref_cell_ty(inner))
+            {
+                return cx.unsupported(
+                    lhs.syntax(),
+                    "writing through a `&mut` returned by a call to a value Java can't share",
+                );
+            }
             let place = lower_expr(cx, &inner, out);
             Expr::Assign(
                 Box::new(super::calls::deref_place(cx, &inner, place)),
@@ -974,6 +985,15 @@ pub fn place_assign(
             let place = lower_expr(cx, lhs, out);
             Expr::Assign(Box::new(place), sym, Box::new(r))
         }
+    }
+}
+
+// A value produced by a call (`f()?`, `m.get_mut(k).unwrap()`), not a place Java could share.
+pub fn is_call_result(e: &ast::Expr) -> bool {
+    match super::strip_parens(e) {
+        ast::Expr::CallExpr(_) | ast::Expr::MethodCallExpr(_) => true,
+        ast::Expr::TryExpr(t) => t.expr().is_some_and(|i| is_call_result(&i)),
+        _ => false,
     }
 }
 
@@ -1044,6 +1064,7 @@ fn lower_prefix(cx: &mut Cx, p: &ast::PrefixExpr, out: &mut Vec<Stmt>) -> Expr {
             } = &ty
                 && (t.is_primitive() || t.is_str())
                 && !resolved
+                && !is_call_result(&inner)
             {
                 return cx.unsupported(p.syntax(), "deref of a `&mut` primitive/String (cell)");
             }
@@ -1442,12 +1463,20 @@ fn moved_cell_copies(
         }
         let name = cx.lookup(local.name(cx.db).as_str());
         let copy = cx.fresh(&format!("{name}_moved"));
+        // Java can't create a generic array (`Map.Entry<A, B>[]`); the raw one is the workaround.
+        let elem = ty.java();
+        let raw_elem = elem.split('<').next().unwrap_or(&elem);
+        let init = if raw_elem == elem {
+            format!("{{{name}[0]}}")
+        } else {
+            format!("new {raw_elem}[]{{{name}[0]}}")
+        };
         out.push(Stmt::new(
             line,
             StmtKind::Local {
-                ty: format!("{}[]", ty.java()),
+                ty: format!("{elem}[]"),
                 name: copy.clone(),
-                init: Some(Expr::raw(format!("{{{name}[0]}}"))),
+                init: Some(Expr::raw(init)),
             },
         ));
         copies.push((local.name(cx.db).as_str().to_string(), copy));
@@ -1614,6 +1643,25 @@ pub fn lower_args(
             return Expr::name(cell);
         }
         let want = cx.adjusted_ty(&a);
+        // A collection passed as `I: IntoIterator` (or a crate iterator struct passed as
+        // `impl Iterator`) goes in as its stream.
+        if !matches!(want.strip_refs(), Ty::Iter(_))
+            && calls_local_fn(cx, &a)
+            && stream_param(cx, &a)
+        {
+            // Streaming a `v.clone()` reads `v` itself.
+            let src = match super::strip_parens(&a) {
+                ast::Expr::MethodCallExpr(m) if super::iter::method_name(&m) == "clone" => {
+                    m.receiver().unwrap_or_else(|| a.clone())
+                }
+                other => other,
+            };
+            let v = lower_expr(cx, &src, out);
+            return match want.strip_refs() {
+                Ty::Map { .. } => Expr::call(Expr::call(v, "entrySet", vec![]), "stream", vec![]),
+                _ => Expr::call(v, "stream", vec![]),
+            };
+        }
         let v = lower_expr_as(cx, &a, &want, out);
         // Java only narrows int constants on assignment, not when passing an argument to a
         // method of the program (std calls are lowered to expressions, not Java calls).
@@ -1631,6 +1679,38 @@ pub fn lower_args(
         }
     })
     .collect()
+}
+
+// Whether argument `a` fills a parameter that is a Java `Stream`: `I: IntoIterator<..>`,
+// `impl Iterator<..>` and the like.
+fn stream_param(cx: &Cx, a: &ast::Expr) -> bool {
+    let Some(list) = a.syntax().parent().and_then(ast::ArgList::cast) else {
+        return false;
+    };
+    let Some(pos) = list.args().position(|x| x.syntax() == a.syntax()) else {
+        return false;
+    };
+    let Some(call) = list.syntax().parent() else {
+        return false;
+    };
+    let params = if let Some(m) = ast::MethodCallExpr::cast(call.clone()) {
+        cx.sema
+            .resolve_method_call(&m)
+            .map(|f| f.params_without_self(cx.db))
+    } else if let Some(ast::Expr::PathExpr(p)) = ast::CallExpr::cast(call).and_then(|c| c.expr()) {
+        match p.path().and_then(|p| cx.sema.resolve_path(&p)) {
+            Some(ra_ap_hir::PathResolution::Def(ra_ap_hir::ModuleDef::Function(f))) => {
+                Some(f.assoc_fn_params(cx.db))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let Some(param) = params.and_then(|ps| ps.into_iter().nth(pos)) else {
+        return false;
+    };
+    matches!(cx.convert(param.ty()), Ty::Iter(_))
 }
 
 // Whether argument `a` is passed to a function defined in the transpiled crate.

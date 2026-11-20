@@ -384,6 +384,7 @@ The format string is compiled at transpile time into plain Java:
 | `println!("x = {}, y = {}", x, y)` (Display of ints, strings, chars, bools) | `System.out.println("x = " + x + ", y = " + y);` |
 | `{}` of `f32`/`f64` | `display_float(f)`: per-file static helper (like `debug_float`). Shortest digits via `BigDecimal(..).stripTrailingZeros().toPlainString()`, so `1.0` prints `1` and there is never exponent notation; `NaN`, `inf`, `-inf` and `-0` as in Rust. |
 | `{}` of a `Display` user type | concatenated directly (its `toString()`) |
+| `{}` of a generic `T: Display` | `display_any(x)`: per-file helper; a `Double` goes through `display_float`, anything else `String.valueOf` |
 | `{:?}` | a type-directed inline expression (below) |
 | `{:#?}` | `debug_pretty(<compact debug>)`: per-file static helper that re-indents the compact text the way Rust's alternate form does (one item per line, trailing commas), skipping quoted strings/chars. A manual `impl Debug` built with `write!` gets re-indented too (Rust would print it unchanged). |
 | width, precision, alignment, `+`, `0`, `x`, `X`, `o`, `b` | `System.out.printf("%5d\n", n)` / `String.format`. Alignment is type-aware: Rust left-aligns strings by default and right-aligns numbers. `{:>8}` → `%8s`, `{:<8}` → `%-8s`, `{:08.3}` → `%08.3f`, `{:x}` → `%x`, `{:b}` → `Integer.toBinaryString`. |
@@ -412,6 +413,7 @@ The transpiler knows the static type, so it builds the Debug string inline. Nest
 | `Optional<T>` | `o.map(x -> "Some(" + <debug x> + ")").orElse("None")` |
 | pair (`Map.Entry`) | `"(" + <debug k> + ", " + <debug v> + ")"` |
 | user types, `Result`, `TupleN` | their generated `debug()` method (§7.2, §13) |
+| a generic `T: Debug` | `debug_any(x)`: per-file helper choosing by runtime class (String, Character, Double, Optional, Map.Entry, Map, Set, other Collection), else the value's `debug()` method by reflection, else `String.valueOf`. Unsigned integers print signed. |
 
 ---
 

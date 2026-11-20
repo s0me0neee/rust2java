@@ -1,0 +1,16 @@
+circle with area 7.07
+[square] side 2
+[6-gon] side 1
+[triangle] side 3
+largest: circle
+["circle", "square", "6-gon", "triangle"]
+total 4.142
+kept 3
+  double: 3 -> 6
+  offset: 6 -> 16
+  square: 16 -> 256
+result 256
+add -> 7
+hyp -> 5
+pow -> 81
+13

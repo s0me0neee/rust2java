@@ -397,20 +397,44 @@ fn lower_slot_let(
     let (Some(init), Some(local)) = (l.initializer(), cx.sema.to_def(ip)) else {
         return false;
     };
-    let ast::Expr::MethodCallExpr(outer) = super::strip_parens(&init) else {
-        return false;
+    // `m.get_mut(&k)?` / `m.get_mut(&k).ok_or(e)?`: the `?` check runs first, then the alias.
+    let (outer, call, checked) = match super::strip_parens(&init) {
+        ast::Expr::TryExpr(t) => {
+            let Some(ast::Expr::MethodCallExpr(e)) = t.expr().map(|e| super::strip_parens(&e))
+            else {
+                return false;
+            };
+            match e.receiver().map(|r| super::strip_parens(&r)) {
+                Some(ast::Expr::MethodCallExpr(call))
+                    if matches!(
+                        super::iter::method_name(&e).as_str(),
+                        "ok_or" | "ok_or_else"
+                    ) =>
+                {
+                    (None, call, true)
+                }
+                _ => (None, e, true),
+            }
+        }
+        ast::Expr::MethodCallExpr(outer) => {
+            let Some(ast::Expr::MethodCallExpr(call)) =
+                outer.receiver().map(|r| super::strip_parens(&r))
+            else {
+                return false;
+            };
+            (Some(outer), call, false)
+        }
+        _ => return false,
     };
-    let Some(ast::Expr::MethodCallExpr(call)) = outer.receiver().map(|r| super::strip_parens(&r))
-    else {
-        return false;
-    };
-    let (outer_name, call_name) = (
-        super::iter::method_name(&outer),
-        super::iter::method_name(&call),
-    );
+    let outer_name = outer
+        .as_ref()
+        .map(super::iter::method_name)
+        .unwrap_or_default();
+    let call_name = super::iter::method_name(&call);
     let fill = match (call_name.as_str(), outer_name.as_str()) {
         ("entry", "or_insert" | "or_default" | "or_insert_with") => Some(outer_name.as_str()),
         ("get_mut", "unwrap" | "expect") => None,
+        ("get_mut", "") if checked => None,
         _ => return false,
     };
     let (Some(map_ast), Some(key_ast)) = (
@@ -426,8 +450,14 @@ fn lower_slot_let(
         ast::Expr::RefExpr(r) => r.expr().unwrap_or(key_ast),
         k => k,
     };
-    let arg = outer.arg_list().and_then(|a| a.args().next());
+    let arg = outer
+        .as_ref()
+        .and_then(|o| o.arg_list())
+        .and_then(|a| a.args().next());
     let line = cx.line(l.syntax());
+    if checked {
+        let _ = expr::lower_expr(cx, &init, out);
+    }
     let map = super::pat::place(cx, &map_ast, out);
     let key = super::pat::place(cx, &key_ast, out);
     let ensure = match fill {
@@ -476,6 +506,13 @@ fn lower_ref_let(
     out: &mut Vec<Stmt>,
 ) {
     let line = cx.line(l.syntax());
+    if l.initializer().is_some_and(|i| expr::is_call_result(&i)) {
+        cx.unsupported(
+            l.syntax(),
+            "binding a `&mut` returned by a call to a value Java can't share",
+        );
+        return;
+    }
     let init = l
         .initializer()
         .map(|init| match super::strip_parens(&init) {
@@ -690,6 +727,17 @@ fn lower_value_to_dest(
                     } else {
                         let ret = cx.ret_ty.clone().unwrap();
                         let v = expr::lower_expr_as(cx, e, &ret, out);
+                        // A lambda's return type comes from its returns; a bare empty is Object.
+                        let v = match (&v, ret.strip_refs()) {
+                            (Expr::Raw(s), Ty::Option(t))
+                                if cx.lambda_depth > 0
+                                    && s == "Optional.empty()"
+                                    && t.is_nameable() =>
+                            {
+                                Expr::raw(format!("Optional.<{}>empty()", t.boxed()))
+                            }
+                            _ => v,
+                        };
                         // A `Cell<i32>` return value is the one-element array, not its contents.
                         let v = match super::std_map::ptr::is_array(cx, e) {
                             Some(inner) => super::std_map::ptr::as_handle(cx, e, v, &inner),

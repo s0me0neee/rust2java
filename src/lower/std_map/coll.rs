@@ -838,6 +838,75 @@ pub(super) fn ctor_value(cx: &mut Cx, a: &ast::Expr, ty: &Ty, out: &mut Vec<Stmt
     })
 }
 
+// `*m.get_mut(&k).unwrap() op= r` / `*v.last_mut().unwrap() op= r` on a number or String: Java
+// can't write through the element, so the collection gets the new value (`put`/`set`).
+pub fn lower_slot_assign(
+    cx: &mut Cx,
+    inner: &ast::Expr,
+    sym: &'static str,
+    r: Expr,
+    out: &mut Vec<Stmt>,
+) -> Option<Expr> {
+    let ast::Expr::MethodCallExpr(outer) = strip_parens(inner) else {
+        return None;
+    };
+    if !matches!(method_name(&outer).as_str(), "unwrap" | "expect") {
+        return None;
+    }
+    let ast::Expr::MethodCallExpr(call) = strip_parens(&outer.receiver()?) else {
+        return None;
+    };
+    let base_ast = call.receiver()?;
+    let base_ty = cx.ty(&base_ast);
+    let elem_ty = match base_ty.strip_refs() {
+        Ty::Map { v, .. } => (**v).clone(),
+        Ty::Vec(t) => (**t).clone(),
+        _ => return None,
+    };
+    if !crate::lower::is_mut_ref_cell_ty(&elem_ty) {
+        return None;
+    }
+    let is_map = matches!(base_ty.strip_refs(), Ty::Map { .. });
+    let line = cx.line(inner.syntax());
+    let pure_or_local = |cx: &mut Cx, e: Expr, ty: String, out: &mut Vec<Stmt>, base: &str| {
+        if crate::lower::fmt::is_pure(&e) {
+            e
+        } else {
+            Expr::name(push_local(cx, line, ty, Some(e), out, base))
+        }
+    };
+    let base = expr::lower_expr(cx, &base_ast, out);
+    let base = pure_or_local(cx, base, base_ty.strip_refs().java(), out, "slots");
+    let (index, cur) = match (method_name(&call).as_str(), is_map) {
+        ("get_mut", _) => {
+            let arg = call.arg_list()?.args().next()?;
+            let key_ty = cx.ty(&arg);
+            let key = expr::lower_expr(cx, &arg, out);
+            let key = pure_or_local(cx, key, key_ty.strip_refs().java(), out, "key");
+            let cur = Expr::call(base.clone(), "get", vec![key.clone()]);
+            (key, cur)
+        }
+        ("last_mut", false) => (
+            Expr::bin(
+                Expr::call(base.clone(), "size", vec![]),
+                "-",
+                Expr::raw("1"),
+            ),
+            Expr::call(base.clone(), "getLast", vec![]),
+        ),
+        ("first_mut", false) => (Expr::raw("0"), Expr::call(base.clone(), "getFirst", vec![])),
+        _ => return None,
+    };
+    // A plain `=` on a missing map key inserts where Rust would panic; accepted.
+    let value = if sym == "=" {
+        r
+    } else {
+        expr::narrow_if_needed(Expr::bin(cur, sym.trim_end_matches('='), r), &elem_ty)
+    };
+    let setter = if is_map { "put" } else { "set" };
+    Some(Expr::call(base, setter, vec![index, value]))
+}
+
 // `*m.entry(k).or_insert(v) op= r` updates the entry after creating it.
 pub fn lower_entry_assign(
     cx: &mut Cx,
@@ -1740,6 +1809,22 @@ pub fn lower_repeat(
     if !inner.is_empty() {
         return cx.unsupported(node, "repeat-array element needing statements");
     }
+    // `mapToObj(i -> new ArrayList<>())` has no target type: spell out the type arguments.
+    let x = match x {
+        Expr::New { ty, args }
+            if ty.ends_with("<>") && args.is_empty() && elem_ty.is_nameable() =>
+        {
+            let java = elem_ty.strip_refs().java();
+            match java.find('<') {
+                Some(at) => Expr::New {
+                    ty: format!("{}{}", ty.trim_end_matches("<>"), &java[at..]),
+                    args,
+                },
+                None => Expr::New { ty, args },
+            }
+        }
+        x => x,
+    };
     let i = cx.fresh("i");
     let range = Expr::call(Expr::raw("IntStream"), "range", vec![Expr::raw("0"), n]);
     let mapped = Expr::call(

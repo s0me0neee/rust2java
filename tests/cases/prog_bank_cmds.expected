@@ -1,0 +1,17 @@
+  2: opened alice
+  3: opened bob
+  4: alice = 100
+  5: bob = 25
+  6! need 40 have 25
+     short by 40
+  8! no account 'carol'
+  9! bad number: x12
+ 11! unknown command FROBNICATE
+ 12: opened anon
+ 13: alice:70 bob:55 anon:0
+ 14! need 999 have 55
+     short by 999
+ 15: anon = 7
+ 16: alice:70 bob:55 anon:7
+5 errors; history ["open:alice", "open:bob", "xfer:alice->bob:30", "open:anon"]
+total 132

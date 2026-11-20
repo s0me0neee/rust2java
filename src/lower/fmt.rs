@@ -757,7 +757,7 @@ fn args_needing_temps(
     temp.iter().zip(&pure).map(|(t, p)| *t && !p).collect()
 }
 
-fn is_pure(e: &Expr) -> bool {
+pub(crate) fn is_pure(e: &Expr) -> bool {
     match e {
         Expr::Name(_) => true,
         Expr::Field(base, _) => is_pure(base),
@@ -1112,6 +1112,15 @@ pub fn display(cx: &mut Cx, _node: &SyntaxNode, v: Expr, ty: &Ty, _out: &mut Vec
     }
     match ty.strip_refs() {
         Ty::F32 | Ty::F64 => display_float(cx, v, *ty.strip_refs() == Ty::F32),
+        // A generic value may be a float, whose Java text differs (`2.0` for Rust's `2`).
+        Ty::Param(_) => {
+            display_float(cx, Expr::raw("0.0"), false);
+            file_helper(
+                cx,
+                "static String display_any(Object o) { return o instanceof Double d ? display_float(d) : String.valueOf(o); }".into(),
+            );
+            Expr::static_call("display_any", vec![v])
+        }
         // Rust prints unsigned values as such; Java's conversion is signed.
         Ty::Int(i) => match unsigned_string(*i, v.clone()) {
             Some(e) => e,
@@ -1311,6 +1320,7 @@ pub fn debug_supported(ty: &Ty) -> bool {
         | Ty::F64
         | Ty::Str
         | Ty::Ordering
+        | Ty::Param(_)
         | Ty::Adt { .. } => true,
         Ty::Other(_) => std_error_name(ty).is_some(),
         Ty::Vec(t) | Ty::Set { t, .. } | Ty::Deque(t) | Ty::Option(t) => debug_supported(t),
@@ -1553,6 +1563,24 @@ fn debug_pretty(cx: &mut Cx, compact: Expr) -> Expr {
     Expr::static_call("debug_pretty", vec![compact])
 }
 
+// Debug of a generic value: the Rust text for the runtime class (strings quoted, floats with
+// `.0`, collections and Options recursively, crate types through their `debug()`).
+fn debug_any(cx: &mut Cx, v: Expr) -> Expr {
+    debug_quote(cx, Expr::raw("\"\""), '"');
+    debug_float(cx, Expr::raw("0.0"), false);
+    let helper = concat!(
+        r#"static String debug_any(Object o) { if (o instanceof String s) return debug_str(s, '"'); "#,
+        r#"if (o instanceof Character c) return debug_str(String.valueOf(c), '\''); if (o instanceof Double d) return debug_float(d); "#,
+        r#"if (o instanceof Optional<?> p) return p.map(x -> "Some(" + debug_any(x) + ")").orElse("None"); "#,
+        r#"if (o instanceof Map.Entry<?, ?> e) return "(" + debug_any(e.getKey()) + ", " + debug_any(e.getValue()) + ")"; "#,
+        r#"if (o instanceof Map<?, ?> m) { StringJoiner j = new StringJoiner(", ", "{", "}"); m.forEach((k, x) -> j.add(debug_any(k) + ": " + debug_any(x))); return j.toString(); } "#,
+        r#"if (o instanceof Collection<?> c) { StringJoiner j = o instanceof Set ? new StringJoiner(", ", "{", "}") : new StringJoiner(", ", "[", "]"); for (Object x : c) j.add(debug_any(x)); return j.toString(); } "#,
+        r#"try { return (String) o.getClass().getMethod("debug").invoke(o); } catch (ReflectiveOperationException e) { return String.valueOf(o); } }"#,
+    );
+    file_helper(cx, helper.to_string());
+    Expr::static_call("debug_any", vec![v])
+}
+
 // Rust's float Debug: Display plus a forced `.0`, and an exponent outside 1e-4..1e16.
 fn debug_float(cx: &mut Cx, v: Expr, f32: bool) -> Expr {
     cx.import("java.math.BigDecimal");
@@ -1656,6 +1684,7 @@ pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
         }
         Ty::Int(i) if unsigned_display(*i) => unsigned_string(*i, v.clone()).unwrap_or(v),
         Ty::Adt { .. } => Expr::call(v, "debug", vec![]),
+        Ty::Param(_) => debug_any(cx, v),
         // `Ordering` is an int: comparing its sign is shorter than the switch, when repeatable.
         Ty::Ordering if is_pure(&v) => Expr::Ternary(
             Box::new(Expr::bin(v.clone(), "<", Expr::raw("0"))),

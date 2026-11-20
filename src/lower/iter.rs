@@ -792,7 +792,11 @@ pub fn lower_iter_method(
         if key == "IntoIterator::into_iter" {
             return Some(recv);
         }
-        let src = Expr::call(recv, "stream", vec![]);
+        // `it.by_ref()` already lowered to `it.stream()`.
+        let src = match strip_parens(&recv_ast) {
+            ast::Expr::MethodCallExpr(r) if method_name(&r) == "by_ref" => recv,
+            _ => Expr::call(recv, "stream", vec![]),
+        };
         let line = cx.line(m.syntax());
         return Some(lower_adaptor_core(
             cx, m, &name, src, item, &ret_ty, line, out,
@@ -1869,26 +1873,27 @@ fn lower_zip(
         Ty::Iter(t) | Ty::Vec(t) => (**t).clone(),
         _ => Ty::Other("?".into()),
     };
+    // Pulled in step through iterators, so an endless side (`fib().zip(..)`) stays lazy.
     let (a, b) = (cx.fresh("zip_a"), cx.fresh("zip_b"));
     out.push(Stmt::new(
         line,
         StmtKind::Local {
-            ty: format!("List<{}>", item.boxed()),
+            ty: format!("Iterator<{}>", item.boxed()),
             name: a.clone(),
-            init: Some(Expr::call(src, "toList", vec![])),
+            init: Some(Expr::call(src, "iterator", vec![])),
         },
     ));
     out.push(Stmt::new(
         line,
         StmtKind::Local {
-            ty: format!("List<{}>", other_item.boxed()),
+            ty: format!("Iterator<{}>", other_item.boxed()),
             name: b.clone(),
-            init: Some(Expr::call(other_stream, "toList", vec![])),
+            init: Some(Expr::call(other_stream, "iterator", vec![])),
         },
     ));
     let i = cx.fresh("i");
     Expr::raw(format!(
-        "IntStream.range(0, Math.min({a}.size(), {b}.size())).mapToObj({i} -> Map.entry({a}.get({i}), {b}.get({i})))"
+        "Stream.iterate(0, {i} -> {a}.hasNext() && {b}.hasNext(), {i} -> {i}).map({i} -> Map.entry({a}.next(), {b}.next()))"
     ))
 }
 
@@ -1945,9 +1950,19 @@ fn lower_collect(
         }
         Ty::Deque(_) => collect("Collectors.toCollection(ArrayDeque::new)".into()),
         Ty::Heap(t) => {
-            let cmp = super::std_map::coll::reversed_comparator(
-                super::std_map::coll::ord_comparator(cx, t),
-            );
+            // `Reverse` is erased from the type; a min-heap shows in the source text.
+            let reverse = m.syntax().text().to_string().contains("Reverse")
+                || m.syntax()
+                    .ancestors()
+                    .find_map(ast::LetStmt::cast)
+                    .and_then(|l| l.ty())
+                    .is_some_and(|t| t.syntax().text().to_string().contains("Reverse"));
+            let natural = super::std_map::coll::ord_comparator(cx, t);
+            let cmp = if reverse {
+                natural.unwrap_or_else(|| "Comparator.naturalOrder()".into())
+            } else {
+                super::std_map::coll::reversed_comparator(natural)
+            };
             // Explicit element type: `reverseOrder()` gives the diamond nothing to infer from.
             collect(format!(
                 "Collectors.toCollection(() -> new PriorityQueue<{}>({cmp}))",

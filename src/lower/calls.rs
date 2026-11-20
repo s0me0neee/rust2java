@@ -112,6 +112,26 @@ fn lower_fn_call(
         return match assoc.container(db) {
             AssocItemContainer::Impl(imp) => {
                 let owner = items::impl_owner_java(cx, imp);
+                // `Pipeline::new().stage(..)`: a chained receiver has no target type to infer
+                // the type arguments from.
+                let chained = c
+                    .syntax()
+                    .parent()
+                    .and_then(ast::MethodCallExpr::cast)
+                    .and_then(|m| m.receiver())
+                    .is_some_and(|r| r.syntax() == c.syntax());
+                let name = match cx.ty(&ast::Expr::CallExpr(c.clone())) {
+                    Ty::Adt { args: targs, .. }
+                        if chained
+                            && args.is_empty()
+                            && !targs.is_empty()
+                            && targs.iter().all(Ty::is_nameable) =>
+                    {
+                        let targs: Vec<String> = targs.iter().map(Ty::boxed).collect();
+                        format!("<{}>{name}", targs.join(", "))
+                    }
+                    _ => name,
+                };
                 Expr::call(Expr::raw(owner), name, args)
             }
             AssocItemContainer::Trait(_) => {

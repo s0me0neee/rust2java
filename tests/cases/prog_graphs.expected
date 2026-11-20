@@ -1,0 +1,14 @@
+0 dist 0 via [0]
+1 dist 3 via [0, 2, 1]
+2 dist 1 via [0, 2]
+3 dist 4 via [0, 2, 1, 3]
+4 dist 7 via [0, 2, 1, 3, 4]
+5 unreachable
+topo Some([0, 5, 2, 1, 3, 4])
+topo after cycle None
+mst 7 [(0, 2), (1, 3), (2, 1), (3, 4)]
+components 2
+peek Some((9, "urgent")) len 4
+pop (9, "also")
+sorted [(1, "urgent"), (3, "low"), (5, "mid")]
+[0, 1, 3, 5, 8]

@@ -228,6 +228,24 @@ pub fn trait_java_name(db: &RootDatabase, from: Module, tr: ra_ap_hir::Trait) ->
     }
 }
 
+// The item type of a type parameter bounded by `IntoIterator` (named or `impl IntoIterator`).
+pub fn into_iter_item(
+    sema: &Semantics<'_, RootDatabase>,
+    from: Module,
+    ty: &ra_ap_hir::Type<'_>,
+) -> Option<Ty> {
+    let db = sema.db;
+    let p = ty.as_type_param(db)?;
+    let bounds = p.trait_bounds(db);
+    if !bounds.iter().any(|t| t.name(db).as_str() == "IntoIterator")
+        || bounds.iter().any(|t| t.name(db).as_str() == "Iterator")
+    {
+        return None;
+    }
+    let item = ty.clone().into_iterator_iter(db)?.iterator_item(db)?;
+    Some(convert(sema, from, &item))
+}
+
 // Converts rust-analyzer's type into our simplified model. `from` is the module being emitted,
 // used to qualify user types defined in other modules.
 pub fn convert(sema: &Semantics<'_, RootDatabase>, from: Module, ty: &ra_ap_hir::Type<'_>) -> Ty {
@@ -297,8 +315,13 @@ pub fn convert(sema: &Semantics<'_, RootDatabase>, from: Module, ty: &ra_ap_hir:
         // `I: Iterator<Item = T>` is a `Stream<T>`.
         && !(ty.clone().iterator_item(db).is_some()
             && p.trait_bounds(db).iter().any(|t| t.name(db).as_str() == "Iterator"))
+        && into_iter_item(sema, from, ty).is_none()
     {
         return Ty::Param(p.name(db).as_str().to_string());
+    }
+    // `I: IntoIterator<Item = T>` too: call sites pass a stream of their collection.
+    if let Some(item) = into_iter_item(sema, from, ty) {
+        return Ty::Iter(Box::new(item));
     }
     // `dyn Trait` / `impl Trait` of a crate trait become its interface; std traits (Fn*, Iterator)
     // fall through to the callable / iterator mappings below.

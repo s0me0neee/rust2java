@@ -26,7 +26,9 @@ use num::{conditional, lower_float_method, lower_int_method, lower_ordering_meth
 use option::{lower_option_method, lower_result_method};
 use text::{lower_small_method, lower_str_method};
 
-pub use coll::{lower_array_expr, lower_entry_assign, lower_repeat, lower_slice_range};
+pub use coll::{
+    lower_array_expr, lower_entry_assign, lower_repeat, lower_slice_range, lower_slot_assign,
+};
 pub(crate) use io::{
     bytes_stream, is_io_target, is_reader_source, lines_stream, output_handle, write_status,
 };
@@ -932,6 +934,15 @@ pub fn lower_std_path(cx: &mut Cx, path: &ast::Path, def: ModuleDef) -> Expr {
             _ => {}
         }
     }
+    // `Reverse` and `Wrapping` are erased, so `.map(Reverse)` keeps the value.
+    if matches!(last, "Reverse" | "Wrapping") && matches!(def, ModuleDef::Adt(_)) {
+        let x = cx.fresh_param("x");
+        cx.release_param(&x);
+        return Expr::Lambda {
+            params: vec![x.clone()],
+            body: LambdaBody::Expr(Box::new(Expr::name(x))),
+        };
+    }
     // `get_or_insert_with(String::new)`, `or_insert_with(Vec::new)`: constructor references.
     if last == "new" && matches!(def, ModuleDef::Function(_)) {
         let owner = parts.iter().rev().nth(1).copied().unwrap_or("");
@@ -963,6 +974,10 @@ pub fn lower_std_path(cx: &mut Cx, path: &ast::Path, def: ModuleDef) -> Expr {
                 Some(last)
             }
             "ln" if float => Some("log"),
+            "powf" | "powi" if float => Some("pow"),
+            "hypot" | "atan2" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" if float => {
+                Some(last)
+            }
             _ => None,
         };
         if let Some(m) = math {

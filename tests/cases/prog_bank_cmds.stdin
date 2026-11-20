@@ -1,0 +1,16 @@
+# sample session
+open alice
+open bob
+dep alice 100
+dep bob 25
+wd bob 40
+xfer alice bob 30
+dep carol 5
+wd alice x12
+
+frobnicate now
+open
+show
+xfer bob alice 999
+dep anon 7
+show
