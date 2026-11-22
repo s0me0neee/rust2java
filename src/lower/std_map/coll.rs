@@ -1407,6 +1407,29 @@ pub(super) fn lower_vec_method(
             ))
         }
         "extend_from_slice" => Some(Expr::call(recv, "addAll", vec![b0])),
+        // Shared copies are only safe for immutable elements; Rust clones each one.
+        "resize"
+            if matches!(
+                elem.strip_refs(),
+                Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Bool | Ty::Char | Ty::Str
+            ) && m
+                .syntax()
+                .parent()
+                .is_some_and(|p| ast::ExprStmt::can_cast(p.kind())) =>
+        {
+            let recv = simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out);
+            let n = simple(cx, b0, &Ty::Int(Int::Usize), line, out);
+            let (v, n) = (render(&recv), render(&n));
+            push_raw(
+                out,
+                line,
+                format!(
+                    "if ({n} < {v}.size()) {v}.subList({n}, {v}.size()).clear(); else {v}.addAll(Collections.nCopies({n} - {v}.size(), {}));",
+                    render(&b1)
+                ),
+            );
+            Some(Expr::raw("null"))
+        }
         // Rust leaves the other elements in an unspecified order; sorting them all is one choice.
         "select_nth_unstable"
             if m.syntax()

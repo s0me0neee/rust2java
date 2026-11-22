@@ -1417,6 +1417,10 @@ fn lower_cast(cx: &mut Cx, c: &ast::CastExpr, out: &mut Vec<Stmt>) -> Expr {
     let to = cx.type_ref(&t);
     let v = lower_expr(cx, &inner, out);
     let (from, to) = (from.strip_refs().clone(), to.strip_refs().clone());
+    // `ord as i32` is -1/0/1; a Java comparison result may be any difference.
+    if from == Ty::Ordering && matches!(to, Ty::Int(_)) {
+        return ordering_sign(v, &from);
+    }
     // `as` casts need the source type: `300i32 as u8` truncates even though both are Java `int`.
     if let Some(e) = std_map::num_cast(&from, &to, v.clone()) {
         return e;

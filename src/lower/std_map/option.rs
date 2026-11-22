@@ -441,7 +441,7 @@ pub(super) fn lower_result_method(
             "expect_err",
             vec![b0, debug_lambda(cx, &ok_ty, "ok_value")],
         )),
-        "map" | "map_err" | "and_then" => Some(Expr::call(recv, name, vec![b0])),
+        "map" | "map_err" | "and_then" | "or_else" => Some(Expr::call(recv, name, vec![b0])),
         "unwrap_or" => Some(Expr::call(recv, "unwrap_or", vec![b0])),
         "unwrap_or_else" => Some(Expr::call(recv, "unwrap_or_else", vec![b0])),
         // `map_or(d, f)` / `map_or_else(fe, f)`: map the Ok value, then fall back on Err.

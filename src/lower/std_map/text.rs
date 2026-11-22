@@ -95,6 +95,8 @@ pub(super) fn path(cx: &mut Cx, _path: &ast::Path, def: ModuleDef) -> Option<Exp
         "str::trim_start" => Expr::raw("String::stripLeading"),
         "str::trim_end" => Expr::raw("String::stripTrailing"),
         "str::len" | "String::len" => Expr::raw("String::length"),
+        "Vec::len" => Expr::raw("List::size"),
+        "Vec::is_empty" => Expr::raw("List::isEmpty"),
         "str::is_empty" | "String::is_empty" => Expr::raw("String::isEmpty"),
         "str::to_uppercase"
         | "str::to_ascii_uppercase"
@@ -623,6 +625,41 @@ pub(super) fn lower_str_method(
                 format!("if ({ps}.length() > {ns}) {ps} = {ps}.substring(0, {ns});"),
             );
             return Some(Expr::raw("null"));
+        }
+        // A `char` predicate (closure or `char::is_*`) tested on all chars, the first or the last.
+        "contains" | "starts_with" | "ends_with"
+            if matches!(arg0_ty.strip_refs(), Ty::Fn { .. })
+                || _m
+                    .arg_list()
+                    .and_then(|a| a.args().next())
+                    .is_some_and(|a| {
+                        matches!(a, ast::Expr::ClosureExpr(_))
+                            || (matches!(a, ast::Expr::PathExpr(_))
+                                && !matches!(arg0_ty.strip_refs(), Ty::Char | Ty::Str))
+                    }) =>
+        {
+            let sv = simple(cx, recv, &Ty::Str, line, out);
+            let c = cx.fresh_param("c");
+            let chars = Expr::call(sv.clone(), "chars", vec![]);
+            let chars = match name {
+                "contains" => chars,
+                "starts_with" => Expr::call(chars, "limit", vec![Expr::raw("1")]),
+                _ => Expr::call(
+                    chars,
+                    "skip",
+                    vec![Expr::raw(format!(
+                        "Math.max(0, {}.length() - 1)",
+                        render(&sv)
+                    ))],
+                ),
+            };
+            let boxed = Expr::call(
+                chars,
+                "mapToObj",
+                vec![Expr::raw(format!("{c} -> (char) {c}"))],
+            );
+            cx.release_param(&c);
+            return Some(Expr::call(boxed, "anyMatch", vec![b0]));
         }
         "contains" => {
             if matches!(arg0_ty.strip_refs(), Ty::Char) {

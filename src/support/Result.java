@@ -83,6 +83,12 @@ public sealed interface Result<T, E> permits Ok, Err {
             case Err<T, E>(var e) -> new Err<>(e);
         };
     }
+    default <F> Result<T, F> or_else(Function<E, Result<T, F>> f) {
+        return switch (this) {
+            case Ok<T, E>(var v) -> new Ok<>(v);
+            case Err<T, E>(var e) -> f.apply(e);
+        };
+    }
 }
 
 record Ok<T, E>(T value) implements Result<T, E> {

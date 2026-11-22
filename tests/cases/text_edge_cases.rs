@@ -1,0 +1,32 @@
+fn main() {
+    let s = "  Hello, World!  ";
+    println!("[{}] [{}] [{}]", s.trim(), s.trim_start(), s.trim_end());
+    println!("{:?} {:?}", s.find("o"), s.rfind('o'));
+    println!("{:?} {:?}", s.find("zz"), "".find(""));
+    println!("{:?}", "a,b,,c,".split(',').collect::<Vec<_>>());
+    println!("{:?}", "a,b,,c,".split_terminator(',').collect::<Vec<_>>());
+    println!("{:?}", "  a  b c ".split(' ').collect::<Vec<_>>());
+    println!("{:?}", "a-b-c-d".splitn(3, '-').collect::<Vec<_>>());
+    println!("{:?}", "a-b-c-d".rsplitn(2, '-').collect::<Vec<_>>());
+    println!("{:?}", "a-b-c".rsplit('-').collect::<Vec<_>>());
+    println!("{:?} {:?}", "key=val=x".split_once('='), "novalue".split_once('='));
+    println!("{:?}", "key=val=x".rsplit_once('='));
+    println!("{:?} {:?}", "prefix_rest".strip_prefix("prefix_"), "rest".strip_suffix("x"));
+    println!("{} {}", "abc".repeat(3), "ABC def".to_lowercase());
+    println!("{} {} {}", "abc" < "abd", "b" > "abc", "Zeta".cmp("alpha") as i32);
+    println!("{:?}", "line1\nline2\r\nline3\n".lines().collect::<Vec<_>>());
+    println!("{:?}", "hello".char_indices().filter(|(_, c)| *c == 'l').map(|(i, _)| i).collect::<Vec<_>>());
+    println!("{} {}", "hello".replace('l', "L"), "hello".replacen('l', "L", 1));
+    println!("{:?} {:?}", "abc".chars().rev().collect::<String>(), "abc".bytes().map(|b| b as u32).sum::<u32>());
+    println!("{} {} {}", "42".parse::<i32>().is_ok(), "-0".parse::<i32>().unwrap(), "+7".parse::<i32>().unwrap());
+    println!("{:?} {:?}", " 5".parse::<i32>().is_err(), "3.5".parse::<f64>());
+    println!("{} {}", "ß".to_uppercase(), "İ".to_lowercase().chars().count());
+    let mut t = String::from("abc");
+    t.insert(1, 'X'); t.insert_str(0, ">>"); let p = t.pop(); t.truncate(3); 
+    println!("{t} {p:?} {}", t.is_empty());
+    println!("{:?}", "a b".split_whitespace().rev().collect::<Vec<_>>().join("_"));
+    println!("{} {}", "abc".contains(char::is_uppercase), "aBc".matches(char::is_uppercase).count());
+    println!("{} {:?}", "x".cmp("x") == std::cmp::Ordering::Equal, "abcdef".get(2..4));
+    println!("{:?} {:?}", "abc".chars().nth(5), "abc".char_indices().last());
+    println!("{}", format!("{:-^9}|{:<4}|{:>+5}|{:#06x}", "mid", 'c', 3, 255));
+}

@@ -1103,6 +1103,71 @@ fn lower_source(
             let list = Expr::call(Expr::raw("Arrays"), "asList", vec![parts]);
             Expr::call(Expr::call(list, "reversed", vec![]), "stream", vec![])
         }
+        // `rsplitn(n, sep)`: split the reversed text by the reversed separator, then un-reverse.
+        (Ty::Str, "rsplitn") => {
+            let limit = lower_arg(cx, &args[0], out);
+            let pat_ast = args[1].clone();
+            let pat_ty = cx.ty(&pat_ast);
+            let p = lower_arg(cx, &pat_ast, out);
+            let rev = |e: Expr| {
+                Expr::call(
+                    Expr::call(
+                        Expr::New {
+                            ty: "StringBuilder".into(),
+                            args: vec![e],
+                        },
+                        "reverse",
+                        vec![],
+                    ),
+                    "toString",
+                    vec![],
+                )
+            };
+            let pat = match pat_ty.strip_refs() {
+                Ty::Str => rev(p),
+                Ty::Char => Expr::call(Expr::raw("String"), "valueOf", vec![p]),
+                _ => return cx.unsupported(m.syntax(), "rsplitn by closure/char set"),
+            };
+            cx.import("java.util.regex.Pattern");
+            let quoted = Expr::call(Expr::raw("Pattern"), "quote", vec![pat]);
+            let parts = Expr::call(rev(recv), "split", vec![quoted, limit]);
+            let x = cx.fresh_param("part");
+            let back = Expr::Lambda {
+                params: vec![x.clone()],
+                body: LambdaBody::Expr(Box::new(rev(Expr::name(&x)))),
+            };
+            cx.release_param(&x);
+            Expr::call(
+                Expr::call(Expr::raw("Arrays"), "stream", vec![parts]),
+                "map",
+                vec![back],
+            )
+        }
+        // `split_terminator`: `split` without one trailing empty piece.
+        (Ty::Str, "split_terminator") if cx.lambda_depth == 0 => {
+            let pat_ast = args[0].clone();
+            let pat_ty = cx.ty(&pat_ast);
+            let p = lower_arg(cx, &pat_ast, out);
+            let pat = match pat_ty.strip_refs() {
+                Ty::Str => p,
+                Ty::Char => Expr::call(Expr::raw("String"), "valueOf", vec![p]),
+                _ => return cx.unsupported(m.syntax(), "split_terminator by closure/char set"),
+            };
+            cx.import("java.util.regex.Pattern");
+            let quoted = Expr::call(Expr::raw("Pattern"), "quote", vec![pat]);
+            let parts = super::std_map::push_local(
+                cx,
+                line,
+                "String[]".into(),
+                Some(Expr::call(recv, "split", vec![quoted, Expr::raw("-1")])),
+                out,
+                "parts",
+            );
+            let n = format!("{parts}.length");
+            Expr::raw(format!(
+                "Arrays.stream({parts}, 0, {parts}[{n} - 1].isEmpty() ? {n} - 1 : {n})"
+            ))
+        }
         (Ty::Str, "split" | "splitn") => {
             let (limit, pat_ast) = if name == "splitn" {
                 (lower_arg(cx, &args[0], out), args[1].clone())
@@ -1840,6 +1905,8 @@ fn lower_adaptor_core(
             let (a, b) = (cx.fresh("a"), cx.fresh("b"));
             call("reduce", vec![Expr::raw(format!("({a}, {b}) -> {b}"))])
         }
+        // Both return the fold of all items, empty for no items.
+        "reduce" => call("reduce", vec![lower_arg(cx, &args[0], out)]),
         "nth" => Expr::call(
             call("skip", vec![lower_arg(cx, &args[0], out)]),
             "findFirst",

@@ -1,0 +1,27 @@
+[Hello, World!] [Hello, World!  ] [  Hello, World!]
+Some(6) Some(10)
+None Some(0)
+["a", "b", "", "c", ""]
+["a", "b", "", "c"]
+["", "", "a", "", "b", "c", ""]
+["a", "b", "c-d"]
+["d", "a-b-c"]
+["c", "b", "a"]
+Some(("key", "val=x")) None
+Some(("key=val", "x"))
+Some("rest") None
+abcabcabc abc def
+true true -1
+["line1", "line2", "line3"]
+[2, 3]
+heLLo heLlo
+"cba" 294
+true 0 7
+true Ok(3.5)
+SS 2
+>>a Some('c') false
+"b_a"
+false 1
+true Some("cd")
+None Some((2, 'c'))
+---mid---|c   |   +3|0x00ff
