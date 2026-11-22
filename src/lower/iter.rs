@@ -1321,6 +1321,54 @@ fn lower_adaptor(
     let direct_list = matches!(strip_parens(recv_ast), ast::Expr::MethodCallExpr(_))
         .then(|| list_receiver_of_iter(cx, recv_ast))
         .flatten();
+    // A slice iterator's `nth`/`last`/`skip` are O(1) in Rust; a stream would walk the list.
+    // (`skip` only matters when what follows stops early.)
+    let short_after_skip = || {
+        m.syntax()
+            .parent()
+            .and_then(ast::MethodCallExpr::cast)
+            .is_some_and(|p| {
+                matches!(
+                    method_name(&p).as_str(),
+                    "next" | "nth" | "take" | "find" | "any" | "position" | "take_while"
+                )
+            })
+    };
+    if (matches!(name, "nth" | "last") || (name == "skip" && short_after_skip()))
+        && let Some(list_ast) = &direct_list
+    {
+        let v = expr::lower_expr(cx, list_ast, out);
+        if name == "last" {
+            return Expr::call(
+                Expr::call(Expr::call(v, "reversed", vec![]), "stream", vec![]),
+                "findFirst",
+                vec![],
+            );
+        }
+        let lt = cx.ty(list_ast);
+        let v = ensure_simple(cx, v, &lt, line, out);
+        let args = arg_exprs(m);
+        let i = lower_arg(cx, &args[0], out);
+        let size = Expr::call(v.clone(), "size", vec![]);
+        if name == "skip" {
+            let from = Expr::call(Expr::raw("Math"), "min", vec![i, size.clone()]);
+            return Expr::call(Expr::call(v, "subList", vec![from, size]), "stream", vec![]);
+        }
+        let i = ensure_simple(cx, i, &Ty::Int(crate::ty::Int::Usize), line, out);
+        let empty = match ret_ty.strip_refs() {
+            Ty::Option(t) if t.is_nameable() => format!("Optional.<{}>empty()", t.boxed()),
+            _ => "Optional.empty()".into(),
+        };
+        return Expr::Ternary(
+            Box::new(Expr::bin(i.clone(), "<", size)),
+            Box::new(Expr::call(
+                Expr::raw("Optional"),
+                "of",
+                vec![Expr::call(v, "get", vec![i])],
+            )),
+            Box::new(Expr::raw(empty)),
+        );
+    }
     // `v.iter().rev()` on a list: reversed view.
     if name == "rev"
         && let Some(list_ast) = &direct_list
