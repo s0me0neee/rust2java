@@ -837,3 +837,25 @@ What it shows:
 | S2 | `Result` as exceptions: `?`, `Err`, `match`/`if let` on results, error enums as exception classes, `main throws`. |
 | S3 | `Option` as null for map lookups and locals. Records for immutable structs and repeated tuples. |
 | S4 | Loops instead of streams for index-heavy chains. Single-`&mut` parameters as return values. Golden files (starting with §22.2) and the output-match subset in CI. |
+| S5 | Java post-pass (§22.6). |
+
+### 22.6 Java post-pass
+
+A second round of cleanup on the generated Java text, after printing. Part of the output is `Expr::Raw` text that JIR passes can't see into, so a real Java parser covers what JIR can't.
+
+- **Parser.** `tree-sitter` + `tree-sitter-java`: maintained, handles Java 21 syntax (records, sealed interfaces, switch patterns), keeps comments, and gives byte ranges for in-place edits. I considered `java-lang` (typed, syn-style API) and set it aside: too young to depend on.
+- **Split of work.** tree-sitter has syntax, not types:
+  - Rewrites that need types or side-effect knowledge stay in lowering, where the Rust types are known: inlining a temporary, dropping a cast, choosing `var`.
+  - The post-pass does only purely syntactic edits.
+- **Passes, in order:**
+  1. **Validate.** The output must parse. A parse error is a transpiler bug, reported before javac.
+  2. **Imports.** Replace the wildcards with the explicit set of used `java.*` types (simple mode).
+  3. **Unused code.** Drop unused locals that have pure initializers (a name, literal or `new`), and unused per-file helpers and `Result` methods.
+  4. **Redundant syntax.** Double parentheses, `(int) (int) x`, `x + ""` chains, `Optional.<T>empty()` witnesses where the declared type already gives `T`, and `cond ? true : false`.
+  5. **Single-use temporaries.** Inline a temporary used once, right after its declaration, when its initializer is a name, literal or field read. Calls aren't inlined: the parser can't tell whether moving them is safe.
+- **Modes.**
+  - Simple mode runs every pass, then re-prints with normal layout.
+  - Exact mode may run 1–4, as long as each edit stays on its line so line correspondence (§4) holds.
+- **Tests.**
+  - Each pass is a pure `&str -> String` function with before/after unit tests.
+  - Every case still passes `javac` and the output comparison with the pass on.
