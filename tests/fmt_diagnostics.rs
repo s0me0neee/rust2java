@@ -9,7 +9,7 @@ fn unsupported_formatting_is_reported() {
         r#"fn main() {
     let x = 1;
     println!("{:p}", &x);
-    println!("{:e}", 1.0);
+    println!("{:>8e}", "text");
 }"#,
     )
     .unwrap();
@@ -22,7 +22,7 @@ fn unsupported_formatting_is_reported() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success());
     assert!(stderr.contains("format spec `{:p}`"), "{stderr}");
-    assert!(stderr.contains("format spec `{:e}`"), "{stderr}");
+    assert!(stderr.contains("`{:e}` of a non-number"), "{stderr}");
     // The incomplete file is still written for reference, but javac rejects it.
     let java = std::fs::read_to_string(work.path().join("out/unsupported.java")).unwrap();
     assert!(java.starts_with("#error rust2java: 2 error(s)"), "{java}");

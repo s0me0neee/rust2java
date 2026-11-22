@@ -140,7 +140,7 @@ fn parse_spec(spec: &str) -> Option<Spec> {
         None
     };
     let kind: String = chars[i..].iter().collect();
-    if !matches!(kind.as_str(), "" | "?" | "x" | "X" | "o" | "b") {
+    if !matches!(kind.as_str(), "" | "?" | "x" | "X" | "o" | "b" | "e" | "E") {
         return None;
     }
     Some(Spec {
@@ -936,6 +936,16 @@ fn format_one(
         } else {
             debug(cx, v, ty)
         }
+    } else if matches!(spec.kind.as_str(), "e" | "E") {
+        if !matches!(ty.strip_refs(), Ty::Int(_) | Ty::F32 | Ty::F64) {
+            return cx.unsupported(node, "`{:e}` of a non-number");
+        }
+        let sci = sci_float(cx, v, ty.strip_refs() == &Ty::F32, precision);
+        if spec.kind == "E" {
+            Expr::call(sci, "replace", vec![Expr::raw("'e'"), Expr::raw("'E'")])
+        } else {
+            sci
+        }
     } else if !spec.kind.is_empty() {
         let Ty::Int(i) = ty.strip_refs() else {
             return cx.unsupported(node, "non-integer radix format");
@@ -1586,6 +1596,27 @@ fn debug_any(cx: &mut Cx, v: Expr) -> Expr {
     );
     file_helper(cx, helper.to_string());
     Expr::static_call("debug_any", vec![v])
+}
+
+// Rust's `{:e}`: shortest round-trip digits (or `{:.N}` digits, rounded half-even) as d.ddde±x.
+fn sci_float(cx: &mut Cx, v: Expr, f32: bool, precision: Option<Expr>) -> Expr {
+    cx.import("java.math.BigDecimal");
+    cx.import("java.math.RoundingMode");
+    let t = if f32 { "float" } else { "double" };
+    file_helper(
+        cx,
+        format!(
+            "static String sci_float({t} x, int p) {{ if (Double.isNaN(x)) return \"NaN\"; if (Double.isInfinite(x)) return x > 0 ? \"inf\" : \"-inf\"; \
+             String sign = x < 0 || 1 / x < 0 ? \"-\" : \"\"; BigDecimal d = p < 0 ? new BigDecimal(String.valueOf(Math.abs(x))).stripTrailingZeros() : new BigDecimal(Math.abs(x)); \
+             if (d.signum() == 0) return sign + (p > 0 ? \"0.\" + \"0\".repeat(p) : \"0\") + \"e0\"; int e = d.precision() - d.scale() - 1; \
+             BigDecimal m = d.movePointLeft(e); if (p >= 0) {{ m = m.setScale(p, RoundingMode.HALF_EVEN); if (m.compareTo(BigDecimal.TEN) >= 0) {{ e++; m = d.movePointLeft(e).setScale(p, RoundingMode.HALF_EVEN); }} }} \
+             return sign + m.toPlainString() + \"e\" + e; }}"
+        ),
+    );
+    Expr::static_call(
+        "sci_float",
+        vec![v, precision.unwrap_or_else(|| Expr::raw("-1"))],
+    )
 }
 
 // Rust's float Debug: Display plus a forced `.0`, and an exponent outside 1e-4..1e16.

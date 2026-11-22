@@ -399,6 +399,7 @@ The format string is compiled at transpile time into plain Java:
 | `write!(f, …)`, `writeln!` | `f.append(…)` |
 
 - Inline arguments `{name}` read the variable directly. Positional `{0}` and named `{x}` arguments are resolved at transpile time.
+- `{:e}`/`{:E}` (and `{:.Ne}`) use a per-file `sci_float` helper built on `BigDecimal`: shortest round-trip digits, or N digits rounded half-to-even like Rust.
 - Known small gap: Java's `%.Nf` rounds exact binary ties half-up (`0.125` → `0.13`), while Rust rounds half-to-even (`0.12`). This is accepted.
 
 ### 10.1 `{:?}` without helpers

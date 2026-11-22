@@ -1,5 +1,6 @@
 // The only module that talks to rust-analyzer's project loading and type representation.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -17,6 +18,8 @@ pub struct Project {
     pub vfs: Vfs,
     // Keeps a generated wrapper project alive for single-file inputs.
     _tmp: Option<tempfile::TempDir>,
+    // Wrapper bin names that had to differ from the file stem (`build.rs` -> `r2j_build`).
+    renamed: HashMap<String, String>,
 }
 
 pub struct Unit {
@@ -30,11 +33,11 @@ pub struct Unit {
 }
 
 pub fn load(inputs: &[PathBuf]) -> Result<Project> {
-    let (root, tmp) = if inputs.len() == 1 && inputs[0].is_dir() {
-        (inputs[0].clone(), None)
+    let (root, tmp, renamed) = if inputs.len() == 1 && inputs[0].is_dir() {
+        (inputs[0].clone(), None, HashMap::new())
     } else {
-        let tmp = wrap_files(inputs)?;
-        (tmp.path().to_path_buf(), Some(tmp))
+        let (tmp, renamed) = wrap_files(inputs)?;
+        (tmp.path().to_path_buf(), Some(tmp), renamed)
     };
     let cargo_config = CargoConfig {
         sysroot: Some(RustLibSource::Discover),
@@ -49,15 +52,22 @@ pub fn load(inputs: &[PathBuf]) -> Result<Project> {
     };
     let (db, vfs, _) = load_workspace_at(&root, &cargo_config, &load_config, &|_| {})
         .with_context(|| format!("loading {}", root.display()))?;
-    Ok(Project { db, vfs, _tmp: tmp })
+    Ok(Project {
+        db,
+        vfs,
+        _tmp: tmp,
+        renamed,
+    })
 }
 
 // Single .rs files become [[bin]] targets of one generated cargo project, so std is loaded once.
-fn wrap_files(files: &[PathBuf]) -> Result<tempfile::TempDir> {
+fn wrap_files(files: &[PathBuf]) -> Result<(tempfile::TempDir, HashMap<String, String>)> {
     let tmp = tempfile::tempdir()?;
     let mut manifest = String::from(
         "[package]\nname = \"rust2java_inputs\"\nversion = \"0.0.0\"\nedition = \"2024\"\nautobins = false\n\n",
     );
+    let mut renamed = HashMap::new();
+    let mut seen: HashMap<String, PathBuf> = HashMap::new();
     for f in files {
         if f.extension().is_none_or(|e| e != "rs") {
             bail!(
@@ -66,14 +76,43 @@ fn wrap_files(files: &[PathBuf]) -> Result<tempfile::TempDir> {
             );
         }
         let abs = std::fs::canonicalize(f).with_context(|| format!("reading {}", f.display()))?;
-        let stem = abs.file_stem().unwrap().to_string_lossy().replace('-', "_");
+        let stem: String = abs
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if let Some(prev) = seen.insert(stem.clone(), abs.clone()) {
+            bail!(
+                "{} and {} would both become {stem}.java; transpile them in separate runs",
+                prev.display(),
+                abs.display()
+            );
+        }
+        // Cargo reserves these target names, and a crate name can't start with a digit.
+        let bin = if matches!(stem.as_str(), "build" | "deps" | "examples" | "incremental")
+            || stem.starts_with(|c: char| c.is_ascii_digit())
+        {
+            let bin = format!("r2j_{stem}");
+            renamed.insert(bin.clone(), stem.clone());
+            bin
+        } else {
+            stem
+        };
         manifest.push_str(&format!(
-            "[[bin]]\nname = \"{stem}\"\npath = {:?}\n\n",
+            "[[bin]]\nname = \"{bin}\"\npath = {:?}\n\n",
             abs.display().to_string()
         ));
     }
     std::fs::write(tmp.path().join("Cargo.toml"), manifest)?;
-    Ok(tmp)
+    Ok((tmp, renamed))
 }
 
 impl Project {
@@ -89,6 +128,7 @@ impl Project {
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "main".into())
                 .replace('-', "_");
+            let package = self.renamed.get(&package).cloned().unwrap_or(package);
             for module in krate.modules(db) {
                 let Some(file_id) = module.definition_source_file_id(db).file_id() else {
                     continue;
