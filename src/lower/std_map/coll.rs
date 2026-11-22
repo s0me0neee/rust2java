@@ -728,7 +728,18 @@ fn and_modify(
         _ => return None,
     };
     let map = expr::lower_expr(cx, &map_ast, out);
-    let key = expr::lower_expr(cx, &entry.arg_list()?.args().next()?, out);
+    let key_ast = entry.arg_list()?.args().next()?;
+    let key = expr::lower_expr(cx, &key_ast, out);
+    if !matches!(
+        v_ty.strip_refs(),
+        Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Bool | Ty::Char | Ty::Str
+    ) && m
+        .syntax()
+        .parent()
+        .is_some_and(|p| ast::ExprStmt::can_cast(p.kind()))
+    {
+        return in_place_modify(cx, m, name, &f, map, key, &cx.ty(&key_ast), &v_ty, out);
+    }
     let (k, x) = (cx.fresh("key"), cx.fresh("value"));
     let Some(updated) = modified_value(cx, &f, &x, &v_ty) else {
         return Some(cx.unsupported(f.syntax(), "`and_modify` closure shape"));
@@ -755,6 +766,74 @@ fn and_modify(
         body: LambdaBody::Expr(Box::new(body)),
     };
     Some(Expr::call(map, "compute", vec![key, lambda]))
+}
+
+// An object value is mutated where it sits: `V v = m.get(k); if (v != null) { f } else m.put(k, fresh);`.
+#[allow(clippy::too_many_arguments)]
+fn in_place_modify(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    name: &str,
+    f: &ast::ClosureExpr,
+    map: Expr,
+    key: Expr,
+    key_ty: &Ty,
+    v_ty: &Ty,
+    out: &mut Vec<Stmt>,
+) -> Option<Expr> {
+    let line = cx.line(m.syntax());
+    let ast::Pat::IdentPat(p) = f.param_list()?.params().next()?.pat()? else {
+        return None;
+    };
+    let rust = ast::HasName::name(&p)?.text().to_string();
+    let fresh = match name {
+        "and_modify" => None,
+        "or_insert" => Some(expr::lower_expr(cx, &m.arg_list()?.args().next()?, out)),
+        "or_insert_with" => Some(ctor_value(cx, &m.arg_list()?.args().next()?, v_ty, out)?),
+        _ => Some(default_value_cx(cx, v_ty)),
+    };
+    let map = simple(cx, map, &Ty::Unit, line, out);
+    let key = if fresh.is_some() {
+        simple(cx, key, key_ty, line, out)
+    } else {
+        key
+    };
+    cx.push_scope();
+    let x = cx.declare(&rust);
+    let mut body = Vec::new();
+    crate::lower::stmt::lower_to_dest(
+        cx,
+        &f.body()?,
+        &crate::lower::stmt::Dest::Discard,
+        &mut body,
+    );
+    cx.pop_scope();
+    out.push(Stmt::new(
+        line,
+        StmtKind::Local {
+            ty: crate::lower::stmt::decl_type(v_ty),
+            name: x.clone(),
+            init: Some(Expr::call(map.clone(), "get", vec![key.clone()])),
+        },
+    ));
+    let els = fresh.map(|v| {
+        Box::new(Stmt::new(
+            line,
+            StmtKind::Expr(Expr::call(map, "put", vec![key, v])),
+        ))
+    });
+    out.push(Stmt::new(
+        line,
+        StmtKind::If {
+            cond: Expr::bin(Expr::name(&x), "!=", Expr::raw("null")),
+            then: crate::jir::Block {
+                stmts: body,
+                close_line: line,
+            },
+            els,
+        },
+    ));
+    Some(Expr::raw("null"))
 }
 
 // The value after `f` ran on the current value `x` (a Java name).
@@ -1257,7 +1336,30 @@ pub(super) fn lower_vec_method(
                 "({vs}.size() >= {ws}.size() && {part}.equals({ws}))"
             )))
         }
-        "binary_search_by" => Some(cx.unsupported(m.syntax(), "binary_search_by")),
+        "binary_search_by" | "binary_search_by_key" | "partition_point" => {
+            if cx.lambda_depth > 0 {
+                return Some(cx.unsupported(m.syntax(), &format!("{name} inside a closure")));
+            }
+            let recv = simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out);
+            let (f, key) = match name {
+                "binary_search_by_key" => {
+                    let key_ty = arg_asts.first().map(|a| cx.ty(a)).unwrap_or(Ty::Unit);
+                    let key = simple(cx, b0, &key_ty, line, out);
+                    (b1, Some((key, key_ty)))
+                }
+                _ => (b0, None),
+            };
+            let partition = name == "partition_point";
+            // `let pos = v.partition_point(..)`: the search index is `pos` itself.
+            let target = if partition {
+                cx.take_let_target(m.syntax())
+            } else {
+                None
+            };
+            Some(binary_search_loop(
+                cx, partition, target, recv, elem, f, key, line, out,
+            ))
+        }
         "binary_search" => {
             if cx.lambda_depth > 0 {
                 return Some(cx.unsupported(m.syntax(), "binary_search inside a closure"));
@@ -1314,14 +1416,6 @@ pub(super) fn lower_vec_method(
             Some(Expr::call(recv, "sort", vec![Expr::raw("null")]))
         }
         // The slice is partitioned by the predicate, so the point is the length of its true prefix.
-        "partition_point" => Some(Expr::Cast(
-            "int".into(),
-            Box::new(Expr::call(
-                Expr::call(Expr::call(recv, "stream", vec![]), "takeWhile", vec![b0]),
-                "count",
-                vec![],
-            )),
-        )),
         // `subList` views write through, like the two `&mut` halves.
         "split_at" | "split_at_mut" => {
             let recv = simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out);
@@ -2040,4 +2134,89 @@ fn local_non_negative(cx: &Cx, local: ra_ap_hir::Local, depth: u32) -> bool {
                 _ => false,
             }
     })
+}
+
+// Rust's binary search: the first index where `f` says Greater (or the predicate fails); an
+// Equal match reports the last equal element, like std.
+#[allow(clippy::too_many_arguments)]
+fn binary_search_loop(
+    cx: &mut Cx,
+    partition: bool,
+    target: Option<String>,
+    recv: Expr,
+    elem: &Ty,
+    f: Expr,
+    key: Option<(Expr, Ty)>,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) -> Expr {
+    let lo = target.unwrap_or_else(|| cx.fresh("lo"));
+    let (hi, mid) = (cx.fresh("hi"), cx.fresh("mid"));
+    let probe = Expr::call(recv.clone(), "get", vec![Expr::name(&mid)]);
+    // `|x| body` is inlined with `x` bound to the probed element.
+    let (bind, applied) = match f {
+        Expr::Lambda {
+            params,
+            body: LambdaBody::Expr(body),
+        } if params.len() == 1 => (
+            format!("{} {} = {}; ", elem.java(), params[0], render(&probe)),
+            *body,
+        ),
+        f => {
+            let ret = if partition {
+                "Boolean"
+            } else if key.is_some() {
+                "Object"
+            } else {
+                "Integer"
+            };
+            let call = if partition { "test" } else { "apply" };
+            let iface = if partition {
+                format!("Predicate<{}>", elem.boxed())
+            } else {
+                format!("Function<{}, {ret}>", elem.boxed())
+            };
+            (
+                String::new(),
+                Expr::call(Expr::Cast(iface, Box::new(f)), call, vec![probe]),
+            )
+        }
+    };
+    let cmp = match key {
+        Some((k, kty)) => ord_compare(cx, &kty, applied, k),
+        None => applied,
+    };
+    let n = render(&recv);
+    if partition {
+        push_raw(
+            out,
+            line,
+            format!(
+                "int {lo} = 0, {hi} = {n}.size(); while ({lo} < {hi}) {{ int {mid} = ({lo} + {hi}) >>> 1; {bind}if ({}) {lo} = {mid} + 1; else {hi} = {mid}; }}",
+                render(&cmp)
+            ),
+        );
+        return Expr::name(lo);
+    }
+    cx.needs_result = true;
+    let (c, eq) = (cx.fresh("c"), cx.fresh("found"));
+    push_raw(
+        out,
+        line,
+        format!(
+            "int {lo} = 0, {hi} = {n}.size(); boolean {eq} = false; while ({lo} < {hi}) {{ int {mid} = ({lo} + {hi}) >>> 1; {bind}int {c} = {}; if ({c} <= 0) {{ {lo} = {mid} + 1; {eq} = {c} == 0; }} else {hi} = {mid}; }}",
+            render(&cmp)
+        ),
+    );
+    conditional(
+        Expr::name(&eq),
+        Expr::New {
+            ty: "Ok<Integer, Integer>".into(),
+            args: vec![Expr::bin(Expr::name(&lo), "-", Expr::raw("1"))],
+        },
+        Expr::New {
+            ty: "Err<Integer, Integer>".into(),
+            args: vec![Expr::name(lo)],
+        },
+    )
 }

@@ -7,7 +7,7 @@ use ra_ap_syntax::{AstNode, ast, ast::HasArgList, ast::HasLoopBody, ast::HasName
 use super::stmt::{self, Dest};
 use super::{Cx, LoopFrame, expr, strip_parens, traits};
 use crate::emit::render_expr as render;
-use crate::jir::{Block, Expr, Stmt, StmtKind};
+use crate::jir::{Block, Expr, LambdaBody, Stmt, StmtKind};
 use crate::ty::{Int, Ty};
 
 // ---- for loops ---------------------------------------------------------------------------
@@ -1424,6 +1424,18 @@ fn lower_adaptor_core(
                 "all" => "allMatch",
                 n => n,
             };
+            // `|c| c.to_vec()` makes a Stream<ArrayList<T>>, which won't collect into List<List<T>>.
+            if name == "map"
+                && let Expr::Lambda {
+                    body: LambdaBody::Expr(body),
+                    ..
+                } = &f
+                && matches!(&**body, Expr::New { ty, .. } if ty.starts_with("ArrayList") || ty.starts_with("Hash") || ty.starts_with("Tree") || ty.starts_with("ArrayDeque"))
+                && let Ty::Iter(out_item) = ret_ty.strip_refs()
+                && out_item.is_nameable()
+            {
+                return call(&format!("<{}>map", out_item.boxed()), vec![f]);
+            }
             call(jname, vec![f])
         }
         "filter_map" => {

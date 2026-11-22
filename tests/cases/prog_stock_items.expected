@@ -1,0 +1,11 @@
+took 20 apple for 900
+error: hammer: have 3, want 5
+error: no item named saw
+took 7 yoyo for 2450
+apple        40 @ $0.45
+hammer        3 @ $12.99
+yoyo          0 @ $3.50
+  Food: 1800
+  Tool: 3897
+   Toy: 0
+["yoyo"] true
