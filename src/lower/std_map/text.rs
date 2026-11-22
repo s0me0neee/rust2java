@@ -337,7 +337,19 @@ pub(super) fn lower_small_method(
             "cmp" => Expr::call(Expr::raw("Boolean"), "compare", vec![recv, b0]),
             "partial_cmp" => opt_of(Expr::call(Expr::raw("Boolean"), "compare", vec![recv, b0])),
             "clone" | "to_owned" => recv,
-            "then_some" => opt_of(b0),
+            // `c.then_some(v)` / `c.then(|| v)`: Some only when the condition holds.
+            "then_some" | "then" => {
+                let value = if name == "then" {
+                    supplied(b0, ret)
+                } else {
+                    b0
+                };
+                let empty = match ret.strip_refs() {
+                    Ty::Option(t) => opt_empty(Some(t)),
+                    _ => opt_empty(None),
+                };
+                Expr::Ternary(Box::new(recv), Box::new(opt_of(value)), Box::new(empty))
+            }
             _ => return None,
         });
     }
@@ -1077,4 +1089,25 @@ pub(super) fn parse_expr(
         return lower_direct_parse(cx, d, vec![recv], line, out);
     }
     super::option::parse_result(cx, m, recv, ret, &target, line, out)
+}
+
+// The value a `FnOnce() -> T` argument produces: `|| expr` inlines to `expr`.
+fn supplied(f: Expr, ret: &Ty) -> Expr {
+    if let Expr::Lambda {
+        params,
+        body: crate::jir::LambdaBody::Expr(body),
+    } = &f
+        && params.is_empty()
+    {
+        return (**body).clone();
+    }
+    let t = match ret.strip_refs() {
+        Ty::Option(t) => t.boxed(),
+        _ => "Object".into(),
+    };
+    Expr::call(
+        Expr::Cast(format!("Supplier<{t}>"), Box::new(f)),
+        "get",
+        vec![],
+    )
 }
