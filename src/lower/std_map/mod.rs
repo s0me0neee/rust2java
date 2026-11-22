@@ -679,7 +679,13 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
         }
         _ => match primitive_method_call(cx, c, key, &ret, line, out) {
             Some(e) => e,
-            None => cx.unsupported(c.syntax(), &format!("std function `{key}`")),
+            None => {
+                // As written: the resolved key names std's internal module (`functions::spawn`).
+                let shown = c
+                    .expr()
+                    .map_or(key.to_string(), |e| e.syntax().text().to_string());
+                cx.unsupported(c.syntax(), &format!("std function `{shown}`"))
+            }
         },
     }
 }
@@ -1357,6 +1363,6 @@ pub fn lower_std_method(
         (Ty::Adt { .. }, "eq") => Expr::call(recv, "equals", args),
         (Ty::Adt { .. }, "ne") => Expr::Unary("!", Box::new(Expr::call(recv, "equals", args))),
         (Ty::Option(_) | Ty::Result(..), "to_string") => Expr::call(recv, "toString", vec![]),
-        _ => cx.unsupported(m.syntax(), &format!("std method `{key}` on {recv_ty:?}")),
+        _ => cx.unsupported(m.syntax(), &format!("std method `{key}`")),
     }
 }

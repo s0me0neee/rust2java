@@ -140,6 +140,14 @@ impl Ty {
         matches!(self.strip_refs(), Ty::Unit | Ty::Never)
     }
 
+    // Readable name for diagnostics: Rust's rendering when unsupported, else the Java type.
+    pub fn describe(&self) -> String {
+        match self.strip_refs() {
+            Ty::Other(s) => s.clone(),
+            t => t.java(),
+        }
+    }
+
     // Java type in declaration position (primitives unboxed).
     pub fn java(&self) -> String {
         match self {

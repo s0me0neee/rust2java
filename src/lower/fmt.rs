@@ -884,7 +884,7 @@ fn format_one(
         && std_error_name(ty).is_none()
         && !(spec.kind.is_empty() && is_io_error(ty))
     {
-        return cx.unsupported(node, &format!("format argument type {ty:?}"));
+        return cx.unsupported(node, &format!("format argument type `{}`", ty.describe()));
     }
     let numeric = matches!(ty.strip_refs(), Ty::Int(_) | Ty::F32 | Ty::F64);
     if spec.alternate && spec.kind == "?" {
@@ -896,7 +896,7 @@ fn format_one(
     }
     if spec.kind == "?" {
         if !debug_supported(ty) {
-            return cx.unsupported(node, &format!("Debug for {ty:?}"));
+            return cx.unsupported(node, &format!("Debug for `{}`", ty.describe()));
         }
         match ty.strip_refs() {
             Ty::Unit | Ty::Str | Ty::Char => return debug(cx, v, ty),

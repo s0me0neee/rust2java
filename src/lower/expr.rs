@@ -557,6 +557,12 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
                 return e;
             }
             let sym = arith_symbol(a, &lt);
+            // A product landing in a 64-bit `usize` total must not overflow as int first.
+            let l = if cx.wide.ops.contains(b.syntax()) {
+                Expr::Cast("long".into(), Box::new(l))
+            } else {
+                l
+            };
             let v = Expr::bin(l, sym, r);
             narrow_if_needed(v, &cx.ty(&ast::Expr::BinExpr(b.clone())))
         }
@@ -1392,7 +1398,11 @@ fn lower_cast(cx: &mut Cx, c: &ast::CastExpr, out: &mut Vec<Stmt>) -> Expr {
     let (Some(inner), Some(t)) = (c.expr(), c.ty()) else {
         return cx.unsupported(c.syntax(), "cast");
     };
-    let from = cx.ty(&inner);
+    let from = if super::wide::is_long(cx, &cx.wide.locals, &cx.wide.ops, &inner) {
+        Ty::Int(crate::ty::Int::I64)
+    } else {
+        cx.ty(&inner)
+    };
     let to = cx.type_ref(&t);
     let v = lower_expr(cx, &inner, out);
     let (from, to) = (from.strip_refs().clone(), to.strip_refs().clone());

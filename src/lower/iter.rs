@@ -1805,6 +1805,12 @@ fn lower_sum_product(
     ret_ty: &Ty,
 ) -> Expr {
     let call = |name: &str, args: Vec<Expr>| Expr::call(src.clone(), name, args);
+    let widened = Ty::Int(crate::ty::Int::I64);
+    let ret_ty = if cx.wide.ops.contains(m.syntax()) {
+        &widened
+    } else {
+        ret_ty
+    };
     match ret_ty.strip_refs() {
         Ty::Int(i) if !product => {
             let to = if i.is_long() { "mapToLong" } else { "mapToInt" };
@@ -2073,7 +2079,7 @@ fn lower_collect(
             ))));
             Expr::name(res)
         }
-        _ => cx.unsupported(m.syntax(), &format!("collect into {target:?}")),
+        _ => cx.unsupported(m.syntax(), &format!("collect into `{}`", target.describe())),
     }
 }
 

@@ -23,4 +23,8 @@ fn unsupported_formatting_is_reported() {
     assert!(!output.status.success());
     assert!(stderr.contains("format spec `{:p}`"), "{stderr}");
     assert!(stderr.contains("format spec `{:e}`"), "{stderr}");
+    // The incomplete file is still written for reference, but javac rejects it.
+    let java = std::fs::read_to_string(work.path().join("out/unsupported.java")).unwrap();
+    assert!(java.starts_with("#error rust2java: 2 error(s)"), "{java}");
+    assert!(java.contains("UNSUPPORTED"), "{java}");
 }

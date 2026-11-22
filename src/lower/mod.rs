@@ -12,6 +12,7 @@ pub mod stmt;
 pub mod traits;
 pub mod values;
 pub mod views;
+pub mod wide;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -71,6 +72,7 @@ pub struct Cx<'a, 'db> {
     pub views: HashMap<ra_ap_hir::Local<'db>, views::View>,
     // Struct/array types changed in place somewhere in the crate (computed on first use; see `values`).
     pub mutated: Option<values::Mutated>,
+    pub wide: wide::Wide<'db>,
     // `(trait, const)` pairs read through a type parameter or `Self` (computed on first use).
     pub generic_consts: Option<HashSet<(String, String)>>,
     // The statement-level call whose `&mut field` arguments may use a temporary cell, and the
@@ -162,6 +164,35 @@ pub struct Lowered {
     pub needs_result: bool,
 }
 
+// Names each non-std dependency once, at its first use, so later per-call errors have a cause.
+fn report_external_crates(cx: &mut Cx, root: &SyntaxNode) {
+    let mut seen = HashSet::new();
+    for path in root.descendants().filter_map(ast::Path::cast) {
+        if path.qualifier().is_some() {
+            continue;
+        }
+        let Some(ra_ap_hir::PathResolution::Def(ra_ap_hir::ModuleDef::Module(m))) =
+            cx.sema.resolve_path(&path)
+        else {
+            continue;
+        };
+        let krate = m.krate(cx.db);
+        if !m.is_crate_root(cx.db) || !krate.origin(cx.db).is_lib() {
+            continue;
+        }
+        let name = krate
+            .display_name(cx.db)
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| path.syntax().text().to_string());
+        if seen.insert(name.clone()) {
+            cx.error(
+                path.syntax(),
+                format!("external crate `{name}` is not supported (only std)"),
+            );
+        }
+    }
+}
+
 pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
     let file = sema.parse(unit.file_id);
     let text = file.syntax().text().to_string();
@@ -196,6 +227,10 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         builders: HashSet::new(),
         views: HashMap::new(),
         mutated: None,
+        wide: wide::Wide {
+            locals: HashSet::new(),
+            ops: HashSet::new(),
+        },
         generic_consts: None,
         write_back_call: None,
         write_backs: Vec::new(),
@@ -245,6 +280,8 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
             )
             .collect(),
     };
+    report_external_crates(&mut cx, file.syntax());
+    cx.wide = wide::analyze(&cx, file.syntax());
     cx.stdin_lines = !std_map::io::has_byte_reads(&cx, file.syntax());
     let comments = collect_comments(&cx, file.syntax());
     let last_line = text.trim_end().lines().count().max(1) as u32;
@@ -371,7 +408,7 @@ impl<'a, 'db> Cx<'a, 'db> {
         }
     }
 
-    // Records an unsupported construct and returns a placeholder so lowering can continue.
+    // Records an unsupported construct; the placeholder fails javac so the gap can't ship silently.
     pub fn unsupported(&mut self, node: &SyntaxNode, what: &str) -> Expr {
         let line = self.line(node);
         let col = self.col(node);
@@ -380,7 +417,7 @@ impl<'a, 'db> Cx<'a, 'db> {
             col,
             msg: format!("unsupported: {what}"),
         });
-        Expr::raw(format!("/* unsupported: {what} */ null"))
+        Expr::raw(format!("/* unsupported: {what} */ UNSUPPORTED"))
     }
 
     pub fn error(&mut self, node: &SyntaxNode, msg: impl Into<String>) {

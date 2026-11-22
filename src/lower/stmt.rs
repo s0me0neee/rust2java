@@ -228,10 +228,18 @@ pub fn lower_let(cx: &mut Cx, l: &ast::LetStmt, out: &mut Vec<Stmt>) {
         }
         return;
     }
-    let ty = match l.ty() {
+    let mut ty = match l.ty() {
         Some(t) => cx.type_ref(&t),
         None => cx.pat_ty(&p),
     };
+    if let ast::Pat::IdentPat(ip) = &p
+        && cx
+            .sema
+            .to_def(ip)
+            .is_some_and(|local| cx.wide.locals.contains(&local))
+    {
+        ty = Ty::Int(crate::ty::Int::I64);
+    }
     if let ast::Pat::TuplePat(tp) = &p
         && lower_tuple_literal_let(cx, l, tp, out)
     {

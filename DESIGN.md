@@ -156,7 +156,7 @@ The test harness reports, for every Rust statement, whether it landed on its exa
 | `i8` | `byte` |
 | `u8` | `int` |
 | `i16`/`u16` | `short` |
-| `i32`/`u32`, `isize`/`usize` | `int` |
+| `i32`/`u32`, `isize`/`usize` | `int`; a `usize`/`isize` local that only accumulates is `long` (§6.1) |
 | `i64`/`u64` | `long` |
 | `i128`/`u128` | `long` (values outside its range are unsupported) |
 | `f32`/`f64` | `float`/`double` |
@@ -183,6 +183,7 @@ The test harness reports, for every Rust statement, whether it landed on its exa
 
 ### 6.1 Integers
 
+- **64-bit `usize` totals.** Rust's `usize` is 64-bit, Java's index type is `int`. A `usize`/`isize` local that grows (`*`, `<<`, `sum`, `+=` of a non-literal) and is only accumulated, compared, printed or cast to a 64-bit type is declared `long`, and the products and sums feeding it are widened: `long pairs = (long) n * (n - 1) / 2;`, `ans += (long) v.get(i) * v.get(i);`, `mapToLong(..).sum()`. Indexes, parameters, returns and fields stay `int`, so values past 2^31 there still wrap.
 - Arithmetic uses Java's natural wrapping. Division and remainder truncate the same way in both languages. Dividing by zero throws `ArithmeticException`, which becomes a panic with exit code 101.
 - `byte` and `short` arithmetic promotes to `int` in Java, so an assignment back to an `i8`/`i16`/`u16` place gets the cast Java requires: `(byte) (a + b)`. `u8` is a plain `int`, so it needs no casts, and byte literals `b'a'` become `'a'`.
 - `as` casts become Java casts. Both languages wrap when narrowing an integer, and both saturate (with NaN → 0) when casting a float to an integer.
@@ -566,14 +567,14 @@ There is **no helper library**. Apart from translations of the user's own types,
 
 ## 16. Diagnostics
 
-Every unsupported construct gets a specific error. The transpiler collects all errors in a run instead of stopping at the first:
+Every unsupported construct gets a specific error. The transpiler collects all errors in a run instead of stopping at the first, and exits with code 1:
 
 ```
-error[R2J012]: arithmetic on generic type parameter `T` is not supported yet
-  --> src/main.rs:42:17
+error: src/main.rs:42:17: unsupported: arithmetic on a generic type parameter
 ```
 
-`--report` lists each construct used in the crate and whether it is supported, so you can check whether a project is worth attempting.
+- A non-std dependency is named once, at its first use: ``external crate `itertools` is not supported (only std)``.
+- The Java file is still written so the rest can be read, but it can't compile by accident. Line 1 starts with `#error rust2java: N error(s), this file is incomplete;` (line numbers are unchanged), and each unsupported expression is `/* unsupported: … */ UNSUPPORTED`.
 
 ---
 

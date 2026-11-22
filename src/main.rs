@@ -163,6 +163,14 @@ fn transpile(args: &Args, target: &Target, project: &frontend::Project) -> Resul
         if lowered.needs_result && single {
             java.push_str(&embedded_result());
         }
+        // Prefixed on line 1 so the incomplete file can't compile, and line numbers still match.
+        if !lowered.diags.is_empty() {
+            let n = lowered.diags.len();
+            java.insert_str(
+                0,
+                &format!("#error rust2java: {n} error(s), this file is incomplete; "),
+            );
+        }
         let java_path = match target {
             Target::File(path) => path.clone(),
             _ if single => out_dir.join(format!("{}.java", unit.package)),
