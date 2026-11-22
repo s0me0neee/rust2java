@@ -191,7 +191,7 @@ The test harness reports, for every Rust statement, whether it landed on its exa
 
   | Rust | Java |
   |---|---|
-  | `abs`, `pow`, `min`, `max` | `Math.abs`, `(int) Math.pow(a, b)` (exact while results fit in 53 bits), `Math.min`, `Math.max` |
+  | `abs`, `pow`, `min`, `max` | `Math.abs`, `(int) Math.pow(a, b)` for 32-bit types (always exact), `Math.min`, `Math.max`. A 64-bit `pow` is folded when both operands are literals, else `BigInteger.valueOf(a).pow(b).longValue()` (exact, wrapping like Rust) |
   | `rem_euclid` | `Math.floorMod` |
   | `count_ones`, `leading_zeros`, `trailing_zeros` | `Integer.bitCount`, `Integer.numberOfLeadingZeros`, `Integer.numberOfTrailingZeros` |
   | `checked_sub` on unsigned, `checked_div` | `a >= b ? Optional.of(a - b) : Optional.empty()`, `b != 0 ? Optional.of(a / b) : Optional.empty()` |

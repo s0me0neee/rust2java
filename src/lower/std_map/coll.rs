@@ -1780,6 +1780,11 @@ pub(super) fn lower_set_method(
                 "Stream.concat({s}.stream().filter({x} -> !{o}.contains({x})), {o}.stream().filter({x} -> !{s}.contains({x}))){sorted}"
             )))
         }
+        "is_disjoint" => Some(Expr::call(
+            Expr::raw("Collections"),
+            "disjoint",
+            vec![recv, b0],
+        )),
         "is_subset" => {
             let x = cx.fresh("x");
             Some(Expr::raw(format!(

@@ -608,10 +608,49 @@ pub(super) fn lower_int_method(
                 i,
             )
         }),
-        "pow" => Some(Expr::Cast(
+        // A double is exact for 32-bit results; 64-bit ones wrap exactly through BigInteger.
+        "pow" if !i.is_long() => Some(Expr::Cast(
             i.java().into(),
             Box::new(math("pow", vec![recv, b0])),
         )),
+        "pow" | "wrapping_pow" => Some(match (literal_int(&recv), literal_int(&b0)) {
+            (Some(a), Some(e)) if e <= 64 => Expr::raw(fold_pow(a, e as u32, i)),
+            _ => narrow(big_pow(cx, recv, b0, i.is_long()), i),
+        }),
+        "checked_pow" => {
+            let width = if matches!(i, Int::I8 | Int::U8) {
+                8
+            } else if matches!(i, Int::I16 | Int::U16) {
+                16
+            } else if i.is_long() {
+                64
+            } else {
+                32
+            };
+            let bits = if i.is_unsigned() { width } else { width - 1 };
+            let r = big_pow(cx, recv.clone(), b0.clone(), i.is_long());
+            let big = Expr::call(Expr::raw("BigInteger"), "valueOf", vec![recv]);
+            let pow = Expr::call(big, "pow", vec![b0]);
+            let in_bits = Expr::bin(
+                Expr::call(pow.clone(), "bitLength", vec![]),
+                "<=",
+                Expr::raw(bits.to_string()),
+            );
+            let fits = if i.is_unsigned() {
+                Expr::bin(
+                    Expr::bin(Expr::call(pow, "signum", vec![]), ">=", Expr::raw("0")),
+                    "&&",
+                    in_bits,
+                )
+            } else {
+                in_bits
+            };
+            Some(conditional(
+                fits,
+                opt_of(narrow(r, i)),
+                opt_empty(opt_inner(ret).as_ref()),
+            ))
+        }
         "min" | "max" => Some(min_max(cx, recv, b0, i, name == "max", line, out)),
         "is_multiple_of" => {
             let rem = if matches!(i, Int::U32 | Int::U64 | Int::U128) {
@@ -676,6 +715,24 @@ pub(super) fn lower_int_method(
             } else {
                 Expr::bin(zeros, "-", Expr::raw((32 - width).to_string()))
             })
+        }
+        "ilog2" => Some(Expr::bin(
+            Expr::raw((if width == 64 { 63 } else { 31 }).to_string()),
+            "-",
+            bits("numberOfLeadingZeros", vec![mask_width(i, recv)]),
+        )),
+        // Digit count, exact where `Math.log10` rounds up just below a power of ten.
+        "ilog10" => {
+            let text = if i.is_unsigned() && width == 64 {
+                Expr::call(Expr::raw("Long"), "toUnsignedString", vec![recv])
+            } else {
+                Expr::call(Expr::raw("String"), "valueOf", vec![recv])
+            };
+            Some(Expr::bin(
+                Expr::call(text, "length", vec![]),
+                "-",
+                Expr::raw("1"),
+            ))
         }
         "trailing_zeros" => {
             let zeros = bits("numberOfTrailingZeros", vec![mask_width(i, recv)]);
@@ -830,11 +887,22 @@ pub(super) fn lower_int_method(
                 vec![wrapped, Expr::call(checked, "isEmpty", vec![])],
             ))
         }
-        _ if name.starts_with("checked_") => {
+        // Only the variants these helpers implement; anything else is reported, not guessed.
+        "checked_add" | "checked_sub" | "checked_mul" | "checked_div" | "checked_rem"
+        | "checked_neg" | "checked_abs" => {
             Some(checked_int(cx, recv, b0, b1, i, name, ret, line, out))
         }
-        _ if name.starts_with("saturating_") => Some(saturating_int(recv, b0, i, name)),
-        _ if name.starts_with("wrapping_") => Some(wrapping_int(recv, b0, i, name)),
+        "saturating_add" | "saturating_sub" | "saturating_mul" | "saturating_abs"
+        | "saturating_neg" => {
+            // Operands appear more than once in the overflow tests.
+            let recv = simple(cx, recv, &Ty::Int(i), line, out);
+            let b0 = simple(cx, b0, &Ty::Int(i), line, out);
+            Some(saturating_int(recv, b0, i, name))
+        }
+        "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "wrapping_div" | "wrapping_rem"
+        | "wrapping_neg" | "wrapping_shl" | "wrapping_shr" | "wrapping_abs" => {
+            Some(wrapping_int(recv, b0, i, name))
+        }
         _ => None,
     }
 }
@@ -1341,7 +1409,7 @@ pub(super) fn saturating_int(recv: Expr, b: Expr, i: Int, name: &str) -> Expr {
                 ),
                 i,
             ),
-            _ => Expr::bin(recv, "+", b),
+            _ => saturating_wide(recv, b, i, "add"),
         },
         "saturating_sub" => match i {
             Int::U8 | Int::U16 | Int::U32 | Int::Usize => {
@@ -1388,7 +1456,7 @@ pub(super) fn saturating_int(recv: Expr, b: Expr, i: Int, name: &str) -> Expr {
                 )),
                 i,
             ),
-            _ => Expr::bin(recv, "-", b),
+            _ => saturating_wide(recv, b, i, "sub"),
         },
         "saturating_mul" => match i {
             Int::U8 => narrow(
@@ -1426,7 +1494,7 @@ pub(super) fn saturating_int(recv: Expr, b: Expr, i: Int, name: &str) -> Expr {
                 ),
                 i,
             ),
-            _ => Expr::bin(recv, "*", b),
+            _ => saturating_wide(recv, b, i, "mul"),
         },
         "saturating_abs" => {
             let m = int_min(i);
@@ -1630,4 +1698,78 @@ pub(super) fn lower_ordering_method(
         "clone" => recv,
         _ => return None,
     })
+}
+
+fn literal_int(e: &Expr) -> Option<i128> {
+    match e {
+        Expr::Raw(s) => s.trim_end_matches(['L', 'l']).replace('_', "").parse().ok(),
+        _ => None,
+    }
+}
+
+// `10i64.pow(12)`: the wrapped constant itself.
+fn fold_pow(a: i128, e: u32, i: Int) -> String {
+    let mut r: u128 = 1;
+    for _ in 0..e {
+        r = r.wrapping_mul(a as u128);
+    }
+    // The bits of the Java representation: `u8` is a 0..=255 int, the rest are two's complement.
+    let width = match i {
+        Int::I8 | Int::U8 => 8,
+        Int::I16 | Int::U16 => 16,
+        _ if i.is_long() => 64,
+        _ => 32,
+    };
+    let bits = (r & ((1u128 << width) - 1)) as i128;
+    let v = if i != Int::U8 && bits >= 1i128 << (width - 1) {
+        bits - (1i128 << width)
+    } else {
+        bits
+    };
+    if i.is_long() {
+        format!("{v}L")
+    } else {
+        v.to_string()
+    }
+}
+
+// `BigInteger.valueOf(a).pow(e).longValue()`: the low bits are exactly Rust's wrapping result.
+fn big_pow(cx: &mut Cx, a: Expr, e: Expr, long: bool) -> Expr {
+    cx.import("java.math.BigInteger");
+    let big = Expr::call(Expr::raw("BigInteger"), "valueOf", vec![a]);
+    Expr::call(
+        Expr::call(big, "pow", vec![e]),
+        if long { "longValue" } else { "intValue" },
+        vec![],
+    )
+}
+
+// 64-bit saturation from the wrapped result's overflow bits (`isize` is a Java int: 32-bit rules).
+fn saturating_wide(a: Expr, b: Expr, i: Int, op: &str) -> Expr {
+    let (sa, sb) = (render(&a), render(&b));
+    if i == Int::Isize {
+        let sym = match op {
+            "add" => "+",
+            "sub" => "-",
+            _ => "*",
+        };
+        return Expr::raw(format!(
+            "(int) Math.max(Integer.MIN_VALUE, Math.min(Integer.MAX_VALUE, (long) {sa} {sym} {sb}))"
+        ));
+    }
+    let text = match (op, i.is_unsigned()) {
+        ("add", false) => format!(
+            "(({sa} ^ ({sa} + {sb})) & ({sb} ^ ({sa} + {sb}))) < 0 ? ({sa} < 0 ? Long.MIN_VALUE : Long.MAX_VALUE) : {sa} + {sb}"
+        ),
+        ("sub", false) => format!(
+            "(({sa} ^ {sb}) & ({sa} ^ ({sa} - {sb}))) < 0 ? ({sa} < 0 ? Long.MIN_VALUE : Long.MAX_VALUE) : {sa} - {sb}"
+        ),
+        ("mul", false) => format!(
+            "Math.multiplyHigh({sa}, {sb}) != (({sa} * {sb}) >> 63) ? (({sa} ^ {sb}) < 0 ? Long.MIN_VALUE : Long.MAX_VALUE) : {sa} * {sb}"
+        ),
+        ("add", true) => format!("Long.compareUnsigned({sa} + {sb}, {sa}) < 0 ? -1L : {sa} + {sb}"),
+        ("sub", true) => format!("Long.compareUnsigned({sa}, {sb}) < 0 ? 0L : {sa} - {sb}"),
+        _ => format!("Math.unsignedMultiplyHigh({sa}, {sb}) != 0 ? -1L : {sa} * {sb}"),
+    };
+    Expr::raw(format!("({text})"))
 }
