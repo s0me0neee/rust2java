@@ -1,0 +1,8 @@
+15.854 shape
+  circle:    7.07
+   shape:    8.00
+  circle:    0.79
+[1, 2, 3] 1|2|3 Some(3) true
+[('a', 2), ('b', 2), ('c', 1)]
+[(Hearts, 10), (Spades, 1), (Spades, 3)] true
+[0, 1, 4, 9]

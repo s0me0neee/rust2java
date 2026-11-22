@@ -1,0 +1,12 @@
+ok 42
+ok 7
+err negative: -3 / false
+err empty input / false
+err parse error: invalid digit found in string / true
+err parse error: number too large to fit in target type / true
+Some(6)
+parse error: invalid digit found in string
+Some(40) None
+true
+[5, 6]
+Some([1, 2]) 8

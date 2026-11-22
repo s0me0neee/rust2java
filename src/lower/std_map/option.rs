@@ -444,6 +444,17 @@ pub(super) fn lower_result_method(
         "map" | "map_err" | "and_then" => Some(Expr::call(recv, name, vec![b0])),
         "unwrap_or" => Some(Expr::call(recv, "unwrap_or", vec![b0])),
         "unwrap_or_else" => Some(Expr::call(recv, "unwrap_or_else", vec![b0])),
+        // `map_or(d, f)` / `map_or_else(fe, f)`: map the Ok value, then fall back on Err.
+        "map_or" | "map_or_else" => {
+            let f = args.get(1).cloned()?;
+            let mapped = Expr::call(recv, "map", vec![f]);
+            let fallback = if name == "map_or" {
+                "unwrap_or"
+            } else {
+                "unwrap_or_else"
+            };
+            Some(Expr::call(mapped, fallback, vec![b0]))
+        }
         "unwrap_or_default" => Some(Expr::call(
             recv,
             "unwrap_or",
