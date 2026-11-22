@@ -96,9 +96,40 @@ fn entry_point(cx: &mut Cx, file: &ast::SourceFile) -> String {
     } else {
         ("", "")
     };
+    let panic = "catch (RuntimeException e) { System.out.flush(); System.err.println(\"thread 'main' panicked:\\n\" + e.getMessage()); System.exit(101); }";
+    if !has_recursion(file) {
+        return format!(
+            "{field}public static void main(String[] args) {{ {keep}try {{ {call} }} {panic} }}"
+        );
+    }
+    // Rust's main thread has an 8 MB stack; Java's default would overflow on deep recursion.
     format!(
-        "{field}public static void main(String[] args) {{ {keep}try {{ {call} }} catch (RuntimeException e) {{ System.out.flush(); System.err.println(\"thread 'main' panicked:\\n\" + e.getMessage()); System.exit(101); }} }}"
+        "{field}public static void main(String[] args) throws InterruptedException {{ {keep}Thread t = new Thread(null, () -> {{ try {{ {call} }} {panic} catch (StackOverflowError e) {{ System.out.flush(); System.err.println(\"thread 'main' has overflowed its stack\"); System.exit(134); }} }}, \"main\", 1L << 29); t.start(); t.join(); }}"
     )
+}
+
+// A function that calls itself (directly, by name) anywhere in the file.
+fn has_recursion(file: &ast::SourceFile) -> bool {
+    file.syntax()
+        .descendants()
+        .filter_map(ast::Fn::cast)
+        .any(|f| {
+            let (Some(name), Some(body)) = (f.name(), f.body()) else {
+                return false;
+            };
+            let name = name.text().to_string();
+            body.syntax().descendants().any(|n| {
+                let callee = if let Some(c) = ast::CallExpr::cast(n.clone()) {
+                    c.expr().and_then(|e| match e {
+                        ast::Expr::PathExpr(p) => p.path()?.segment()?.name_ref(),
+                        _ => None,
+                    })
+                } else {
+                    ast::MethodCallExpr::cast(n).and_then(|m| m.name_ref())
+                };
+                callee.is_some_and(|c| c.text().to_string() == name)
+            })
+        })
 }
 
 // Lowers one item list (a file or an inline `mod` body) into Java members.

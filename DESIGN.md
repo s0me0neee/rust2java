@@ -362,6 +362,7 @@ Exhaustiveness was already checked by rustc. Switches over sealed types need no 
   ```java
   static String[] ARGS; public static void main(String[] args) { ARGS = args; try { main(); } catch (RuntimeException e) { System.out.flush(); System.err.println("thread 'main' panicked:\n" + e.getMessage()); System.exit(101); } } }
   ```
+  When a function in the file calls itself, `main` runs on a thread with a 512 MB stack instead (Rust's main thread has 8 MB; Java's default overflows around 10k frames), and a `StackOverflowError` exits with 134 like Rust's abort.
   Std exceptions (`NoSuchElementException` from `orElseThrow`, `IndexOutOfBoundsException`, `ArithmeticException`) keep their Java messages. Only the exit code, 101, is guaranteed (§1).
 - **`main` returning `Result`.** The call inside the entry point becomes `if (main() instanceof Err<?, ?>(var e)) { System.err.println("Error: " + <debug of e>); System.exit(1); }`. `std::process::exit(n)` → `System.exit(n)`.
 - **`?` operator.** Java can't return early from inside an expression, so each `?` operand is hoisted into a statement before its use, on the same line. A switch *statement* is allowed to `return`:
