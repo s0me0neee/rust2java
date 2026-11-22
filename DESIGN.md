@@ -706,7 +706,81 @@ static int parse(String s) {
 }
 ```
 
-### 22.2 Mapping changes from exact mode
+### 22.2 Style reference
+
+A hand-written port of a small stdin program. Exact mode stays as it is; this is only the target style for `-s` output.
+
+```rust
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut lines = io::stdin().lines();
+    let t = lines.next().unwrap()?.parse::<usize>()?;
+    for _ in 0..t {
+        let cs = lines.next().unwrap()?.split(" ").map(|c| c.parse::<u32>().unwrap()).collect::<Vec<u32>>();
+        let mut hash = HashSet::new();
+        for _ in 0..cs[0] { hash.insert(lines.next().unwrap()?); }
+        for _ in 0..cs[1] { hash.remove(&lines.next().unwrap()?); }
+        for s in hash.iter() { println!("{}", s); }
+    }
+    Ok(())
+}
+```
+
+```java
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.ListIterator;
+import java.util.regex.Pattern;
+
+class Main {
+	static final BufferedReader STDIN = new BufferedReader(new InputStreamReader(System.in));
+
+	public static void main(String[] args) {
+		var line_items = new ArrayList<String>(STDIN.lines().toList());
+		ListIterator<String> lines = line_items.listIterator();
+		var t = Integer.parseUnsignedInt(lines.next());
+
+		for (int _i = 0; _i < t; _i++) {
+			ArrayList<Integer> cs = new ArrayList<>(
+					Arrays.stream(lines.next().split(Pattern.quote(" "), -1)).map(c -> Integer.parseUnsignedInt(c))
+							.toList());
+
+			var hash = new HashSet<String>();
+
+			for (int _j = 0; _j < cs.get(0); _j++) {
+				hash.add(lines.next());
+			}
+			for (int _k = 0; _k < cs.get(1); _k++) {
+				hash.remove(lines.next());
+			}
+			for (String s : hash) {
+				System.out.println(s);
+			}
+		}
+	}
+}
+```
+
+What it shows:
+- **Same structure as exact mode, minus the error scaffolding.** It's the exact-mode translation with the `Result` plumbing taken out, not a rewrite. The stdin reader, the `ListIterator` over the lines and the stream for `cs` all stay.
+- **No `Result` anywhere.**
+  - `main` returning `Result<(), Box<dyn Error>>` is a plain `void main(String[] args)`.
+  - `lines.next().unwrap()?` is just `lines.next()`: line items are plain `String`s, not `Ok`-wrapped.
+  - `parse::<usize>()?` is `Integer.parseUnsignedInt(..)`, with no range check and no Rust error-message emulation.
+  - No `Result`/`Ok`/`Err` types are appended.
+- **No entry-point wrapper,** no Debug-printing of errors, no exit-code handling.
+- **No hoisted temporaries when nothing needs them:** `hash.add(lines.next())`, not `String next3; switch (...) ...; hash.add(next3);`.
+- **Rust names kept** (`line_items`, `cs`, `hash`). A `_` loop variable becomes `_i`, `_j`, `_k`.
+- **`var` when the initializer shows the type** (`var t = Integer.parseUnsignedInt(..)`, `var hash = new HashSet<String>()`). Type arguments go on the constructor.
+- **`Vec` stays a mutable `ArrayList`,** declared as `ArrayList<..>`.
+- **Layout:**
+  - Explicit, used-only imports.
+  - Non-`final` `class Main`, with static fields at the top.
+  - One statement per line, and blank lines between logical blocks.
+
+### 22.3 Mapping changes from exact mode
 
 | Area | Exact mode | Simple mode |
 |---|---|---|
@@ -725,13 +799,16 @@ static int parse(String s) {
 | `println!` | String concatenation | `System.out.println(a + " " + b)`, or `System.out.printf("%5.2f%n", x)` when the line has format specs. |
 | Tuples | `Map.Entry`, generated `Tuple3` | A named `record` when a tuple type repeats (`record Edge(int to, long w)`). `Map.entry` stays for map iteration. |
 | Structs | Classes with `clone()` and copy analysis | A `record` when never mutated, otherwise a class with fields and a constructor. `Copy` structs are only copied where the Rust code really relies on the copy. |
-| Iterator chains | Streams, with witnesses and hoisted temporaries | Streams for short `map`/`filter`/`collect` chains. A plain `for` loop when the chain uses indexes, `zip`, `windows`, `peekable` or mutation. `collect::<Vec<_>>()` is `.toList()`, or `new ArrayList<>(..)` only when the result is mutated later. |
+| Iterator chains | Streams, with witnesses and hoisted temporaries | Same streams as exact mode, without witnesses or hoisted temporaries that nothing needs. A plain `for` loop when the chain uses indexes, `zip`, `windows`, `peekable` or mutation. `collect::<Vec<_>>()` is `new ArrayList<>(stream.toList())`, a mutable `ArrayList` like the `Vec`. |
 | Strings | Byte/char helpers | `length()`, `charAt`, `toCharArray()`, `StringBuilder` when built in a loop. |
-| stdin | Shared `STDIN` reader on the last line | `Scanner in = new Scanner(System.in)` or a `BufferedReader` declared at the top of `main`; `throws IOException` where needed. |
-| Names | Rust `snake_case` kept | camelCase for methods, fields and locals; types and constants keep Rust's names. Temporaries are still named after their value (expression hints). |
+| stdin | Shared `STDIN` reader on the last line; `lines()` items wrapped in `Ok` | The same `STDIN` `BufferedReader`, as the class's first field. `lines()` items are plain `String`s, so `lines.next().unwrap()?` is `lines.next()`. |
+| Names | Rust names; `_` loop variables become `i`, `i2`, … | Rust names, as in exact mode. `_` loop variables become `_i`, `_j`, `_k`. Temporaries are still named after their value (expression hints). |
+| Locals | Explicit types; `var` only where the type can't be named | `var` when the initializer shows the type (a constructor with type arguments, `Integer.parseInt`, a literal); explicit types otherwise. |
+| Imports and class | `java.util.*` wildcards, `final class Main`, helpers and fields at the end | Explicit, used-only imports. `class Main` with static fields first, then methods in Rust order. |
+| Parsing | `parse` with range checks and Rust error messages | `Integer.parseInt`/`parseUnsignedInt`/`Long.parseLong`/`Double.parseDouble` directly. |
 | Cells for `&mut` primitives | One-element arrays | Return the new value, or use a field, when the function has a single `&mut` primitive parameter. Otherwise an `int[]` cell, as in exact mode. |
 
-### 22.3 Implementation
+### 22.4 Implementation
 
 - **Flag.** Parse `-s`/`--simple` into `Mode { Exact, Simple }` on `Cx`. The frontend, type conversion and the IR stay shared.
 - **Branch at decision points, not per file.** Each area above has one choke point:
@@ -741,7 +818,8 @@ static int parse(String s) {
   - `fmt::debug`
   - `num::*` unsigned helpers
   - the tuple and struct emitters
-  - `Cx::declare` (camelCase)
+  - `Cx::declare` (`_` loop names)
+  - the `?` and stdin-lines lowering
 
   Each checks `cx.simple()` and takes a simpler path. No mode checks spread through the general lowering.
 - **Result as exceptions.** Needs a pre-pass that marks every function returning `Result` and records its error type. That lets a caller's `?` become a plain call and a `match` on the call become `try`/`catch`. Error enums are emitted as exception class hierarchies instead of sealed interfaces.
@@ -749,13 +827,13 @@ static int parse(String s) {
 - **Tests.**
   - Every case under `tests/cases` must transpile with `-s` and pass `javac`.
   - Cases marked well-behaved must also print the same stdout. A per-case `.simple-skip` file lists the ones that rely on exact semantics.
-  - Golden Java files under `tests/simple/` for a dozen representative programs make the style reviewable in diffs.
+  - Golden Java files under `tests/simple/`, starting with the §22.2 reference, for a dozen representative programs. They make the style reviewable in diffs.
 
-### 22.4 Milestones
+### 22.5 Milestones
 
 | | Scope |
 |---|---|
-| S1 | Flag and mode. Plain `main`. Panics, asserts and `{:?}` via `toString`/`printf`. No unsigned helpers or narrowing. Normal-layout printer. Every case compiles. |
+| S1 | Flag and mode. Plain `main`. Panics, asserts and `{:?}` via `toString`/`printf`. No unsigned helpers or narrowing. Normal-layout printer with explicit imports and `var` locals. Every case compiles. The §22.2 program reproduces the reference apart from whitespace. |
 | S2 | `Result` as exceptions: `?`, `Err`, `match`/`if let` on results, error enums as exception classes, `main throws`. |
-| S3 | `Option` as null for map lookups and locals. Records for immutable structs and repeated tuples. camelCase names. |
-| S4 | Loops instead of streams for index-heavy chains. Scanner/BufferedReader stdin. Single-`&mut` parameters as return values. Golden files and the output-match subset in CI. |
+| S3 | `Option` as null for map lookups and locals. Records for immutable structs and repeated tuples. |
+| S4 | Loops instead of streams for index-heavy chains. Single-`&mut` parameters as return values. Golden files (starting with §22.2) and the output-match subset in CI. |
