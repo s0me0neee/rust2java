@@ -2402,10 +2402,15 @@ fn member_line(m: &Member) -> u32 {
 
 // `#[test]` / `#[cfg(test)]` items never reach the binary (and RA leaves their macros unexpanded).
 fn is_test_only(item: &ast::Item) -> bool {
+    // By text: this RA parses `cfg(..)` as its own meta kind, not a plain call.
     item.attrs().any(|a| {
-        a.as_simple_atom().is_some_and(|n| n == "test")
-            || a.as_simple_call()
-                .is_some_and(|(n, t)| n == "cfg" && t.syntax().text() == "(test)")
+        let meta: String = a
+            .meta()
+            .map(|m| m.syntax().text().to_string())
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect();
+        meta == "test" || meta == "cfg(test)"
     })
 }
 

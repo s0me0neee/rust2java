@@ -90,6 +90,12 @@ fn lower_fn_call(
 ) -> Expr {
     if !is_local_fn(cx, f) {
         let key = std_fn_key(cx, f);
+        if let Some(krate) = external_crate(cx, f) {
+            return cx.unsupported(
+                c.syntax(),
+                &format!("`{key}` from external crate `{krate}`"),
+            );
+        }
         return std_map::lower_std_fn_call(cx, c, &key, out);
     }
     let db = cx.db;
@@ -206,10 +212,27 @@ pub fn lower_method_call(cx: &mut Cx, m: &ast::MethodCallExpr, out: &mut Vec<Stm
     let key = target
         .map(|f| std_fn_key(cx, f))
         .unwrap_or_else(|| format!("?::{name}"));
+    if let Some(krate) = target.and_then(|f| external_crate(cx, f)) {
+        return cx.unsupported(
+            m.syntax(),
+            &format!("`{key}` from external crate `{krate}`"),
+        );
+    }
     if let Some(e) = iter::lower_iter_method(cx, m, &recv_ty, &key, out) {
         return e;
     }
     std_map::lower_std_method(cx, m, &recv_ty, &key, out)
+}
+
+// The dependency a non-std function comes from (std, core and alloc are `Lang` crates).
+fn external_crate(cx: &Cx, f: Function) -> Option<String> {
+    let krate = f.module(cx.db).krate(cx.db);
+    krate.origin(cx.db).is_lib().then(|| {
+        krate
+            .display_name(cx.db)
+            .map(|n| n.to_string())
+            .unwrap_or_default()
+    })
 }
 
 // Built-in derive methods have a range (the derive attribute) but no `fn` syntax node.
