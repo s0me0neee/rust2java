@@ -16,7 +16,7 @@ A source-to-source transpiler that turns Rust (1.95+, edition 2021/2024) into re
 ### Assumptions
 
 - The input already compiles and runs under `rustc` ≥ 1.95. The transpiler does no borrow checking or validation of its own and never needs to reason about invalid code.
-- There is **one mode**: no semantic flags.
+- There are **two modes**. The default (exact) mode is everything in this document up to §21. `-s` (simple mode, planned in §22) trades exact behavior for Java a person would write.
 
 ### Non-goals
 
@@ -31,8 +31,10 @@ A source-to-source transpiler that turns Rust (1.95+, edition 2021/2024) into re
 ## 2. Usage and output
 
 ```
-rust2java <cargo project dir | file.rs ...> [-o dir | file.java | -] [-q] [--run [-- program args]]
+rust2java <cargo project dir | file.rs ...> [-o dir | file.java | -] [-q] [-s] [--run [-- program args]]
 ```
+
+`-s` / `--simple` switches to simple mode (§22, planned).
 
 A bare `file.rs` is wrapped in a temporary cargo project so the frontend can load it. `-o` defaults to the
 current directory; `-o Foo.java` names the file (one program only), `-o -` prints the Java to stdout (single-file
@@ -663,3 +665,97 @@ Programs that hit these compile and run, but can print something different from 
 | Threads, `Mutex`, atomics, channels, `Path`/`PathBuf` | Unsupported: reported as errors, not mistranslated. |
 
 Performance: `VecDeque` indexing other than the ends is O(i) (a warning is printed); everything else keeps Rust's complexity.
+
+## 22. Simple mode (`-s`): plan
+
+Not implemented yet. This section is the plan.
+
+### 22.1 Goal
+
+The exact mode reproduces Rust's behavior. That leads to wrappers, helpers and defensive code no person would write. Simple mode instead produces the Java a developer would write by hand while porting the Rust file next to it:
+- The structure, names and comments follow the Rust source.
+- Errors are exceptions, not `Result` plumbing.
+- There's no entry-point wrapper, no unsigned emulation and no Debug-format helpers.
+- Normal Java formatting: one statement per line, standard indentation.
+
+What still holds:
+- The output is valid Java 21 that compiles.
+- For well-behaved programs, it prints the same stdout as the Rust program. Well-behaved means no overflow, no reliance on unsigned wrapping, ASCII text and Display-style output.
+
+What's dropped:
+- Line correspondence (§4).
+- Exact panic and exit-code behavior (§9.3).
+- Debug-format fidelity (§10.1).
+- Integer-width fidelity (§6.1).
+- No-helper purity, where a JDK class reads better.
+
+Anything without a natural mapping is still an error, not a guess (§16).
+
+Example, for a `parse` that returns `Result` and a `main` that matches on it:
+
+```java
+// exact mode
+static Result<Integer, AppError> parse(String s) { int n; switch (...) { case Ok(var value) -> n = value; case Err(var error) -> { return new Err<>(AppError.from(error)); } } ... }
+// simple mode
+static int parse(String s) {
+    int n = Integer.parseInt(s.trim());
+    if (n < 0) {
+        throw new AppError.Negative(n);
+    }
+    return n;
+}
+```
+
+### 22.2 Mapping changes from exact mode
+
+| Area | Exact mode | Simple mode |
+|---|---|---|
+| Entry point | One-line wrapper: `try`/`catch` → exit 101, `ARGS` field, big-stack thread for recursion | `public static void main(String[] args)` holding the Rust `main` body. Panics are uncaught exceptions. `env::args()` reads `args`, passed down as a parameter when other functions need it. |
+| `Result<T, E>` return | Generated `Result`/`Ok`/`Err` | Returns `T`. `Err(e)` becomes `throw e`, or `throw new <E>Exception(e)` when `E` isn't an exception type. |
+| `?` | A `switch` that returns `Err` | Disappears; the exception propagates. |
+| `match r { Ok(v) => a, Err(e) => b }`, `if let Ok(..)` | `switch` on the record | `try { a(call) } catch (XException e) { b }` |
+| `unwrap`/`expect` on `Result` | `.unwrap()` helper | Disappears. `expect("msg")` keeps its message only where it's the error's text. |
+| `.ok()`, `unwrap_or`, `is_err` on `Result` | Combinators | A small `try`/`catch` local, e.g. `int n; try { n = Integer.parseInt(s); } catch (NumberFormatException e) { n = 0; }` |
+| User error enums | Sealed interface with records | `class AppError extends RuntimeException` with a static subclass per variant. `impl Display` becomes `getMessage()`. `From` conversions become constructors. |
+| `io::Error`, `ParseIntError`, `Box<dyn Error>` | `Result` payloads | `UncheckedIOException` (wrapping at the call), `NumberFormatException`, `Exception`. `main` that returns `Result` becomes `main(...) throws Exception`. |
+| `panic!`, `unreachable!`, `assert!` | `throw new RuntimeException(..)` | `throw new IllegalStateException(msg)`, `throw new AssertionError()`, `if (!c) throw new AssertionError(msg)` |
+| `Option` | `Optional` everywhere | `Optional` in signatures and fields. Map lookups and locals use null: `Integer v = m.get(k); if (v != null)`. `opt.unwrap()` becomes `opt.get()`. |
+| Integers | Unsigned display/compare/divide helpers, masks, narrowing casts, widened `usize` locals | Plain `int`/`long` arithmetic. `u64` is `long`, printed as-is. `wrapping_*` are plain operators, `checked_*` use `Math.addExact`, `pow` is `(long) Math.pow`. |
+| `{:?}` | `debug_str`/`debug_float` helpers, quoted strings, `Some(..)` | `toString()`. Lists, maps and records already print `[1, 2]`, `{a=1}`, `Point[x=1, y=2]`, and `#[derive(Debug)]` makes no generated `debug()`. Width and precision use `String.format`/`printf`. |
+| `println!` | String concatenation | `System.out.println(a + " " + b)`, or `System.out.printf("%5.2f%n", x)` when the line has format specs. |
+| Tuples | `Map.Entry`, generated `Tuple3` | A named `record` when a tuple type repeats (`record Edge(int to, long w)`). `Map.entry` stays for map iteration. |
+| Structs | Classes with `clone()` and copy analysis | A `record` when never mutated, otherwise a class with fields and a constructor. `Copy` structs are only copied where the Rust code really relies on the copy. |
+| Iterator chains | Streams, with witnesses and hoisted temporaries | Streams for short `map`/`filter`/`collect` chains. A plain `for` loop when the chain uses indexes, `zip`, `windows`, `peekable` or mutation. `collect::<Vec<_>>()` is `.toList()`, or `new ArrayList<>(..)` only when the result is mutated later. |
+| Strings | Byte/char helpers | `length()`, `charAt`, `toCharArray()`, `StringBuilder` when built in a loop. |
+| stdin | Shared `STDIN` reader on the last line | `Scanner in = new Scanner(System.in)` or a `BufferedReader` declared at the top of `main`; `throws IOException` where needed. |
+| Names | Rust `snake_case` kept | camelCase for methods, fields and locals; types and constants keep Rust's names. Temporaries are still named after their value (expression hints). |
+| Cells for `&mut` primitives | One-element arrays | Return the new value, or use a field, when the function has a single `&mut` primitive parameter. Otherwise an `int[]` cell, as in exact mode. |
+
+### 22.3 Implementation
+
+- **Flag.** Parse `-s`/`--simple` into `Mode { Exact, Simple }` on `Cx`. The frontend, type conversion and the IR stay shared.
+- **Branch at decision points, not per file.** Each area above has one choke point:
+  - `entry_point`
+  - `try_result`/`try_option` (`?`)
+  - `lower_result_method`
+  - `fmt::debug`
+  - `num::*` unsigned helpers
+  - the tuple and struct emitters
+  - `Cx::declare` (camelCase)
+
+  Each checks `cx.simple()` and takes a simpler path. No mode checks spread through the general lowering.
+- **Result as exceptions.** Needs a pre-pass that marks every function returning `Result` and records its error type. That lets a caller's `?` become a plain call and a `match` on the call become `try`/`catch`. Error enums are emitted as exception class hierarchies instead of sealed interfaces.
+- **Printer.** A second `emit` layout that puts one statement per line with standard indentation and keeps comments and blank lines in order. Hoisted temporaries get their own lines instead of sharing the Rust line.
+- **Tests.**
+  - Every case under `tests/cases` must transpile with `-s` and pass `javac`.
+  - Cases marked well-behaved must also print the same stdout. A per-case `.simple-skip` file lists the ones that rely on exact semantics.
+  - Golden Java files under `tests/simple/` for a dozen representative programs make the style reviewable in diffs.
+
+### 22.4 Milestones
+
+| | Scope |
+|---|---|
+| S1 | Flag and mode. Plain `main`. Panics, asserts and `{:?}` via `toString`/`printf`. No unsigned helpers or narrowing. Normal-layout printer. Every case compiles. |
+| S2 | `Result` as exceptions: `?`, `Err`, `match`/`if let` on results, error enums as exception classes, `main throws`. |
+| S3 | `Option` as null for map lookups and locals. Records for immutable structs and repeated tuples. camelCase names. |
+| S4 | Loops instead of streams for index-heavy chains. Scanner/BufferedReader stdin. Single-`&mut` parameters as return values. Golden files and the output-match subset in CI. |
