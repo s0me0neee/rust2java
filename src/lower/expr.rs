@@ -1353,6 +1353,11 @@ fn lower_index(cx: &mut Cx, i: &ast::IndexExpr, out: &mut Vec<Stmt>) -> Expr {
         let b = lower_expr(cx, &base, out);
         return Expr::call(b, "getLast", vec![]);
     }
+    // `dq[0]`: ArrayDeque has no random access, but its ends are O(1).
+    if matches!(bt.strip_refs(), Ty::Deque(_)) && index.syntax().text() == "0" {
+        let b = lower_expr(cx, &base, out);
+        return Expr::call(b, "getFirst", vec![]);
+    }
     if let ast::Expr::RangeExpr(r) = &index {
         let b = lower_expr(cx, &base, out);
         return std_map::lower_slice_range(cx, b, &bt, r, out);
@@ -1381,15 +1386,21 @@ fn lower_index(cx: &mut Cx, i: &ast::IndexExpr, out: &mut Vec<Stmt>) -> Expr {
     let ix = lower_expr(cx, &index, out);
     match bt.strip_refs() {
         Ty::Str => Expr::call(b, "charAt", vec![ix]),
-        Ty::Deque(_) => Expr::call(
+        Ty::Deque(_) => {
+            cx.warn(
+                i.syntax(),
+                "VecDeque index is O(i) in Java (ArrayDeque has no random access); use front/back or a Vec",
+            );
             Expr::call(
-                Expr::call(Expr::call(b, "stream", vec![]), "skip", vec![ix]),
-                "findFirst",
+                Expr::call(
+                    Expr::call(Expr::call(b, "stream", vec![]), "skip", vec![ix]),
+                    "findFirst",
+                    vec![],
+                ),
+                "orElseThrow",
                 vec![],
-            ),
-            "orElseThrow",
-            vec![],
-        ),
+            )
+        }
         _ => Expr::call(b, "get", vec![ix]),
     }
 }

@@ -1819,6 +1819,13 @@ pub(super) fn lower_deque_method(
         "clear" => Some(Expr::call(recv, "clear", vec![])),
         "contains" => Some(Expr::call(recv, "contains", vec![b0])),
         "extend" => Some(Expr::call(recv, "addAll", vec![b0])),
+        "get"
+            if m.arg_list()
+                .and_then(|a| a.args().next())
+                .is_some_and(|a| a.syntax().text() == "0") =>
+        {
+            Some(opt_nullable("peekFirst"))
+        }
         "get" => Some(Expr::call(
             Expr::call(Expr::call(recv, "stream", vec![]), "skip", vec![b0]),
             "findFirst",

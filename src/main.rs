@@ -144,6 +144,15 @@ fn transpile(args: &Args, target: &Target, project: &frontend::Project) -> Resul
                 d.msg
             );
         }
+        for d in &lowered.warnings {
+            eprintln!(
+                "warning: {}:{}:{}: {}",
+                unit.path.display(),
+                d.line,
+                d.col,
+                d.msg
+            );
+        }
         errors += lowered.diags.len();
         if single {
             lowered.file.package.clear();

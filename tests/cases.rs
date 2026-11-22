@@ -101,7 +101,7 @@ fn differential() {
         let (want, want_code) = expected(case, work.path());
         let case_diags: Vec<&str> = diag
             .lines()
-            .filter(|l| l.contains(&format!("/{}.rs:", case.name)))
+            .filter(|l| l.starts_with("error") && l.contains(&format!("/{}.rs:", case.name)))
             .collect();
         if !case_diags.is_empty() {
             failures.push(format!(

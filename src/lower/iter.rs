@@ -909,32 +909,16 @@ fn lower_source(
     }
     let args = arg_exprs(m);
     match (recv_ty.strip_refs(), name) {
-        (Ty::Map { ordered: true, .. }, "range") => {
-            use ast::RangeItem;
-            let Some(ast::Expr::RangeExpr(range)) = args.first().map(strip_parens) else {
-                return cx.unsupported(m.syntax(), "BTreeMap range bounds");
+        (t @ (Ty::Map { ordered: true, .. } | Ty::Set { ordered: true, .. }), "range") => {
+            let is_map = matches!(t, Ty::Map { .. });
+            let Some(view) = ordered_range_view(cx, m, recv, is_map, out) else {
+                return cx.unsupported(m.syntax(), "BTreeMap/BTreeSet range bounds");
             };
-            let start = range.start().map(|e| lower_arg(cx, &e, out));
-            let end = range.end().map(|e| lower_arg(cx, &e, out));
-            let inclusive = range.op_kind() == Some(ast::RangeOp::Inclusive);
-            let bounds = match (start, end) {
-                (Some(start), Some(end)) => Expr::call(
-                    recv,
-                    "subMap",
-                    vec![
-                        start,
-                        Expr::raw("true"),
-                        end,
-                        Expr::raw(inclusive.to_string()),
-                    ],
-                ),
-                (Some(start), None) => Expr::call(recv, "tailMap", vec![start, Expr::raw("true")]),
-                (None, Some(end)) => {
-                    Expr::call(recv, "headMap", vec![end, Expr::raw(inclusive.to_string())])
-                }
-                (None, None) => recv,
-            };
-            Expr::call(Expr::call(bounds, "entrySet", vec![]), "stream", vec![])
+            if is_map {
+                Expr::call(Expr::call(view, "entrySet", vec![]), "stream", vec![])
+            } else {
+                Expr::call(view, "stream", vec![])
+            }
         }
         (Ty::Map { .. }, "iter" | "into_iter" | "iter_mut") => {
             Expr::call(Expr::call(recv, "entrySet", vec![]), "stream", vec![])
@@ -1153,7 +1137,7 @@ fn lower_source(
         }
         _ => cx.unsupported(
             m.syntax(),
-            &format!("iterator source `{name}` on {recv_ty:?}"),
+            &format!("iterator source `{name}` on `{}`", recv_ty.describe()),
         ),
     }
 }
@@ -1367,6 +1351,17 @@ fn lower_adaptor(
             (Ty::Set { ordered: true, .. }, "iter") => {
                 let set = expr::lower_expr(cx, &source, out);
                 Some(Expr::call(set, "descendingSet", vec![]))
+            }
+            (t @ (Ty::Map { ordered: true, .. } | Ty::Set { ordered: true, .. }), "range") => {
+                let is_map = matches!(t, Ty::Map { .. });
+                let recv = expr::lower_expr(cx, &source, out);
+                ordered_range_view(cx, &source_call, recv, is_map, out).map(|v| {
+                    if is_map {
+                        Expr::call(Expr::call(v, "descendingMap", vec![]), "entrySet", vec![])
+                    } else {
+                        Expr::call(v, "descendingSet", vec![])
+                    }
+                })
             }
             (Ty::Vec(_), "iter" | "into_iter") => {
                 let list = expr::lower_expr(cx, &source, out);
@@ -2242,4 +2237,35 @@ fn lower_pulled(
             lower_adaptor_core(cx, m, name, src, item, &ret_ty, line, out)
         }
     }
+}
+
+// `m.range(a..b)` as a NavigableMap/NavigableSet view: subMap/tailMap/headMap (or the Set forms).
+fn ordered_range_view(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    recv: Expr,
+    is_map: bool,
+    out: &mut Vec<Stmt>,
+) -> Option<Expr> {
+    use ast::RangeItem;
+    let args = arg_exprs(m);
+    let Some(ast::Expr::RangeExpr(range)) = args.first().map(strip_parens) else {
+        return None;
+    };
+    let start = range.start().map(|e| lower_arg(cx, &e, out));
+    let end = range.end().map(|e| lower_arg(cx, &e, out));
+    let inclusive = Expr::raw((range.op_kind() == Some(ast::RangeOp::Inclusive)).to_string());
+    let (sub, tail, head) = if is_map {
+        ("subMap", "tailMap", "headMap")
+    } else {
+        ("subSet", "tailSet", "headSet")
+    };
+    Some(match (start, end) {
+        (Some(start), Some(end)) => {
+            Expr::call(recv, sub, vec![start, Expr::raw("true"), end, inclusive])
+        }
+        (Some(start), None) => Expr::call(recv, tail, vec![start, Expr::raw("true")]),
+        (None, Some(end)) => Expr::call(recv, head, vec![end, inclusive]),
+        (None, None) => recv,
+    })
 }

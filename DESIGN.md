@@ -573,6 +573,7 @@ Every unsupported construct gets a specific error. The transpiler collects all e
 error: src/main.rs:42:17: unsupported: arithmetic on a generic type parameter
 ```
 
+- Warnings don't fail the run. They flag Java that is correct but slower than the Rust, such as `dq[i]` on a `VecDeque` (O(i): `ArrayDeque` has no random access; `dq[0]`, `dq[len - 1]`, `front`/`back` stay O(1)).
 - A non-std dependency is named once, at its first use: ``external crate `itertools` is not supported (only std)``.
 - The Java file is still written so the rest can be read, but it can't compile by accident. Line 1 starts with `#error rust2java: N error(s), this file is incomplete;` (line numbers are unchanged), and each unsupported expression is `/* unsupported: … */ UNSUPPORTED`.
 

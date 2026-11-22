@@ -45,6 +45,8 @@ pub struct Cx<'a, 'db> {
     line_starts: Vec<u32>,
     pub imports: BTreeSet<String>,
     pub diags: Vec<Diag>,
+    // Correct output, but worth knowing (e.g. an operation slower than in Rust).
+    pub warnings: Vec<Diag>,
     // Lexical scopes of the current method: Rust name -> Java name.
     scopes: Vec<HashMap<String, String>>,
     // Temporary name aliases: Rust name -> already-rendered Java text (pattern bindings in guards).
@@ -161,6 +163,7 @@ pub struct Lowered {
     pub trailer: String,
     pub last_line: u32,
     pub diags: Vec<Diag>,
+    pub warnings: Vec<Diag>,
     pub needs_result: bool,
 }
 
@@ -213,6 +216,7 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         line_starts,
         imports: BTreeSet::new(),
         diags: Vec::new(),
+        warnings: Vec::new(),
         scopes: Vec::new(),
         aliases: Vec::new(),
         method_names: HashSet::new(),
@@ -300,6 +304,7 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         trailer: cx.file_trailer.join(" "),
         last_line,
         diags: cx.diags,
+        warnings: cx.warnings,
         needs_result: cx.needs_result,
     }
 }
@@ -418,6 +423,16 @@ impl<'a, 'db> Cx<'a, 'db> {
             msg: format!("unsupported: {what}"),
         });
         Expr::raw(format!("/* unsupported: {what} */ UNSUPPORTED"))
+    }
+
+    pub fn warn(&mut self, node: &SyntaxNode, msg: impl Into<String>) {
+        let line = self.line(node);
+        let col = self.col(node);
+        self.warnings.push(Diag {
+            line,
+            col,
+            msg: msg.into(),
+        });
     }
 
     pub fn error(&mut self, node: &SyntaxNode, msg: impl Into<String>) {
