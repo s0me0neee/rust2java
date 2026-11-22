@@ -406,7 +406,12 @@ fn get_idiom(cx: &mut Cx, p: &ast::Pat, init: &ast::Expr) -> Option<(Expr, Optio
     let cond = if is_map {
         Expr::call(recv.clone(), "containsKey", vec![key.clone()])
     } else {
-        Expr::bin(key.clone(), "<", Expr::call(recv.clone(), "size", vec![]))
+        let cond = Expr::bin(key.clone(), "<", Expr::call(recv.clone(), "size", vec![]));
+        if super::std_map::coll::non_negative(cx, &arg, 3) {
+            cond
+        } else {
+            Expr::bin(Expr::bin(key.clone(), ">=", Expr::raw("0")), "&&", cond)
+        }
     };
     let bind = match &inner {
         ast::Pat::IdentPat(ip) if ip.pat().is_none() && bind_pat_def(cx, ip).is_none() => {

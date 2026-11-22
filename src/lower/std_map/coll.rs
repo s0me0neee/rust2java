@@ -1100,7 +1100,11 @@ pub(super) fn lower_vec_method(
             // Not `stream().skip(i).findFirst()`: that walks i elements, making index loops quadratic.
             let recv = simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out);
             let i = simple(cx, b0, &Ty::Int(Int::Usize), line, out);
-            let cond = Expr::bin(i.clone(), "<", Expr::call(recv.clone(), "size", vec![]));
+            let mut cond = Expr::bin(i.clone(), "<", Expr::call(recv.clone(), "size", vec![]));
+            // `v.get(i - 1)` / `v.get(x as usize)` wrap to a huge usize (None); in Java they go negative.
+            if !arg_asts.first().is_some_and(|a| non_negative(cx, a, 3)) {
+                cond = Expr::bin(Expr::bin(i.clone(), ">=", Expr::raw("0")), "&&", cond);
+            }
             Some(conditional(
                 cond,
                 opt_of(Expr::call(recv, "get", vec![i])),
@@ -1962,4 +1966,78 @@ pub fn lower_slice_range(
         }
         _ => cx.unsupported(r.syntax(), "slice by range on this type"),
     }
+}
+
+// An index expression that can't have wrapped below zero.
+pub(crate) fn non_negative(cx: &Cx, e: &ast::Expr, depth: u32) -> bool {
+    match e {
+        ast::Expr::Literal(_) | ast::Expr::FieldExpr(_) => true,
+        ast::Expr::PathExpr(p) => {
+            let Some(ra_ap_hir::PathResolution::Local(local)) =
+                p.path().and_then(|p| cx.sema.resolve_path(&p))
+            else {
+                return true;
+            };
+            local_non_negative(cx, local, depth)
+        }
+        ast::Expr::ParenExpr(p) => p.expr().is_some_and(|i| non_negative(cx, &i, depth)),
+        ast::Expr::RefExpr(r) => r.expr().is_some_and(|i| non_negative(cx, &i, depth)),
+        // Values from calls are in range unless they wrap on purpose.
+        ast::Expr::MethodCallExpr(m) => !m.name_ref().is_some_and(|n| {
+            let n = n.text().to_string();
+            n.starts_with("wrapping_") || n.starts_with("overflowing_")
+        }),
+        ast::Expr::CallExpr(_) | ast::Expr::TryExpr(_) => true,
+        ast::Expr::BinExpr(b) => {
+            matches!(
+                b.op_kind(),
+                Some(ast::BinaryOp::ArithOp(
+                    ast::ArithOp::Add | ast::ArithOp::Mul | ast::ArithOp::Div | ast::ArithOp::Rem
+                ))
+            ) && b.lhs().is_some_and(|l| non_negative(cx, &l, depth))
+                && b.rhs().is_some_and(|r| non_negative(cx, &r, depth))
+        }
+        _ => false,
+    }
+}
+
+// Params, loop variables and pattern bindings count as in range; a `let` is judged by what it's set to.
+fn local_non_negative(cx: &Cx, local: ra_ap_hir::Local, depth: u32) -> bool {
+    let Some(ip) = local.primary_source(cx.db).into_ident_pat() else {
+        return true;
+    };
+    let Some(l) = ip.syntax().parent().and_then(ast::LetStmt::cast) else {
+        return true;
+    };
+    if depth == 0
+        || !l
+            .initializer()
+            .is_some_and(|i| non_negative(cx, &i, depth - 1))
+    {
+        return false;
+    }
+    if ip.mut_token().is_none() {
+        return true;
+    }
+    // A `-=` (or a reassignment from a possibly wrapped value) can take it below zero.
+    let name = ast::HasName::name(&ip)
+        .map(|n| n.text().to_string())
+        .unwrap_or_default();
+    let Some(body) = l.syntax().ancestors().find(|a| ast::Fn::can_cast(a.kind())) else {
+        return false;
+    };
+    !body.descendants().filter_map(ast::BinExpr::cast).any(|b| {
+        let Some(ast::BinaryOp::Assignment { op }) = b.op_kind() else {
+            return false;
+        };
+        let target = b
+            .lhs()
+            .is_some_and(|t| t.syntax().text().to_string() == name);
+        target
+            && match op {
+                Some(ast::ArithOp::Sub) => true,
+                None => !b.rhs().is_some_and(|r| non_negative(cx, &r, depth - 1)),
+                _ => false,
+            }
+    })
 }
