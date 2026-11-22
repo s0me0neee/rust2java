@@ -647,3 +647,19 @@ New lowering code should only be needed for structural constructs.
 | Unsigned values above the signed range (`u32`/`u64`), `u8` math past 255 | accepted by design (§1); shows up in the diff report |
 | Streams vs Rust iterator edge semantics (`max` ties, float `sum`) | handled in the §11 table; differential cases for each |
 | Inline-only output gets long on heavy lines (`{:?}` of nested types, `?` chains) | accepted; long lines are fine under the line rule. If the corpus shows a pattern repeated often, revisit adding a helper. |
+
+## 21. Known output differences
+
+Programs that hit these compile and run, but can print something different from Rust. The transpiler doesn't flag them.
+
+| Area | Difference |
+|---|---|
+| `usize`/`isize` past 2^31 | Only accumulating locals are widened to `long` (§6.1); parameters, returns, fields and indexes stay `int` and wrap. `usize::MAX`/`isize::MAX` are the `int` limits. |
+| `i128`/`u128` | `long`: values past 64 bits are wrong. |
+| Non-ASCII text | `len()` and byte offsets count UTF-16 units, not UTF-8 bytes. Characters outside the BMP are two Java `char`s, so `chars()` splits them. |
+| `{:.N}` of ±infinity | Java prints `Infinity`; Rust prints `inf`. |
+| Float printing ties | Rare shortest-digit ties (`1e15 + 0.3`) and the smallest subnormal can differ in the last digit. |
+| `HashMap`/`HashSet` iteration order | Differs (Rust's is random per run anyway). |
+| Threads, `Mutex`, atomics, channels, `Path`/`PathBuf` | Unsupported: reported as errors, not mistranslated. |
+
+Performance: `VecDeque` indexing other than the ends is O(i) (a warning is printed); everything else keeps Rust's complexity.
