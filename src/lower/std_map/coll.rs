@@ -1407,6 +1407,10 @@ pub(super) fn lower_vec_method(
             ))
         }
         "extend_from_slice" => Some(Expr::call(recv, "addAll", vec![b0])),
+        // `dst[a..b].copy_from_slice(src)`: the receiver is already a write-through subList view.
+        "copy_from_slice" | "clone_from_slice" => {
+            Some(Expr::call(Expr::raw("Collections"), "copy", vec![recv, b0]))
+        }
         // Shared copies are only safe for immutable elements; Rust clones each one.
         "resize"
             if matches!(

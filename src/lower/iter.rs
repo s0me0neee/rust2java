@@ -1538,7 +1538,8 @@ fn lower_adaptor_core(
                     body: LambdaBody::Expr(body),
                     ..
                 } = &f
-                && matches!(&**body, Expr::New { ty, .. } if ty.starts_with("ArrayList") || ty.starts_with("Hash") || ty.starts_with("Tree") || ty.starts_with("ArrayDeque"))
+                && (matches!(&**body, Expr::New { ty, .. } if ty.starts_with("ArrayList") || ty.starts_with("Hash") || ty.starts_with("Tree") || ty.starts_with("ArrayDeque"))
+                    || render(body).ends_with("::new))"))
                 && let Ty::Iter(out_item) = ret_ty.strip_refs()
                 && out_item.is_nameable()
             {
