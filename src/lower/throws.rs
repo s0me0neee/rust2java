@@ -40,6 +40,10 @@ pub fn eligible(cx: &Cx, root: &SyntaxNode) -> Result<(), (SyntaxNode, &'static 
         let Some(e) = ast::Expr::cast(node.clone()) else {
             continue;
         };
+        // A `binary_search` read only for its position never becomes a Result.
+        if super::std_map::coll::plain_search_use(cx, &e) {
+            continue;
+        }
         let ty = cx.ty(&e);
         // The callee of a call (`Ok` in `Ok(x)`, `f` in `f()`) has a function type.
         let callee = node

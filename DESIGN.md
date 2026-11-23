@@ -931,6 +931,7 @@ Implemented (`-s`/`--simple`; `crate::mode` holds the flag because `Ty::java()` 
   - In both modes a literal separator with no regex metacharacters is its own regex: `s.split(",", -1)`, not `Pattern.quote(",")`.
   - `is_ascii_digit`/`_alphabetic`/`_alphanumeric`/`_whitespace`/`_uppercase`/`_lowercase` are the `Character` tests (the same on ASCII text).
   - `x as u64` from `u32`/`usize` is a plain `(long)` widening, without the unsigned mask.
+  - `binary_search` read only for its position has no Result: `.is_ok()` / `.is_err()` is `Collections.binarySearch(v, x) >= 0` / `< 0`, `.unwrap_or_else(|i| i)` is `pos >= 0 ? pos : -pos - 1`, and a `match` on `Ok(i)` / `Err(i)` (guards allowed) is an if-chain on `int pos = Collections.binarySearch(v, x);` with a missing `i` as `-pos - 1`. An empty `Ok(_) => {}` arm is dropped. Duplicates may give a different (equally valid) index than Rust. Other uses (`{:?}`, stored) keep the Result.
   - `a.partial_cmp(&b).unwrap()` on floats is `Double.compare(a, b)` (NaN takes Java's total order instead of panicking); an unwrapped `Optional.of(e)` is `e`.
   - `max_by`/`max_by_key` are `stream.max(cmp)`, which returns the first of equal maxima where Rust returns the last.
   - `u32::MAX`/`u64::MAX` are `Integer.MAX_VALUE`/`Long.MAX_VALUE`, since they're mostly an infinity or a running minimum's start. Under a cast (`u32::MAX as f64`, a scale) they keep the exact value.

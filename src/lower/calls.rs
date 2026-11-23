@@ -182,6 +182,10 @@ pub fn lower_method_call(cx: &mut Cx, m: &ast::MethodCallExpr, out: &mut Vec<Stm
         .name_ref()
         .map(|n| n.text().to_string())
         .unwrap_or_default();
+    // Simple mode: `v.binary_search(&x).is_ok()` reads the position, with no Result.
+    if let Some(e) = super::std_map::coll::lower_search_method(cx, m, out) {
+        return e;
+    }
     let target = cx.sema.resolve_method_call(m);
     if let Some(f) = target
         && is_local_fn(cx, f)

@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::lower::strip_parens;
+use ra_ap_syntax::ast::HasName;
 
 // Hook for std free functions (`key` as built by `calls::std_fn_key`, e.g. `Rc::new`).
 pub(super) fn fn_call(
@@ -2345,4 +2346,209 @@ fn binary_search_loop(
             args: vec![Expr::name(lo)],
         },
     )
+}
+
+// ---- simple mode: `binary_search` for its position only ----
+
+// `v.binary_search(&x)` on a list, as a syntax node.
+fn search_call(cx: &Cx, e: &ast::Expr) -> Option<ast::MethodCallExpr> {
+    let ast::Expr::MethodCallExpr(m) = strip_parens(e) else { return None };
+    let recv = m.receiver()?;
+    (super::method_name(&m) == "binary_search" && matches!(cx.ty(&recv).strip_refs(), Ty::Vec(_)))
+        .then_some(m)
+}
+
+// The arms of `match v.binary_search(&x)`: each `Ok(p)` / `Err(p)` / `_`, `p` a name or `_`.
+fn search_arms(m: &ast::MatchExpr) -> Option<Vec<(Option<bool>, Option<String>, ast::MatchArm)>> {
+    let mut out = Vec::new();
+    for a in m.match_arm_list()?.arms() {
+        let (ok, bind) = match a.pat()? {
+            ast::Pat::WildcardPat(_) => (None, None),
+            ast::Pat::TupleStructPat(tp) => {
+                let ok = match tp.path()?.segment()?.name_ref()?.text().to_string().as_ref() {
+                    "Ok" => true,
+                    "Err" => false,
+                    _ => return None,
+                };
+                let mut fields = tp.fields();
+                let bind = match fields.next()? {
+                    ast::Pat::WildcardPat(_) => None,
+                    ast::Pat::IdentPat(ip) if ip.pat().is_none() => Some(ip.name()?.text().to_string()),
+                    _ => return None,
+                };
+                if fields.next().is_some() {
+                    return None;
+                }
+                (Some(ok), bind)
+            }
+            _ => return None,
+        };
+        out.push((ok, bind, a));
+    }
+    Some(out)
+}
+
+// Whether this `binary_search` is used only for its position, which simple mode reads from
+// `Collections.binarySearch` directly instead of building a Result.
+pub(crate) fn plain_search_use(cx: &Cx, e: &ast::Expr) -> bool {
+    if !crate::mode::simple() || search_call(cx, e).is_none() {
+        return false;
+    }
+    let Some(parent) = e.syntax().parent() else { return false };
+    if let Some(m) = ast::MethodCallExpr::cast(parent.clone()) {
+        return match super::method_name(&m).as_str() {
+            "is_ok" | "is_err" => true,
+            "unwrap_or_else" => insertion_closure(&m),
+            _ => false,
+        };
+    }
+    ast::MatchExpr::cast(parent).is_some_and(|m| search_arms(&m).is_some())
+}
+
+// `|e| e`: the insertion point on a miss.
+fn insertion_closure(m: &ast::MethodCallExpr) -> bool {
+    let Some(ast::Expr::ClosureExpr(c)) = m.arg_list().and_then(|a| a.args().next()) else {
+        return false;
+    };
+    let param = c.param_list().and_then(|p| p.params().next()).and_then(|p| p.pat());
+    let body = c.body().map(|b| b.syntax().text().to_string());
+    matches!((param, body), (Some(ast::Pat::IdentPat(ip)), Some(b)) if ip.name().is_some_and(|n| n.text() == b.as_str()))
+}
+
+// `Collections.binarySearch(v, x)`.
+fn search_expr(cx: &mut Cx, call: &ast::MethodCallExpr, out: &mut Vec<Stmt>) -> Option<Expr> {
+    let v = expr::lower_expr(cx, &call.receiver()?, out);
+    let key = match strip_parens(&call.arg_list()?.args().next()?) {
+        ast::Expr::RefExpr(r) => r.expr()?,
+        k => k,
+    };
+    let key = expr::lower_expr(cx, &key, out);
+    Some(Expr::call(Expr::raw("Collections"), "binarySearch", vec![v, key]))
+}
+
+// `v.binary_search(&x).is_ok()` → `Collections.binarySearch(v, x) >= 0`; `.unwrap_or_else(|i| i)`
+// → `pos >= 0 ? pos : -pos - 1`.
+pub(crate) fn lower_search_method(cx: &mut Cx, m: &ast::MethodCallExpr, out: &mut Vec<Stmt>) -> Option<Expr> {
+    let recv = m.receiver()?;
+    if !plain_search_use(cx, &recv) {
+        return None;
+    }
+    let call = search_call(cx, &recv)?;
+    let line = cx.line(m.syntax());
+    let search = search_expr(cx, &call, out)?;
+    Some(match super::method_name(m).as_str() {
+        "is_ok" => Expr::bin(search, ">=", Expr::raw("0")),
+        "is_err" => Expr::bin(search, "<", Expr::raw("0")),
+        _ => {
+            let pos = push_local(cx, line, "int".into(), Some(search), out, "pos");
+            let p = Expr::name(&pos);
+            conditional(
+                Expr::bin(p.clone(), ">=", Expr::raw("0")),
+                p.clone(),
+                Expr::bin(Expr::Unary("-", Box::new(p)), "-", Expr::raw("1")),
+            )
+        }
+    })
+}
+
+// `match v.binary_search(&x) { Ok(i) => .., Err(i) if .. => .., Err(i) => .. }` as an if-chain
+// on `int pos = Collections.binarySearch(v, x);`, where a found `i` is `pos` and a missing one
+// `-pos - 1`.
+pub(crate) fn lower_search_match(cx: &mut Cx, m: &ast::MatchExpr, dest: &super::super::stmt::Dest, out: &mut Vec<Stmt>) -> bool {
+    let Some(scrut) = m.expr() else { return false };
+    if !plain_search_use(cx, &scrut) {
+        return false;
+    }
+    let (Some(call), Some(arms)) = (search_call(cx, &scrut), search_arms(m)) else { return false };
+    let line = cx.line(m.syntax());
+    let Some(search) = search_expr(cx, &call, out) else { return false };
+    let base = if arms.iter().any(|(_, b, _)| b.as_deref() == Some("pos")) { "index" } else { "pos" };
+    let pos = push_local(cx, line, "int".into(), Some(search), out, base);
+    let missing = format!("-{pos} - 1");
+    // `Ok(_) => {}` does nothing: drop it, and keep the Ok/Err test on the arms after it.
+    let is_empty = |a: &ast::MatchArm| {
+        a.guard().is_none()
+            && matches!(a.expr(), Some(ast::Expr::BlockExpr(b)) if b.stmt_list().is_some_and(|l| l.statements().next().is_none() && l.tail_expr().is_none()))
+    };
+    let dropped = matches!(dest, super::super::stmt::Dest::Discard) && arms.iter().any(|(_, _, a)| is_empty(a));
+    let mut kept = Vec::new();
+    // Whether a kept unguarded arm before this one already took every found / missing position.
+    let (mut found_done, mut missing_done) = (false, false);
+    for (ok, bind, arm) in &arms {
+        if dropped && is_empty(arm) {
+            continue;
+        }
+        let side = match ok {
+            Some(true) if !missing_done => Some(true),
+            Some(false) if !found_done => Some(false),
+            _ => None,
+        };
+        if arm.guard().is_none() {
+            match ok {
+                Some(true) => found_done = true,
+                Some(false) => missing_done = true,
+                None => {}
+            }
+        }
+        kept.push((side, *ok, bind.clone(), arm.clone()));
+    }
+    let mut els: Option<Box<Stmt>> = None;
+    let n = kept.len();
+    for (i, (side, ok, bind, arm)) in kept.iter().enumerate().rev() {
+        let aline = cx.line(arm.syntax());
+        cx.push_scope();
+        let mut stmts = Vec::new();
+        if let Some(b) = bind {
+            match ok {
+                Some(true) => cx.declare_as(b, &pos),
+                // With a guard the guard reads it too: spell it out; otherwise name it.
+                _ if arm.guard().is_some() => cx.declare_as(b, &format!("({missing})")),
+                _ => {
+                    let java = cx.declare(b);
+                    stmts.push(Stmt::new(
+                        aline,
+                        StmtKind::Local { ty: "int".into(), name: java, init: Some(Expr::raw(missing.clone())) },
+                    ));
+                }
+            }
+        }
+        let mut conds = Vec::new();
+        // rustc checked exhaustiveness: the last arm needs no test, unless an arm was dropped.
+        if i + 1 < n || arm.guard().is_some() || dropped {
+            if let Some(found) = side {
+                conds.push(Expr::bin(Expr::name(&pos), if *found { ">=" } else { "<" }, Expr::raw("0")));
+            }
+            if let Some(g) = arm.guard().and_then(|g| g.condition()) {
+                conds.push(expr::lower_expr(cx, &g, &mut Vec::new()));
+            }
+        }
+        let close_line = match arm.expr() {
+            Some(b) => {
+                super::super::stmt::lower_to_dest(cx, &b, dest, &mut stmts);
+                // A block arm is the branch's own block.
+                if let Some(Stmt { kind: StmtKind::Block(_), .. }) = stmts.last()
+                    && let Some(Stmt { kind: StmtKind::Block(inner), .. }) = stmts.pop()
+                {
+                    stmts.extend(inner.stmts);
+                }
+                cx.end_line(b.syntax())
+            }
+            None => aline,
+        };
+        cx.pop_scope();
+        let cond = conds.into_iter().reduce(|a, b| Expr::bin(a, "&&", b));
+        let empty = stmts.iter().all(|s| matches!(&s.kind, StmtKind::Block(b) if b.stmts.is_empty()));
+        els = Some(Box::new(match cond {
+            Some(cond) => Stmt::new(
+                aline,
+                StmtKind::If { cond, then: crate::jir::Block { stmts, close_line }, els: els.take() },
+            ),
+            None if empty && els.is_none() => continue,
+            None => Stmt::new(aline, StmtKind::Block(crate::jir::Block { stmts, close_line })),
+        }));
+    }
+    if let Some(e) = els {
+        out.push(*e);
+    }
+    true
 }

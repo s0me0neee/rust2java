@@ -798,6 +798,13 @@ pub fn lower_match_stmt(cx: &mut Cx, m: &ast::MatchExpr, dest: &Dest, out: &mut 
         return;
     }
     let scrut_ty = cx.ty(&scrut);
+    let search_dest = match dest {
+        Dest::Return if cx.ret_ty.as_ref().is_none_or(Ty::is_unit) => Dest::Discard,
+        d => d.clone(),
+    };
+    if super::std_map::coll::lower_search_match(cx, m, &search_dest, out) {
+        return;
+    }
     if crate::mode::throws()
         && matches!(scrut_ty.strip_refs(), Ty::Result(..))
         && super::throws::lower_match(cx, m, dest, out)
