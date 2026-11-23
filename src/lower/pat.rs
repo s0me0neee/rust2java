@@ -1029,6 +1029,17 @@ fn lower_chain(
             p => vec![(p, arm)],
         })
         .collect();
+    chain_over(cx, value, &alts, dest, out);
+}
+
+// The if/else chain testing `value` against each `(pattern, arm)`; the last is taken as is.
+pub(super) fn chain_over(
+    cx: &mut Cx,
+    value: Expr,
+    alts: &[(Option<ast::Pat>, &ast::MatchArm)],
+    dest: &Dest,
+    out: &mut Vec<Stmt>,
+) {
     let mut els: Option<Box<Stmt>> = None;
     for (i, (pat, arm)) in alts.iter().enumerate().rev() {
         let aline = cx.line(arm.syntax());
@@ -1062,7 +1073,13 @@ fn lower_chain(
             None => aline,
         };
         cx.pop_scope();
-        els = Some(match and(conds) {
+        let cond = and(conds);
+        // A final `_ => {}` adds nothing: no `else { }`.
+        let empty = stmts.iter().all(|s| matches!(&s.kind, StmtKind::Block(b) if b.stmts.is_empty()));
+        if cond.is_none() && empty && els.is_none() {
+            continue;
+        }
+        els = Some(match cond {
             Some(cond) => Box::new(Stmt::new(
                 aline,
                 StmtKind::If {

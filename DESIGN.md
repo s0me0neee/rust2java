@@ -874,7 +874,10 @@ Implemented (`-s`/`--simple`; `crate::mode` holds the flag because `Ty::java()` 
 - **Entry point.** The Rust `main` is `public static void main(String[] args)` (`argv` when the program has its own `args`). No wrapper, no exit-code mapping, no big-stack thread. `env::args()` still reads an `ARGS` field set on entry.
 - **`Result` as exceptions** (`lower/throws.rs`). A pre-pass decides per file. When every `Result` is returned, `?`-ed, unwrapped, matched (`Ok(x)`/`Err(e)`/`_` arms) or tested with `if let`, the file is in throws mode:
   - Functions return `T`; `Ok(x)` is `x`; `Err(e)` in return position and `Err(e)?` are `throw`.
-  - `?`, `unwrap`, `expect` and `map_err` disappear; `unwrap_or*`, `ok`, `is_ok`/`is_err`, `match` and `if let` become `try`/`catch`.
+  - `?`, `unwrap` and `expect` disappear; `unwrap_or*`, `ok`, `is_ok`/`is_err`, `match` and `if let` become `try`/`catch`.
+  - A `match` may have several `Ok(..)` arms with any inner pattern or guard (`Ok(Some(msg))`, `Ok((name, v))`, `Ok(n) if n > 10`): the try block binds the value and tests it with the usual if-chain. The one `Err(e)` arm (or a `_` after an unguarded `Ok(x)`) is the catch block. A block arm ending either block is spliced into it.
+  - `r.map_err(|e| f(e))` is `try { v = r; } catch (X e) { throw <f(e)>; }`, so the converted error travels on.
+  - `let bal = m.get_mut(&k).ok_or(err)?;` (a map-slot alias) is `if (!m.containsKey(k)) throw ..;`.
   - Parsing calls the Java parser directly (`Integer.parseInt`). `ok_or`/`ok_or_else` are `orElseThrow`. Stdin reads wrap `IOException` in `UncheckedIOException`, and `lines()` items are plain Strings.
   - Exceptions: `RuntimeException(msg)` for string errors, `NumberFormatException` for parse errors, `UncheckedIOException` for I/O. A user error type `AppError` gets a generated `AppErrorException` carrying the value (message = its Display), so a `catch` reads it back as `ex.error`. `?` that converts between error types with `From` keeps the file on Result values. Other error values are thrown as `RuntimeException(String.valueOf(e))`.
   - Otherwise the file keeps exact-mode `Result` values and a warning names the first use that blocked it (a stored Result, `binary_search`, `Debug` of a Result, ...).

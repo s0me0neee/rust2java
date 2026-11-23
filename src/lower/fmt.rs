@@ -1200,6 +1200,10 @@ fn std_error_name(ty: &Ty) -> Option<&str> {
 }
 
 fn parse_error_text(v: Expr) -> Expr {
+    // Throws mode only meets these errors as caught `NumberFormatException`s.
+    if crate::mode::throws() && matches!(v, Expr::Name(_)) {
+        return Expr::call(v, "getMessage", vec![]);
+    }
     Expr::call(
         Expr::Cast("NumberFormatException".into(), Box::new(v)),
         "getMessage",

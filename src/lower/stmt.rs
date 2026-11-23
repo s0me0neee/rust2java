@@ -566,11 +566,39 @@ fn lower_slot_let(
         .and_then(|o| o.arg_list())
         .and_then(|a| a.args().next());
     let line = cx.line(l.syntax());
-    if checked {
-        let _ = expr::lower_expr(cx, &init, out);
+    // Throws mode: `m.get_mut(&k).ok_or(e)?` is `if (!m.containsKey(k)) throw ..;`.
+    let missing = match super::strip_parens(&init) {
+        ast::Expr::TryExpr(t) if crate::mode::throws() => match t.expr().map(|e| super::strip_parens(&e)) {
+            Some(ast::Expr::MethodCallExpr(e)) => {
+                let arg = e.arg_list().and_then(|a| a.args().next());
+                match (super::iter::method_name(&e).as_str(), arg) {
+                    ("ok_or", Some(a)) => Some(a),
+                    ("ok_or_else", Some(ast::Expr::ClosureExpr(c))) => c.body(),
+                    _ => None,
+                }
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    if checked && missing.is_none() {
+        let check = expr::lower_expr(cx, &init, out);
+        push_discard(out, line, check);
     }
     let map = super::pat::place(cx, &map_ast, out);
     let key = super::pat::place(cx, &key_ast, out);
+    if let Some(payload) = missing {
+        let mut then = Vec::new();
+        super::throws::push_throw(cx, &payload, line, &mut then);
+        out.push(Stmt::new(
+            line,
+            StmtKind::If {
+                cond: Expr::Unary("!", Box::new(Expr::call(map.clone(), "containsKey", vec![key.clone()]))),
+                then: Block { stmts: then, close_line: line },
+                els: None,
+            },
+        ));
+    }
     let ensure = match fill {
         Some("or_insert") => {
             let Some(v) = arg else { return false };

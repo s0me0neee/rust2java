@@ -415,25 +415,45 @@ fn simple_result_pat(p: &ast::Pat) -> Option<(&'static str, Option<ast::IdentPat
     }
 }
 
-// One Ok arm and one Err (or `_`) arm, no guards.
+// `Ok(..)` arms (any inner pattern, guards allowed) and one plain `Err(e)` / `_` arm.
 fn match_on_result_ok(m: &ast::MatchExpr) -> bool {
     result_arms(m).is_some()
 }
 
-fn result_arms(m: &ast::MatchExpr) -> Option<(ast::MatchArm, Option<ast::MatchArm>)> {
+fn result_arms(m: &ast::MatchExpr) -> Option<(Vec<ast::MatchArm>, Option<ast::MatchArm>)> {
     let arms: Vec<ast::MatchArm> = m.match_arm_list()?.arms().collect();
-    let (mut ok, mut err) = (None, None);
+    let (mut ok, mut err) = (Vec::new(), None);
+    // Whether an unguarded `Ok(x)` / `Ok(_)` already takes every Ok value.
+    let mut ok_total = false;
     for a in arms {
-        if a.guard().is_some() {
-            return None;
+        let pat = a.pat()?;
+        if let Some((which, _)) = simple_result_pat(&pat)
+            && which != "Ok"
+        {
+            // `_` would also take unmatched Ok values, which the catch block can't see.
+            let err_only = which == "Err" || ok_total;
+            if a.guard().is_some() || err.is_some() || !err_only {
+                return None;
+            }
+            err = Some(a);
+            continue;
         }
-        match simple_result_pat(&a.pat()?)?.0 {
-            "Ok" if ok.is_none() => ok = Some(a),
-            "Err" | "_" if err.is_none() => err = Some(a),
-            _ => return None,
-        }
+        ok_pat_inner(&pat)?;
+        ok_total |= a.guard().is_none() && simple_result_pat(&pat).is_some();
+        ok.push(a);
     }
-    Some((ok?, err))
+    (!ok.is_empty()).then_some((ok, err))
+}
+
+// The pattern inside `Ok(p)`.
+fn ok_pat_inner(p: &ast::Pat) -> Option<ast::Pat> {
+    let ast::Pat::TupleStructPat(tp) = p else { return None };
+    if tp.path()?.segment()?.name_ref()?.text() != "Ok" {
+        return None;
+    }
+    let mut fields = tp.fields();
+    let f = fields.next()?;
+    fields.next().is_none().then_some(f)
 }
 
 // The Java exception an `Err` of this type travels as.
@@ -555,10 +575,26 @@ fn arm_dest(cx: &Cx, dest: &Dest) -> Dest {
 }
 
 // try { <ok binding> = scrut; ok_body } catch (X e) { err_body }
+// A block arm ending the try or catch block is that block's own statements (nothing follows it).
+fn flatten_tail_block(stmts: &mut Vec<Stmt>) {
+    if let Some(Stmt { kind: StmtKind::Block(_), .. }) = stmts.last()
+        && let Some(Stmt { kind: StmtKind::Block(b), .. }) = stmts.pop()
+    {
+        stmts.extend(b.stmts);
+    }
+}
+
+// What the try block does with the Ok value: bind it to one name, or test it against `Ok(..)` arms.
+enum OkValue<'a> {
+    Bind(Option<ast::IdentPat>),
+    Arms(&'a [(Option<ast::Pat>, &'a ast::MatchArm)], &'a Dest),
+}
+
+#[allow(clippy::too_many_arguments)]
 fn lower_try_catch(
     cx: &mut Cx,
     scrut: &ast::Expr,
-    ok_bind: Option<ast::IdentPat>,
+    ok_bind: OkValue,
     ok_body: &dyn Fn(&mut Cx, &mut Vec<Stmt>),
     err_bind: Option<ast::IdentPat>,
     err_body: &dyn Fn(&mut Cx, &mut Vec<Stmt>),
@@ -573,17 +609,60 @@ fn lower_try_catch(
     let taken = cx.method_names.clone();
     cx.push_scope();
     let v = expr::lower_expr(cx, scrut, &mut body);
-    match &ok_bind {
-        Some(ip) => super::pat::bind_pattern(cx, &ast::Pat::IdentPat(ip.clone()), v, &mut body),
-        None => stmt::push_discard(&mut body, line, v),
+    match ok_bind {
+        OkValue::Bind(Some(ip)) => super::pat::bind_pattern(cx, &ast::Pat::IdentPat(ip), v, &mut body),
+        OkValue::Bind(None) => stmt::push_discard(&mut body, line, v),
+        OkValue::Arms(arms, dest) => {
+            let ok_ty = match cx.ty(scrut).strip_refs() {
+                Ty::Result(ok, _) => (**ok).clone(),
+                t => t.clone(),
+            };
+            let value = cx.fresh("value");
+            body.push(Stmt::new(
+                line,
+                StmtKind::Local { ty: stmt::decl_type_explicit(&ok_ty), name: value.clone(), init: Some(v) },
+            ));
+            super::pat::chain_over(cx, Expr::name(value), arms, dest, &mut body);
+            flatten_tail_block(&mut body);
+        }
     }
     ok_body(cx, &mut body);
     cx.pop_scope();
     cx.method_names = taken.clone();
     let mut handler = Vec::new();
     cx.push_scope();
+    let decl = catch_decl(cx, err_bind, &err, &class, line, &mut handler);
+    err_body(cx, &mut handler);
+    flatten_tail_block(&mut handler);
+    cx.pop_scope();
+    cx.method_names = taken;
+    out.push(Stmt::new(
+        line,
+        StmtKind::Try {
+            body: Block {
+                stmts: body,
+                close_line,
+            },
+            decl,
+            handler: Block {
+                stmts: handler,
+                close_line,
+            },
+        },
+    ));
+}
+
+// The catch clause for an error bound as `err_bind`, reading the error value back when needed.
+fn catch_decl(
+    cx: &mut Cx,
+    err_bind: Option<ast::IdentPat>,
+    err: &Ty,
+    class: &str,
+    line: u32,
+    handler: &mut Vec<Stmt>,
+) -> String {
     let rust_name = err_bind.as_ref().and_then(|ip| ip.name()).map(|n| n.text().to_string());
-    let decl = match (&rust_name, err.strip_refs()) {
+    match (&rust_name, err.strip_refs()) {
         (Some(n), Ty::Str) => {
             let ex = cx.fresh_param("ex");
             let java = cx.declare(n);
@@ -612,24 +691,61 @@ fn lower_try_catch(
         }
         (Some(n), _) => format!("{class} {}", cx.declare(n)),
         (None, _) => format!("{class} {}", cx.fresh_param("e")),
+    }
+}
+
+// `r.map_err(|e| f(e))`: `try { v = r; } catch (X e) { throw <f(e)>; }`, so the converted error
+// is what travels on. None for a unit Ok value or a closure this can't bind.
+fn map_err_rethrow(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    recv_ast: &ast::Expr,
+    recv: Expr,
+    ok_ty: &Ty,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) -> Option<Expr> {
+    if ok_ty.is_unit() || !ok_ty.is_nameable() {
+        return None;
+    }
+    let ast::Expr::ClosureExpr(c) = strip_parens(&m.arg_list()?.args().next()?) else {
+        return None;
     };
-    err_body(cx, &mut handler);
+    let bind = match c.param_list()?.params().next()?.pat()? {
+        ast::Pat::IdentPat(ip) if ip.pat().is_none() => Some(ip),
+        ast::Pat::WildcardPat(_) => None,
+        _ => return None,
+    };
+    let body = c.body()?;
+    let target = m
+        .syntax()
+        .parent()
+        .filter(|p| ast::TryExpr::can_cast(p.kind()))
+        .unwrap_or_else(|| m.syntax().clone());
+    let var = cx.take_let_target(&target).unwrap_or_else(|| cx.fresh("value"));
+    out.push(Stmt::new(
+        line,
+        StmtKind::Local { ty: stmt::decl_type_explicit(ok_ty), name: var.clone(), init: None },
+    ));
+    let err = err_ty(cx, recv_ast);
+    let class = exception_class(cx, &err);
+    let taken = cx.method_names.clone();
+    cx.push_scope();
+    let mut handler = Vec::new();
+    let decl = catch_decl(cx, bind, &err, &class, line, &mut handler);
+    push_throw(cx, &body, line, &mut handler);
     cx.pop_scope();
     cx.method_names = taken;
+    let assign = Stmt::new(line, StmtKind::Expr(Expr::Assign(Box::new(Expr::name(&var)), "=", Box::new(recv))));
     out.push(Stmt::new(
         line,
         StmtKind::Try {
-            body: Block {
-                stmts: body,
-                close_line,
-            },
+            body: Block { stmts: vec![assign], close_line: line },
             decl,
-            handler: Block {
-                stmts: handler,
-                close_line,
-            },
+            handler: Block { stmts: handler, close_line: line },
         },
     ));
+    Some(Expr::name(var))
 }
 
 // Result methods on an erased Result (`recv` is the Ok value, or throws).
@@ -648,6 +764,11 @@ pub fn result_method(
         Ty::Result(ok, _) => (**ok).clone(),
         _ => Ty::Other("?".into()),
     };
+    if name == "map_err"
+        && let Some(v) = map_err_rethrow(cx, m, recv_ast, recv.clone(), &ok_ty, line, out)
+    {
+        return Some(v);
+    }
     let (value, fallback) = match name {
         "unwrap" | "expect" | "map_err" => return Some(recv),
         "unwrap_or" => (recv, args.into_iter().next()?),
@@ -760,39 +881,41 @@ fn push_try(
 
 // `match r { Ok(v) => a, Err(e) => b }` as try/catch. False when the shape doesn't fit.
 pub fn lower_match(cx: &mut Cx, m: &ast::MatchExpr, dest: &Dest, out: &mut Vec<Stmt>) -> bool {
-    let (Some(scrut), Some((ok, err))) = (m.expr(), result_arms(m)) else {
+    let (Some(scrut), Some((oks, err))) = (m.expr(), result_arms(m)) else {
         return false;
     };
     let line = cx.line(m.syntax());
     let close = cx.end_line(m.syntax());
     let dest = arm_dest(cx, dest);
-    let ok_bind = ok.pat().and_then(|p| simple_result_pat(&p)).and_then(|(_, b)| b);
     let err_bind = err
         .as_ref()
         .and_then(|a| a.pat())
         .and_then(|p| simple_result_pat(&p))
         .and_then(|(_, b)| b);
-    let ok_expr = ok.expr();
     let err_expr = err.and_then(|a| a.expr());
-    lower_try_catch(
-        cx,
-        &scrut,
-        ok_bind,
-        &|cx, out| {
-            if let Some(e) = &ok_expr {
-                stmt::lower_to_dest(cx, e, &dest, out);
-            }
-        },
-        err_bind,
-        &|cx, out| {
-            if let Some(e) = &err_expr {
-                stmt::lower_to_dest(cx, e, &dest, out);
-            }
-        },
-        line,
-        close,
-        out,
-    );
+    let run_err = |cx: &mut Cx, out: &mut Vec<Stmt>| {
+        if let Some(e) = &err_expr {
+            stmt::lower_to_dest(cx, e, &dest, out);
+        }
+    };
+    // `Ok(Some(x))`, `Ok((a, b))`, guards, several Ok arms: test the value inside the try.
+    let plain = matches!(oks.as_slice(), [a] if a.guard().is_none() && a.pat().and_then(|p| simple_result_pat(&p)).is_some());
+    if !plain {
+        let alts: Vec<(Option<ast::Pat>, &ast::MatchArm)> =
+            oks.iter().map(|a| (a.pat().as_ref().and_then(ok_pat_inner), a)).collect();
+        let ok = OkValue::Arms(&alts, &dest);
+        lower_try_catch(cx, &scrut, ok, &|_, _| {}, err_bind, &run_err, line, close, out);
+        return true;
+    }
+    let ok = oks.into_iter().next().unwrap();
+    let ok_bind = ok.pat().and_then(|p| simple_result_pat(&p)).and_then(|(_, b)| b);
+    let ok_expr = ok.expr();
+    let run_ok = |cx: &mut Cx, out: &mut Vec<Stmt>| {
+        if let Some(e) = &ok_expr {
+            stmt::lower_to_dest(cx, e, &dest, out);
+        }
+    };
+    lower_try_catch(cx, &scrut, OkValue::Bind(ok_bind), &run_ok, err_bind, &run_err, line, close, out);
     true
 }
 
@@ -823,9 +946,9 @@ pub fn lower_if_let(cx: &mut Cx, i: &ast::IfExpr, dest: &Dest, out: &mut Vec<Stm
         None => {}
     };
     if which == "Ok" {
-        lower_try_catch(cx, &scrut, bind, &run_then, None, &run_else, line, close, out);
+        lower_try_catch(cx, &scrut, OkValue::Bind(bind), &run_then, None, &run_else, line, close, out);
     } else {
-        lower_try_catch(cx, &scrut, None, &run_else, bind, &run_then, line, close, out);
+        lower_try_catch(cx, &scrut, OkValue::Bind(None), &run_else, bind, &run_then, line, close, out);
     }
     true
 }
