@@ -186,7 +186,7 @@ fn transpile(args: &Args, target: &Target, project: &frontend::Project) -> Resul
             if lowered.diags.is_empty() {
                 java = javafmt::drop_unused(&java);
             }
-            match javafmt::relayout(&java, &blank) {
+            match javafmt::relayout(&java, &blank, &lowered.hints) {
                 Some(j) => java = javafmt::explicit_imports(&j),
                 None if lowered.diags.is_empty() => {
                     let (l, c) = javafmt::first_error(&java).unwrap_or_default();

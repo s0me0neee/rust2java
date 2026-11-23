@@ -377,6 +377,11 @@ fn int_as(a: Int, b: Int, v: Expr) -> Option<Expr> {
         }
         Int::I64 | Int::U64 | Int::I128 | Int::U128 => match a {
             Int::U16 => Expr::Cast("long".into(), Box::new(masked(v, "0xFFFF", 16))),
+            // Simple mode: no unsigned values, so a plain widening (of the uncast value).
+            Int::U32 | Int::Usize if crate::mode::simple() => match v {
+                Expr::Cast(t, inner) if t == "int" => Expr::Cast("long".into(), inner),
+                v => Expr::Cast("long".into(), Box::new(v)),
+            },
             Int::U32 | Int::Usize => {
                 masked(Expr::Cast("long".into(), Box::new(v)), "0xFFFFFFFFL", 32)
             }

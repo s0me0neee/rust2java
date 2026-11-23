@@ -210,6 +210,20 @@ fn run_from_closure(cx: &Cx, root: &ra_ap_syntax::SyntaxNode, f: ra_ap_hir::Func
     }
 }
 
+// Simple mode: code at `node` may let a checked IOException out (its method declares it), since
+// no lambda runs it.
+fn may_throw_io(cx: &Cx, node: &ra_ap_syntax::SyntaxNode) -> bool {
+    let Some(scope) = cx.enclosing_fn(node) else {
+        return false;
+    };
+    let root = node.ancestors().last().unwrap_or_else(|| scope.clone());
+    crate::mode::simple()
+        && cx.lambda_depth == 0
+        && !ast::Fn::cast(scope)
+            .and_then(|f| cx.sema.to_def(&f))
+            .is_some_and(|f| run_from_closure(cx, &root, f))
+}
+
 // The `read_line` buffer is a local that is otherwise only trimmed, split on whitespace, cleared
 // or read into again, and never captured by a closure.
 fn trimmed_buffer(cx: &Cx, m: &ast::MethodCallExpr) -> bool {
@@ -222,12 +236,7 @@ fn trimmed_buffer(cx: &Cx, m: &ast::MethodCallExpr) -> bool {
     let Some(scope) = cx.enclosing_fn(m.syntax()) else {
         return false;
     };
-    // `readLine` throws IOException, which a lambda calling this function couldn't.
-    let root = m.syntax().ancestors().last().unwrap_or_else(|| scope.clone());
-    if ast::Fn::cast(scope.clone())
-        .and_then(|f| cx.sema.to_def(&f))
-        .is_some_and(|f| run_from_closure(cx, &root, f))
-    {
+    if !may_throw_io(cx, m.syntax()) {
         return false;
     }
     for node in cx.expanded_descendants(&scope) {
@@ -393,13 +402,18 @@ fn read_bytes(cx: &mut Cx, m: &ast::MethodCallExpr, out: &mut Vec<Stmt>) -> Expr
     );
     let e = ast::Expr::MethodCallExpr(m.clone());
     if unwrapped(cx, &e) {
-        push_raw(
-            out,
-            line,
+        // Simple mode lets the IOException out instead (the method declares it).
+        let code = if r == "STDIN" && may_throw_io(cx, m.syntax()) {
+            format!(
+                "byte[] {bytes} = new byte[{place}.size()]; int {count} = Math.max(0, {r}.read({bytes})); \
+                 for (int {i} = 0; {i} < {count}; {i}++) {place}.set({i}, {bytes}[{i}] & 255);"
+            )
+        } else {
             format!(
                 "int {count}; try {{ {read} }} catch (IOException {ex}) {{ throw new UncheckedIOException({ex}); }}"
-            ),
-        );
+            )
+        };
+        push_raw(out, line, code);
         return if unwrap_in_stmt(&e) {
             Expr::raw("null")
         } else {

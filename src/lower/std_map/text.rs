@@ -372,6 +372,21 @@ pub(super) fn lower_small_method(
         "is_whitespace" => c("isWhitespace", vec![recv]),
         "is_control" => c("isISOControl", vec![recv]),
         "is_ascii" => Expr::bin(recv, "<", Expr::raw("128")),
+        // Simple mode assumes ASCII text, where the `Character` tests agree with Rust's.
+        "is_ascii_digit" | "is_ascii_alphabetic" | "is_ascii_alphanumeric" | "is_ascii_whitespace"
+        | "is_ascii_uppercase" | "is_ascii_lowercase"
+            if crate::mode::simple() =>
+        {
+            let f = match name {
+                "is_ascii_digit" => "isDigit",
+                "is_ascii_alphabetic" => "isLetter",
+                "is_ascii_alphanumeric" => "isLetterOrDigit",
+                "is_ascii_whitespace" => "isWhitespace",
+                "is_ascii_uppercase" => "isUpperCase",
+                _ => "isLowerCase",
+            };
+            c(f, vec![recv])
+        }
         "is_ascii_digit" => Expr::bin(
             Expr::bin(recv.clone(), ">=", Expr::raw("'0'")),
             "&&",
@@ -1090,6 +1105,15 @@ pub(super) fn lower_direct_parse(
     match d {
         DirectParse::Identity => args.remove(0),
         DirectParse::Call(f) => Expr::static_call(f, args),
+        // Simple mode skips the range check, like the other integer widths.
+        DirectParse::Bounded(max) if crate::mode::simple() => {
+            let n = Expr::static_call("Integer.parseInt", args);
+            if max == 65535 {
+                Expr::Cast("short".into(), Box::new(n))
+            } else {
+                n
+            }
+        }
         DirectParse::Bounded(max) => {
             let v = cx.fresh("num");
             let call = render(&Expr::static_call("Integer.parseUnsignedInt", args));

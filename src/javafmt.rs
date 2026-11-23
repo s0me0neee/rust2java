@@ -29,9 +29,18 @@ pub fn first_error(src: &str) -> Option<(usize, usize)> {
 // Normal layout: one statement or member per line, 4-space indents, blank lines where the Rust
 // source had them (`blank(l)`: Rust line `l` is empty; exact-mode Java lines are Rust lines).
 // `None` when the input doesn't parse.
-pub fn relayout(src: &str, blank: &dyn Fn(usize) -> bool) -> Option<String> {
+pub fn relayout(src: &str, blank: &dyn Fn(usize) -> bool, hints: &Hints) -> Option<String> {
     let masked = mask_qualified_calls(src)?;
-    relayout_masked(&masked, blank).map(|s| s.replace(MASK, "."))
+    relayout_masked(&masked, blank, hints).map(|s| s.replace(MASK, "."))
+}
+
+// What lowering knows about the locals.
+#[derive(Default)]
+pub struct Hints {
+    // Locals only macro expansions declare, which may be inlined.
+    pub macro_locals: HashSet<String>,
+    // User locals renamed for a clash (Java `s3` -> Rust `s`), restored once the clash is gone.
+    pub renamed_locals: std::collections::HashMap<String, String>,
 }
 
 // tree-sitter-java 0.23 can't parse qualified record patterns (`case Token.Num(var n)`), so
@@ -71,21 +80,31 @@ fn mask_qualified_calls(src: &str) -> Option<String> {
     Some(out)
 }
 
-fn relayout_masked(src: &str, blank: &dyn Fn(usize) -> bool) -> Option<String> {
+fn relayout_masked(src: &str, blank: &dyn Fn(usize) -> bool, hints: &Hints) -> Option<String> {
     let tree = parse(src)?;
     let root = tree.root_node();
     if root.has_error() {
         return None;
     }
+    let assigned = assigned_names(root, src);
+    let uses = ident_uses(root, src);
+    let decl_types = declared_types(root, src);
+    let (mut renames, mut dropped) = copy_renames(root, src, &assigned);
+    let (inlined, gone) = inlines(root, src, &hints.macro_locals, &decl_types, &dropped);
+    dropped.extend(gone);
+    restore_names(root, src, &hints.renamed_locals, &dropped, &inlined, &mut renames);
     let mut f = Fmt {
         src,
         blank,
-        decl_types: declared_types(root, src),
+        inlined,
+        decl_types,
         enum_values_read: reads_value_field(root, src),
         moved: HashSet::new(),
-        assigned: assigned_names(root, src),
-        ident_uses: ident_uses(root, src),
+        assigned,
+        ident_uses: uses,
         throwing: io_throwing(root, src),
+        renames,
+        dropped,
     };
     let mut header = f.header_comments(root);
     f.moved = header.iter().map(|c| c.start_byte()).collect();
@@ -159,6 +178,11 @@ struct Fmt<'a> {
     ident_uses: std::collections::HashMap<String, usize>,
     // Methods that call `readLine()`, directly or through each other: `throws IOException`.
     throwing: HashSet<String>,
+    // Identifier start byte -> new name, and the copies those renames make redundant.
+    renames: std::collections::HashMap<usize, String>,
+    dropped: HashSet<usize>,
+    // Use start byte -> the initializer of the macro local it inlines.
+    inlined: std::collections::HashMap<usize, Node<'a>>,
 }
 
 // Names of methods whose body calls `readLine()` or another such method, outside lambdas.
@@ -174,7 +198,10 @@ fn io_throwing(root: Node, src: &str) -> HashSet<String> {
                 .find(|a| a.kind() == "method_declaration")
                 .and_then(|m| m.child_by_field_name("name"))
         {
-            calls.push((src[m.byte_range()].to_string(), src[name.byte_range()].to_string()));
+            let stdin_read = &src[name.byte_range()] == "read"
+                && n.child_by_field_name("object").is_some_and(|o| &src[o.byte_range()] == "STDIN");
+            let callee = if stdin_read { "readLine" } else { &src[name.byte_range()] };
+            calls.push((src[m.byte_range()].to_string(), callee.to_string()));
         }
         stack.extend(children(n));
     }
@@ -223,6 +250,288 @@ fn mentions(n: Node, src: &str, name: &str) -> bool {
         stack.extend(children(n));
     }
     false
+}
+
+fn idents_named<'t>(n: Node<'t>, src: &str, name: &str) -> Vec<Node<'t>> {
+    let mut out = Vec::new();
+    let mut stack = vec![n];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "identifier" && &src[n.byte_range()] == name {
+            out.push(n);
+        }
+        stack.extend(children(n));
+    }
+    out
+}
+
+fn in_lambda(n: Node, stop: Node) -> bool {
+    let mut cur = n.parent();
+    while let Some(p) = cur {
+        if p == stop {
+            return false;
+        }
+        if matches!(p.kind(), "lambda_expression" | "class_body") {
+            return true;
+        }
+        cur = p.parent();
+    }
+    false
+}
+
+// `T a ...; ..; T b = a;` with `a` used nowhere else: `a` is renamed `b` and the copy goes.
+// Returns identifier start byte -> new name, and the start bytes of the dropped copies.
+fn copy_renames(
+    root: Node,
+    src: &str,
+    assigned: &HashSet<String>,
+) -> (std::collections::HashMap<usize, String>, HashSet<usize>) {
+    let mut renames = std::collections::HashMap::new();
+    let mut dropped = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(block) = stack.pop() {
+        stack.extend(children(block));
+        if block.kind() != "block" {
+            continue;
+        }
+        let stmts: Vec<Node> = children(block).into_iter().filter(|c| c.is_named()).collect();
+        for (q, &copy) in stmts.iter().enumerate() {
+            let Some(d) = single_declarator(copy) else { continue };
+            let (Some(b), Some(a)) = (
+                d.child_by_field_name("name"),
+                d.child_by_field_name("value").filter(|v| v.kind() == "identifier"),
+            ) else {
+                continue;
+            };
+            let (a, b) = (&src[a.byte_range()], &src[b.byte_range()]);
+            let Some(p) = stmts[..q].iter().position(|s| {
+                single_declarator(*s)
+                    .and_then(|d| d.child_by_field_name("name"))
+                    .is_some_and(|n| &src[n.byte_range()] == a)
+            }) else {
+                continue;
+            };
+            let ty = |s: Node| s.child_by_field_name("type").map(|t| &src[t.byte_range()]);
+            let same_type = ty(copy) == Some("var") || ty(copy) == ty(stmts[p]);
+            let uses: Vec<Node> = stmts[p..q].iter().flat_map(|s| idents_named(*s, src, a)).collect();
+            // Every mention is a plain local: none is a field name or a method name.
+            let plain = uses.iter().all(|u| {
+                u.parent().is_none_or(|par| {
+                    par.child_by_field_name("field") != Some(*u)
+                        && !(par.kind() == "method_invocation" && par.child_by_field_name("name") == Some(*u))
+                })
+            });
+            let written = uses.iter().any(|u| {
+                u.parent().is_some_and(|par| {
+                    par.kind() == "update_expression"
+                        || par.kind() == "assignment_expression" && par.child_by_field_name("left") == Some(*u)
+                })
+            });
+            // A lambda captures only effectively final locals, which renaming must not change.
+            let captured_a = uses.iter().any(|u| in_lambda(*u, block));
+            let captured_b = stmts[q + 1..]
+                .iter()
+                .flat_map(|s| idents_named(*s, src, b))
+                .any(|u| in_lambda(u, block));
+            if !same_type
+                || !plain
+                || stmts[p..].iter().map(|s| idents_named(*s, src, a).len()).sum::<usize>() != uses.len() + 1
+                || stmts[p..q].iter().any(|s| mentions(*s, src, b))
+                || written && captured_b
+                || captured_a && assigned.contains(b)
+                || uses.iter().any(|u| renames.contains_key(&u.start_byte()))
+            {
+                continue;
+            }
+            for u in uses {
+                renames.insert(u.start_byte(), b.to_string());
+            }
+            dropped.insert(copy.start_byte());
+        }
+    }
+    (renames, dropped)
+}
+
+// `String s = f(); var n = Integer.parseInt(s);` for a macro's local `s`: `s` is used once, by
+// the next statement, before anything there with an effect, so the call moves into its place.
+// Returns use start byte -> the initializer, and the start bytes of the dropped declarations.
+fn inlines<'t>(
+    root: Node<'t>,
+    src: &str,
+    inlinable: &HashSet<String>,
+    locals: &std::collections::HashMap<String, String>,
+    copies: &HashSet<usize>,
+) -> (std::collections::HashMap<usize, Node<'t>>, HashSet<usize>) {
+    let mut uses = std::collections::HashMap::new();
+    let mut dropped = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(block) = stack.pop() {
+        stack.extend(children(block));
+        if block.kind() != "block" {
+            continue;
+        }
+        let stmts: Vec<Node> = children(block).into_iter().filter(|c| c.is_named()).collect();
+        for (at, pair) in stmts.windows(2).enumerate() {
+            let (decl, next) = (pair[0], pair[1]);
+            let Some(d) = single_declarator(decl) else { continue };
+            let (Some(name), Some(init)) = (d.child_by_field_name("name"), d.child_by_field_name("value"))
+            else {
+                continue;
+            };
+            let name = &src[name.byte_range()];
+            let ty = decl.child_by_field_name("type").map(|t| &src[t.byte_range()]);
+            let primary = matches!(init.kind(), "method_invocation" | "object_creation_expression");
+            let found = idents_named(next, src, name);
+            let later: usize = stmts[at + 2..].iter().map(|s| idents_named(*s, src, name).len()).sum();
+            let ([u], 0) = (found.as_slice(), later) else { continue };
+            if !inlinable.contains(name)
+                || !matches!(ty, Some("String" | "var"))
+                || !primary
+                || copies.contains(&next.start_byte())
+                || !straight_path(*u, next)
+                || !pure_prefix(next, *u, src, locals)
+            {
+                continue;
+            }
+            uses.insert(u.start_byte(), init);
+            dropped.insert(decl.start_byte());
+        }
+    }
+    (uses, dropped)
+}
+
+// `u` runs exactly once when `stmt` runs: not in a lambda, a loop, a `?:` branch or the right of
+// `&&`/`||`, and `stmt` is a plain declaration, expression, return, throw or `if` condition.
+fn straight_path(u: Node, stmt: Node) -> bool {
+    if !matches!(
+        stmt.kind(),
+        "local_variable_declaration" | "expression_statement" | "return_statement"
+            | "throw_statement" | "if_statement"
+    ) {
+        return false;
+    }
+    let mut cur = u;
+    while let Some(p) = cur.parent() {
+        if p == stmt {
+            return stmt.kind() != "if_statement" || p.child_by_field_name("condition") == Some(cur);
+        }
+        let ok = match p.kind() {
+            "ternary_expression" => p.child_by_field_name("condition") == Some(cur),
+            "binary_expression" => {
+                let op = p.child_by_field_name("operator").map(|o| o.kind());
+                !matches!(op, Some("&&" | "||")) || p.child_by_field_name("left") == Some(cur)
+            }
+            "lambda_expression" | "switch_expression" | "class_body" => false,
+            _ => true,
+        };
+        if !ok {
+            return false;
+        }
+        cur = p;
+    }
+    false
+}
+
+// Nothing in `stmt` evaluated before `u` has an effect or reads state a call could change: only
+// literals, locals, class names and their constants come first.
+fn pure_prefix(
+    stmt: Node,
+    u: Node,
+    src: &str,
+    locals: &std::collections::HashMap<String, String>,
+) -> bool {
+    let upper = |n: Node| src[n.byte_range()].starts_with(|c: char| c.is_ascii_uppercase());
+    let mut stack = vec![stmt];
+    while let Some(n) = stack.pop() {
+        if n.start_byte() >= u.start_byte() {
+            continue;
+        }
+        stack.extend(children(n));
+        if n.end_byte() > u.start_byte() {
+            continue;
+        }
+        let parent = n.parent();
+        let field_of = |f: &str| parent.is_some_and(|p| p.child_by_field_name(f) == Some(n));
+        let ok = match n.kind() {
+            "method_invocation" | "object_creation_expression" | "assignment_expression"
+            | "update_expression" | "array_creation_expression" | "lambda_expression" | "this" => false,
+            "field_access" => n.child_by_field_name("object").is_some_and(|o| o.kind() == "identifier" && upper(o)),
+            "identifier" => {
+                field_of("name") || field_of("field") || upper(n) || locals.contains_key(&src[n.byte_range()])
+            }
+            _ => true,
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
+// Per method: a user local renamed for a clash (`s3`) takes its Rust name (`s`) back when nothing
+// printed there still uses that name.
+fn restore_names(
+    root: Node,
+    src: &str,
+    renamed: &std::collections::HashMap<String, String>,
+    dropped: &HashSet<usize>,
+    inlined: &std::collections::HashMap<usize, Node>,
+    renames: &mut std::collections::HashMap<usize, String>,
+) {
+    if renamed.is_empty() {
+        return;
+    }
+    let mut pairs: Vec<(&String, &String)> = renamed.iter().collect();
+    pairs.sort();
+    let mut stack = vec![root];
+    while let Some(m) = stack.pop() {
+        if !matches!(m.kind(), "method_declaration" | "constructor_declaration") {
+            stack.extend(children(m));
+            continue;
+        }
+        let within = |n: Node, outer: Node| outer.start_byte() <= n.start_byte() && n.end_byte() <= outer.end_byte();
+        let inits: Vec<Node> = inlined.values().copied().filter(|i| within(*i, m)).collect();
+        // Identifiers that still print: outside dropped statements, or in an inlined initializer.
+        let mut printed = Vec::new();
+        let mut walk = vec![m];
+        while let Some(n) = walk.pop() {
+            walk.extend(children(n));
+            if n.kind() != "identifier" || inlined.contains_key(&n.start_byte()) {
+                continue;
+            }
+            let mut up = n.parent();
+            let mut in_dropped = false;
+            while let Some(p) = up.filter(|p| *p != m) {
+                let stmt = p.kind() == "local_variable_declaration" || p.kind().ends_with("statement");
+                in_dropped |= stmt && dropped.contains(&p.start_byte());
+                up = p.parent();
+            }
+            if !in_dropped || inits.iter().any(|i| within(n, *i)) {
+                printed.push(n);
+            }
+        }
+        let member = |n: &Node| {
+            n.parent().is_some_and(|p| {
+                p.child_by_field_name("field") == Some(*n)
+                    || p.kind() == "method_invocation" && p.child_by_field_name("name") == Some(*n)
+            })
+        };
+        for (java, rust) in &pairs {
+            let name = |n: &Node| {
+                renames.get(&n.start_byte()).cloned().unwrap_or_else(|| src[n.byte_range()].to_string())
+            };
+            let free = !printed.iter().any(|n| name(n) == **rust);
+            let hits: Vec<usize> = printed
+                .iter()
+                .filter(|n| name(n) == **java && !member(n))
+                .map(|n| n.start_byte())
+                .collect();
+            if free && !hits.is_empty() {
+                for h in hits {
+                    renames.insert(h, rust.to_string());
+                }
+            }
+        }
+    }
 }
 
 // The one declarator of `T x = e;`.
@@ -399,6 +708,14 @@ impl Fmt<'_> {
         if n.kind() == "switch_block_statement_group" {
             return self.case_group(n, ind);
         }
+        if n.kind() == "identifier" {
+            if let Some(name) = self.renames.get(&n.start_byte()) {
+                return name.clone();
+            }
+            if let Some(init) = self.inlined.get(&n.start_byte()) {
+                return self.render(*init, ind);
+            }
+        }
         if n.child_count() == 0 || ATOMS.contains(&n.kind()) {
             return self.text(n).trim_end().to_string();
         }
@@ -462,10 +779,11 @@ impl Fmt<'_> {
         let ty = self.text(n.child_by_field_name("type")?);
         let targs = ty.strip_prefix("List")?;
         let decl = n.child_by_field_name("declarator")?;
-        let name = self.text(decl.child_by_field_name("name")?);
+        let name = self.render(decl.child_by_field_name("name")?, ind);
         let value = decl.child_by_field_name("value")?;
         if !targs.starts_with('<')
-            || self.assigned.contains(name)
+            || self.assigned.contains(self.text(decl.child_by_field_name("name")?))
+            || self.assigned.contains(&name)
             || value.kind() != "object_creation_expression"
             || value.child_by_field_name("type").map(|t| self.text(t)) != Some("ArrayList<>")
             || children(value).iter().any(|c| c.kind() == "class_body")
@@ -553,6 +871,12 @@ impl Fmt<'_> {
             ("Double", "parseDouble"),
             ("Integer", "parseUnsignedInt"),
             ("Long", "parseUnsignedLong"),
+            ("Character", "isDigit"),
+            ("Character", "isLetter"),
+            ("Character", "isLetterOrDigit"),
+            ("Character", "isWhitespace"),
+            ("Character", "isUpperCase"),
+            ("Character", "isLowerCase"),
         ];
         (parsers.contains(&(class, method))
             && args.named_child_count() == 1
@@ -674,7 +998,7 @@ impl Fmt<'_> {
         let mut prev: Option<Node> = None;
         let mut skip = None;
         for (at, &c) in items.iter().enumerate() {
-            if skip == Some(at) {
+            if skip == Some(at) || self.dropped.contains(&c.start_byte()) {
                 continue;
             }
             // `x = "";` right before `x = e;` is never read.
@@ -736,6 +1060,7 @@ impl Fmt<'_> {
             return None;
         }
         let ty = self.text(decl.child_by_field_name("type")?);
+        let name = self.render(d.child_by_field_name("name")?, ind);
         // `var` would take the literal's type; keep the declared one.
         Some(format!("{ty} {name} = {};", self.render(right, ind)))
     }
@@ -761,7 +1086,7 @@ impl Fmt<'_> {
         Some(format!(
             "{} {} = {}.listIterator();",
             self.text(iter.child_by_field_name("type")?),
-            self.text(id.child_by_field_name("name")?),
+            self.render(id.child_by_field_name("name")?, ind),
             self.render(init, ind)
         ))
     }
@@ -1125,7 +1450,7 @@ mod tests {
     use super::*;
 
     fn layout(src: &str) -> String {
-        relayout(src, &|_| false).unwrap()
+        relayout(src, &|_| false, &Hints::default()).unwrap()
     }
 
     #[test]

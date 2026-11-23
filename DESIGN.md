@@ -890,21 +890,30 @@ Implemented (`-s`/`--simple`; `crate::mode` holds the flag because `Ty::java()` 
   - `read_line(&mut buf)` into a buffer that is otherwise only trimmed, split on whitespace or cleared is `buf = STDIN.readLine();`: the lost `\n` can't show.
   - Methods calling `readLine()`, and their callers, declare `throws IOException`. A function that may run inside a closure keeps the exact form, since a lambda can't throw a checked exception.
   - A pulled `lines()` iterator is `ListIterator<String> lines = STDIN.lines().toList().listIterator();` when nothing else reads the backing list.
+  - `stdin.read(&mut buf)` is `int n = Math.max(0, STDIN.read(bytes));` and a copy into `buf`, with no `try`: the method declares `throws IOException`, under the same closure rule.
 - **Literals.** `for x in [a, b]` and `&[a, b]` / `&vec![..]` arguments are `List.of(a, b)`. `String x = ""; x = e;` is `String x = e;`, and a literal store the next statement overwrites is dropped.
 - **Names and locals.** `_` loop counters are `i`, `j`, `k`. `var` when the initializer is `new X<..>(..)` of the declared class, or a parse call; `List<T> v = new ArrayList<>()` is `var v = new ArrayList<T>()` when `v` is never reassigned.
 - **Cleanup post-pass** (`javafmt.rs`, on the exact-layout text before re-layout):
   - Generated methods nothing calls are dropped (`debug`, `clone`, `partial_cmp`, the `debug_*` helpers, the embedded `Result` type's methods), with liveness followed through calls between them.
   - Redundant parentheses (around primaries, and in argument, initializer, return and assignment slots), casts of a local to its own declared type, `String.valueOf(x)` inside a string concatenation, and enum discriminants nothing reads (`Small(0)`, `final int value`).
   - The file's leading comment (set off by a blank line) goes above `class Main`.
-  - JDK spellings: `Arrays.asList(a)` for `Arrays.stream(a).toList()`, `new ArrayList<>(..)` for a `toCollection(ArrayList::new)` of an array or a typed collection, `"c"` for `String.valueOf('c')`, `Integer::parseInt` for `s -> Integer.parseInt(s)`, and `Optional.empty()` without a type witness where a declared type, assignment or method `return` gives it.
-- **Parsing and splitting.** `u32`/`u64` parse with `Integer.parseInt`/`Long.parseLong`. In both modes a literal separator with no regex metacharacters is its own regex: `s.split(",", -1)`, not `Pattern.quote(",")`.
+  - JDK spellings: `Arrays.asList(a)` for `Arrays.stream(a).toList()`, `new ArrayList<>(..)` for a `toCollection(ArrayList::new)` of an array or a typed collection, `"c"` for `String.valueOf('c')`, `Integer::parseInt` / `Character::isDigit` for the one-argument lambdas, and `Optional.empty()` without a type witness where a declared type, assignment or method `return` gives it.
+  - Temporaries:
+    - `T a = ..; ..; T b = a;` with `a` used nowhere else renames `a` to `b` and drops the copy: `int n = Math.max(0, STDIN.read(bytes));`.
+    - A `String`/`var` local that a macro expansion declares (lowering passes the names) and the next statement uses once is inlined into it: `var n = Integer.parseInt(read_token());`. The use must run exactly once (no lambda, loop, `?:` branch or `&&`/`||` right side), and nothing before it in the statement may call a method or read a non-constant field.
+    - A user local renamed for a clash (`s3` for Rust `s`) gets its Rust name back once no printed code in its method uses that name.
+- **Parsing, splitting, characters, casts.**
+  - `u32`/`u64` parse with `Integer.parseInt`/`Long.parseLong`, and `u16` is `(short) Integer.parseInt(s)`, with no range check.
+  - In both modes a literal separator with no regex metacharacters is its own regex: `s.split(",", -1)`, not `Pattern.quote(",")`.
+  - `is_ascii_digit`/`_alphabetic`/`_alphanumeric`/`_whitespace`/`_uppercase`/`_lowercase` are the `Character` tests (the same on ASCII text).
+  - `x as u64` from `u32`/`usize` is a plain `(long)` widening, without the unsigned mask.
 - **Tests.**
   - `SIMPLE=1 cargo nextest run --test cases --no-capture`: every case must compile and fail or succeed like Rust (`tests/cases/simple-skip` lists exceptions). Stdout differences are counted, not failures: 243/243 pass, and 119 print differently, mostly `{:?}` text.
-  - `tests/simple/*.rs` are golden files: the §22.2 program, user errors, lookups (records, null lookups, heap loop), and counters (`&mut` parameters). Each also prints what rustc prints.
+  - `tests/simple/*.rs` are golden files: the §22.2 program, user errors, lookups (records, null lookups, heap loop), counters (`&mut` parameters) and a contest-style `read_token!` reader. Each also prints what rustc prints.
   - All 22 Codeforces programs print the same output in simple mode.
 
 Not yet:
 - Loops for other index-heavy chains (`windows`, `zip`, `enumerate().map(..)` still go through `IntStream`).
 - Named records for repeated tuple types.
 - `&mut String` parameters as `StringBuilder`.
-- Inlining single-use temporaries (§22.6 pass 5).
+- Inlining single-use temporaries the Rust source names itself, or that aren't `String`/`var` (the post-pass can't see whether the declared type converts the value).

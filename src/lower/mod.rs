@@ -122,6 +122,11 @@ pub struct Cx<'a, 'db> {
     pub returned_params: HashSet<ra_ap_hir::Local<'db>>,
     // Every identifier in the Rust file: generated names never take one of these.
     file_idents: HashSet<String>,
+    // Java names of `let` locals declared inside macro expansions, and outside them.
+    pub macro_locals: HashSet<String>,
+    pub user_locals: HashSet<String>,
+    // User locals renamed for a clash (`s3` for Rust `s`): Java name, Rust name.
+    pub renamed_locals: Vec<(String, String)>,
 }
 
 // Per-method state saved around lowering a nested method (a macro method generated mid-body).
@@ -175,6 +180,8 @@ pub struct Lowered {
     pub needs_result: bool,
     // 1-based Rust lines that are empty (simple mode keeps them as blank lines).
     pub blank_lines: HashSet<u32>,
+    // Simple mode: macro locals to inline, and clash renames to undo.
+    pub hints: crate::javafmt::Hints,
 }
 
 // Names each non-std dependency once, at its first use, so later per-call errors have a cause.
@@ -267,6 +274,9 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         debug_to_string: HashSet::new(),
         mut_returns: HashMap::new(),
         returned_params: HashSet::new(),
+        macro_locals: HashSet::new(),
+        user_locals: HashSet::new(),
+        renamed_locals: Vec::new(),
         // Names a later Rust binding (or an unqualified const/static) will claim; function, type
         // and field names live in other Java namespaces.
         file_idents: file
@@ -330,7 +340,18 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         imports: cx.imports.iter().cloned().collect(),
         class,
     };
+    let mut renamed_locals: HashMap<String, Option<String>> = HashMap::new();
+    for (java, rust) in &cx.renamed_locals {
+        let e = renamed_locals.entry(java.clone()).or_insert(Some(rust.clone()));
+        if e.as_ref() != Some(rust) {
+            *e = None;
+        }
+    }
     Lowered {
+        hints: crate::javafmt::Hints {
+            macro_locals: cx.macro_locals.difference(&cx.user_locals).cloned().collect(),
+            renamed_locals: renamed_locals.into_iter().filter_map(|(j, r)| Some((j, r?))).collect(),
+        },
         file: jf,
         comments,
         trailer: cx.file_trailer.join(" "),

@@ -394,6 +394,16 @@ pub fn lower_let(cx: &mut Cx, l: &ast::LetStmt, out: &mut Vec<Stmt>) {
             };
             cx.read_only_literal = false;
             let name = cx.declare(&rust_name);
+            let in_macro = !ast::SourceFile::can_cast(l.syntax().ancestors().last().map_or(l.syntax().kind(), |r| r.kind()));
+            if in_macro {
+                cx.macro_locals.insert(name.clone());
+            } else {
+                cx.user_locals.insert(name.clone());
+                let plain = super::escape_keyword(&rust_name);
+                if name != plain {
+                    cx.renamed_locals.push((name.clone(), plain));
+                }
+            }
             let jty = if ip.mut_token().is_none() && var_infers(&jty, &e) {
                 "var".to_string()
             } else {
