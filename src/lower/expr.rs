@@ -415,6 +415,11 @@ pub fn lower_path_expr(cx: &mut Cx, p: &ast::PathExpr) -> Expr {
                     super::ElemAliasKind::Entry => {
                         Expr::call(Expr::name(list.clone()), "getValue", vec![])
                     }
+                    super::ElemAliasKind::Char => Expr::call(
+                        Expr::name(list.clone()),
+                        "charAt",
+                        vec![Expr::name(idx.clone())],
+                    ),
                     _ => Expr::call(
                         Expr::name(list.clone()),
                         "get",
@@ -890,6 +895,7 @@ pub fn place_assign(
             super::ElemAliasKind::Entry => Expr::call(list, "setValue", vec![value]),
             super::ElemAliasKind::Map => Expr::call(list, "put", vec![idx, value]),
             super::ElemAliasKind::List => Expr::call(list, "set", vec![idx, value]),
+            super::ElemAliasKind::Char => cx.unsupported(lhs.syntax(), "assignment to a string's char"),
         };
     }
     match lhs {
@@ -1619,7 +1625,13 @@ fn lower_closure_inner(cx: &mut Cx, c: &ast::ClosureExpr) -> Expr {
     cx.push_scope();
     let mut params = Vec::new();
     let mut prelude = Vec::new();
-    if let Some(pl) = c.param_list() {
+    let indexed = cx
+        .indexed_params
+        .take()
+        .and_then(|items| super::indexed::closure_params(cx, c, &items));
+    if let Some(idx) = indexed {
+        params.push(idx);
+    } else if let Some(pl) = c.param_list() {
         for p in pl.params() {
             match p.pat().map(strip_ref_pats) {
                 Some(ast::Pat::IdentPat(ip)) if ip.pat().is_none() => {

@@ -143,65 +143,32 @@ fn lower_for_kind(
         return ForStmt::Counted { header, body };
     }
 
-    // `for (i, x) in v.iter().enumerate()`: index loop over the list.
-    if let ast::Pat::TuplePat(tp) = p
-        && tp.fields().count() == 2
-        && let Some(list_ast) = enumerate_of_list(cx, iterable)
+    // `for (i, x) in v.iter().enumerate()` / `s.chars().enumerate()`, `for (a, b) in
+    // v.iter().zip(w.iter().skip(1))`, `for w in v.windows(k)` / `v.chunks(k)`: index loops.
+    if let Some(shape) = super::indexed::shape(cx, iterable)
+        && let Some(fields) = super::indexed::pattern_fields(p, &shape)
     {
-        let fields: Vec<ast::Pat> = tp.fields().collect();
-        let list = expr::lower_expr(cx, &list_ast, out);
-        let list_ty = cx.ty(&list_ast);
-        let list = ensure_simple(cx, list, &list_ty, line, out);
-        let plain_idx = simple_ident(&fields[0])
+        let ix = super::indexed::lower(cx, &shape, line, out);
+        // The user's own index name when it's a plain, uncaptured binding.
+        let plain_idx = matches!(ix.items[0], super::indexed::Item::Index)
+            .then(|| simple_ident(&fields[0]))
+            .flatten()
             .filter(|_| !matches!(&fields[0], ast::Pat::IdentPat(ip) if cx.binding_captured(ip)));
         let idx = match &plain_idx {
             Some(n) => cx.declare(n),
+            None if crate::mode::simple() => cx
+                .claim_first(&["i", "j", "k", "l", "m", "n"])
+                .unwrap_or_else(|| cx.fresh("i")),
             None => cx.fresh("i"),
         };
-        let header = format!("int {idx} = 0; {idx} < {}.size(); {idx}++", render(&list));
+        let header = ix.header(&idx);
         let mut binds = Vec::new();
-        if plain_idx.is_none() {
-            super::pat::bind_pattern(cx, &fields[0], Expr::name(idx.clone()), &mut binds);
+        for (field, value) in fields.iter().zip(super::indexed::item_exprs(&ix, &idx)) {
+            if plain_idx.is_some() && matches!(value, Expr::Name(ref n) if *n == idx) {
+                continue;
+            }
+            super::pat::bind_pattern(cx, field, value, &mut binds);
         }
-        super::pat::bind_pattern(
-            cx,
-            &fields[1],
-            Expr::call(list, "get", vec![Expr::name(idx)]),
-            &mut binds,
-        );
-        let mut body = loop_body(cx, f);
-        binds.append(&mut body.stmts);
-        body.stmts = binds;
-        return ForStmt::Counted { header, body };
-    }
-
-    // `for (a, b) in v.iter().zip(w)` over lists: index loop up to the shorter list.
-    if let ast::Pat::TuplePat(tp) = p
-        && tp.fields().count() == 2
-        && let Some((left_ast, right_ast)) = zip_lists(cx, iterable)
-    {
-        let fields: Vec<ast::Pat> = tp.fields().collect();
-        let (lt, rt) = (cx.ty(&left_ast), cx.ty(&right_ast));
-        let left = expr::lower_expr(cx, &left_ast, out);
-        let left = ensure_simple(cx, left, &lt, line, out);
-        let right = expr::lower_expr(cx, &right_ast, out);
-        let right = ensure_simple(cx, right, &rt, line, out);
-        let idx = cx.fresh("i");
-        let (ls, rs) = (render(&left), render(&right));
-        let header = format!("int {idx} = 0; {idx} < Math.min({ls}.size(), {rs}.size()); {idx}++");
-        let mut binds = Vec::new();
-        super::pat::bind_pattern(
-            cx,
-            &fields[0],
-            Expr::call(left, "get", vec![Expr::name(idx.clone())]),
-            &mut binds,
-        );
-        super::pat::bind_pattern(
-            cx,
-            &fields[1],
-            Expr::call(right, "get", vec![Expr::name(idx)]),
-            &mut binds,
-        );
         let mut body = loop_body(cx, f);
         binds.append(&mut body.stmts);
         body.stmts = binds;
@@ -353,30 +320,6 @@ fn range_loop_shape(e: &ast::Expr) -> Option<(ast::RangeExpr, RangeShape)> {
     }
 }
 
-// `v.iter().enumerate()` where `v` is a list: returns `v`.
-fn enumerate_of_list(cx: &Cx, e: &ast::Expr) -> Option<ast::Expr> {
-    let ast::Expr::MethodCallExpr(m) = strip_parens(e) else {
-        return None;
-    };
-    if method_name(&m) != "enumerate" {
-        return None;
-    }
-    list_receiver_of_iter(cx, &m.receiver()?)
-}
-
-// `v.iter().zip(w)` where both sides are lists: returns the two lists' ASTs.
-fn zip_lists(cx: &Cx, e: &ast::Expr) -> Option<(ast::Expr, ast::Expr)> {
-    let ast::Expr::MethodCallExpr(m) = strip_parens(e) else {
-        return None;
-    };
-    if method_name(&m) != "zip" {
-        return None;
-    }
-    let left = list_receiver_of_iter(cx, &m.receiver()?)?;
-    let right = list_receiver_of_iter(cx, &m.arg_list()?.args().next()?)?;
-    Some((left, right))
-}
-
 fn iter_mut_of_list(cx: &Cx, e: &ast::Expr) -> Option<ast::Expr> {
     let target = match strip_parens(e) {
         ast::Expr::MethodCallExpr(m) if method_name(&m) == "iter_mut" => m.receiver()?,
@@ -454,7 +397,7 @@ fn iter_mut_for_each(
 }
 
 // `v.iter()` / `v.iter_mut()` / `v.into_iter()` / `&v` where v is a list: returns `v`.
-fn list_receiver_of_iter(cx: &Cx, e: &ast::Expr) -> Option<ast::Expr> {
+pub(super) fn list_receiver_of_iter(cx: &Cx, e: &ast::Expr) -> Option<ast::Expr> {
     let target = match strip_parens(e) {
         ast::Expr::MethodCallExpr(m)
             if matches!(method_name(&m).as_str(), "iter" | "iter_mut" | "into_iter") =>
@@ -759,17 +702,22 @@ fn boxed(e: Expr) -> Expr {
 }
 
 // Re-evaluating `e` must be safe and cheap; otherwise bind it to a temporary on this line.
-fn ensure_simple(cx: &mut Cx, e: Expr, ty: &Ty, line: u32, out: &mut Vec<Stmt>) -> Expr {
-    let simple = match &e {
-        Expr::Name(_) => true,
-        Expr::Raw(s) => {
-            s.starts_with('"')
-                || s.starts_with('\'')
-                || s.chars()
-                    .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '[' | ']'))
+pub(super) fn ensure_simple(cx: &mut Cx, e: Expr, ty: &Ty, line: u32, out: &mut Vec<Stmt>) -> Expr {
+    fn plain(e: &Expr) -> bool {
+        match e {
+            Expr::Name(_) => true,
+            Expr::Raw(s) => {
+                s.starts_with('"')
+                    || s.starts_with('\'')
+                    || s.chars()
+                        .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '[' | ']'))
+            }
+            // `this.data`, `o.data`: Rust's borrow keeps the field unchanged meanwhile.
+            Expr::Field(base, _) => plain(base),
+            _ => false,
         }
-        _ => false,
-    };
+    }
+    let simple = plain(&e);
     if simple || cx.lambda_depth > 0 {
         return e;
     }
@@ -1484,6 +1432,11 @@ fn lower_adaptor(
     let line = cx.line(m.syntax());
     let args = arg_exprs(m);
     let item = item_of(recv_ty);
+
+    // `a.iter().zip(&b).map(|(x, y)| ..)`: an index stream whose closure reads the lists.
+    if let Some(e) = super::indexed::fused(cx, m, name, recv_ast, out) {
+        return e;
+    }
 
     // `s.chars().rev().collect::<String>()`: reverse the string itself.
     if name == "collect"

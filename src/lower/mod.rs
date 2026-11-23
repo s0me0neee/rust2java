@@ -3,6 +3,7 @@
 pub mod calls;
 pub mod expr;
 pub mod fmt;
+pub mod indexed;
 pub mod items;
 pub mod iter;
 pub mod macros;
@@ -94,6 +95,8 @@ pub struct Cx<'a, 'db> {
     pub pulled_iters: HashMap<ra_ap_hir::Local<'db>, String>,
     // `for x in v.iter_mut()` over immutable values: `x` stands for `list.get(idx)`.
     pub elem_aliases: HashMap<ra_ap_hir::Local<'db>, (String, String, ElemAliasKind)>,
+    // Set while lowering the closure of an `IntStream.range` chain: what its `(a, b)` fields read.
+    pub indexed_params: Option<Vec<indexed::Item>>,
     // Local ADTs implementing Iterator/Deref, recorded for their use sites.
     pub local_traits: HashMap<String, traits::TraitImpls>,
     // macro_rules! arms lowered as static methods: macro name -> Java method name.
@@ -147,6 +150,8 @@ pub enum ElemAliasKind {
     List,
     Map,
     Entry,
+    // A string's char, `s.charAt(i)`: read-only.
+    Char,
 }
 
 #[derive(Clone, Debug)]
@@ -261,6 +266,7 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         lambda_depth: 0,
         pulled_iters: HashMap::new(),
         elem_aliases: HashMap::new(),
+        indexed_params: None,
         local_traits: HashMap::new(),
         macro_methods: HashMap::new(),
         macro_method_defs: Vec::new(),

@@ -319,7 +319,11 @@ Rust generics become Java generics, with primitives boxed in type arguments. Std
   - Labels map directly (`'outer:` → `outer:`), and `break value` assigns the loop's destination first.
   - `for i in a..b` → `for (int i = a; i < b; i++)`, with `..=` → `<=`. `.rev()` and `.step_by(k)` become counted loops. Bounds that aren't pure are evaluated once.
   - `for x in &v` / `v.iter()` → `for (var x : v)`.
-  - `for (i, x) in v.iter().enumerate()` → `for (int i = 0; i < v.size(); i++) { var x = v.get(i);`, on the same line.
+  - `for (i, x) in v.iter().enumerate()` → `for (int i = 0; i < v.size(); i++) { var x = v.get(i);`, on the same line (`lower/indexed.rs`). The same index loop serves:
+    - `s.chars().enumerate()`, with `s.charAt(i)`;
+    - `s.lines()`/`split*()` `.enumerate()`, over the pieces collected first (`List<String> lines = s.lines().toList();`);
+    - `a.iter().zip(b.iter())` up to the shorter list, `v.iter().zip(v.iter().skip(1))` as `i + 1 < v.size()`;
+    - `v.windows(k)` (`v.subList(i, i + k)`) and `v.chunks(k)` (`i += k`, clamped).
   - Map iteration becomes `for (var e : m.entrySet()) { var k = e.getKey(); var v = e.getValue();`.
   - Any other iterator becomes `for (var it = <stream>.iterator(); it.hasNext();) { var x = it.next();`. That keeps `break`/`continue`/`return` working, which `forEach` would not.
 - **Let chains (edition 2024).** `if let Some(x) = a && x > 3` → `if (a.isPresent() && a.get() > 3) { var x = a.get();`. `a` is hoisted first if it isn't a plain place. With record patterns it becomes `if (r instanceof Ok(var x) && x > 3)`, since Java scopes the binding the same way.
@@ -438,6 +442,7 @@ Iterator chains become `java.util.stream` pipelines. Both are lazy and process o
 | `.copied()`, `.cloned()` | dropped (or a clone for mutable structs) |
 | `.enumerate()` | `IntStream.range(0, v.size()).mapToObj(i -> Map.entry(i, v.get(i)))` on lists; on other streams, a hoisted `var i = new AtomicInteger();` then `.map(x -> Map.entry(i.getAndIncrement(), x))` |
 | `.zip(other)` | `IntStream.range(0, Math.min(a.size(), b.size())).mapToObj(i -> Map.entry(a.get(i), b.get(i)))`. Sources that aren't lists are collected with `.toList()` first. |
+| `.map(|(a, b)| ..)` / `.any` / `.all` straight on a list `zip` or `enumerate` | `IntStream.range(0, n).mapToObj(i -> f(a.get(i), b.get(i)))`: the closure's fields read the lists, with no `Map.entry` pairs. |
 | `.rev()` | `v.reversed().stream()` (Java 21 `List.reversed`); on ranges, a descending `IntStream.iterate` |
 | `.step_by(k)` on ranges | `IntStream.iterate(a, i -> i < b, i -> i + k)` |
 | `.chain(o)` | `Stream.concat(a, o)` |
@@ -909,11 +914,11 @@ Implemented (`-s`/`--simple`; `crate::mode` holds the flag because `Ty::java()` 
   - `x as u64` from `u32`/`usize` is a plain `(long)` widening, without the unsigned mask.
 - **Tests.**
   - `SIMPLE=1 cargo nextest run --test cases --no-capture`: every case must compile and fail or succeed like Rust (`tests/cases/simple-skip` lists exceptions). Stdout differences are counted, not failures: 243/243 pass, and 119 print differently, mostly `{:?}` text.
-  - `tests/simple/*.rs` are golden files: the §22.2 program, user errors, lookups (records, null lookups, heap loop), counters (`&mut` parameters) and a contest-style `read_token!` reader. Each also prints what rustc prints.
+  - `tests/simple/*.rs` are golden files: the §22.2 program, user errors, lookups (records, null lookups, heap loop), counters (`&mut` parameters), a contest-style `read_token!` reader, and index loops. Each also prints what rustc prints.
   - All 22 Codeforces programs print the same output in simple mode.
 
 Not yet:
-- Loops for other index-heavy chains (`windows`, `zip`, `enumerate().map(..)` still go through `IntStream`).
+- `filter` (and other stages) between a `zip`/`enumerate` and its `map` still pairs items with `Map.entry`; `zip` of non-lists still pulls two iterators.
 - Named records for repeated tuple types.
 - `&mut String` parameters as `StringBuilder`.
 - Inlining single-use temporaries the Rust source names itself, or that aren't `String`/`var` (the post-pass can't see whether the declared type converts the value).
