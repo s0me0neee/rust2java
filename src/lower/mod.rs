@@ -930,10 +930,12 @@ impl<'a, 'db> Cx<'a, 'db> {
     }
 
     // The first of `names` not yet used in this method, now taken.
+    // Names the Rust file doesn't use come first, so a later Rust `i` keeps its own name.
     pub fn claim_first(&mut self, names: &[&str]) -> Option<String> {
         let name = names
             .iter()
-            .find(|n| !self.name_taken(n) && !self.file_idents.contains(**n))?;
+            .find(|n| !self.name_taken(n) && !self.file_idents.contains(**n))
+            .or_else(|| names.iter().find(|n| !self.name_taken(n)))?;
         self.method_names.insert(name.to_string());
         Some(name.to_string())
     }

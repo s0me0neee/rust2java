@@ -742,17 +742,17 @@ class Main {
 		ListIterator<String> lines = line_items.listIterator();
 		var t = Integer.parseUnsignedInt(lines.next());
 
-		for (int _i = 0; _i < t; _i++) {
+		for (int i = 0; i < t; i++) {
 			ArrayList<Integer> cs = new ArrayList<>(
 					Arrays.stream(lines.next().split(Pattern.quote(" "), -1)).map(c -> Integer.parseUnsignedInt(c))
 							.toList());
 
 			var hash = new HashSet<String>();
 
-			for (int _j = 0; _j < cs.get(0); _j++) {
+			for (int j = 0; j < cs.get(0); j++) {
 				hash.add(lines.next());
 			}
-			for (int _k = 0; _k < cs.get(1); _k++) {
+			for (int k = 0; k < cs.get(1); k++) {
 				hash.remove(lines.next());
 			}
 			for (String s : hash) {
@@ -772,7 +772,7 @@ What it shows:
   - No `Result`/`Ok`/`Err` types are appended.
 - **No entry-point wrapper,** no Debug-printing of errors, no exit-code handling.
 - **No hoisted temporaries when nothing needs them:** `hash.add(lines.next())`, not `String next3; switch (...) ...; hash.add(next3);`.
-- **Rust names kept** (`line_items`, `cs`, `hash`). A `_` loop variable becomes `_i`, `_j`, `_k`.
+- **Rust names kept** (`line_items`, `cs`, `hash`). A `_` loop variable becomes `i`, `j`, `k` (names the Rust file doesn't use come first).
 - **`var` when the initializer shows the type** (`var t = Integer.parseUnsignedInt(..)`, `var hash = new HashSet<String>()`). Type arguments go on the constructor.
 - **`Vec` stays a mutable `ArrayList`,** declared as `ArrayList<..>`.
 - **Layout:**
@@ -802,7 +802,7 @@ What it shows:
 | Iterator chains | Streams, with witnesses and hoisted temporaries | Same streams as exact mode, without witnesses or hoisted temporaries that nothing needs. A plain `for` loop when the chain uses indexes, `zip`, `windows`, `peekable` or mutation. `collect::<Vec<_>>()` is `new ArrayList<>(stream.toList())`, a mutable `ArrayList` like the `Vec`. |
 | Strings | Byte/char helpers | `length()`, `charAt`, `toCharArray()`, `StringBuilder` when built in a loop. |
 | stdin | Shared `STDIN` reader on the last line; `lines()` items wrapped in `Ok` | The same `STDIN` `BufferedReader`, as the class's first field. `lines()` items are plain `String`s, so `lines.next().unwrap()?` is `lines.next()`. |
-| Names | Rust names; `_` loop variables become `i`, `i2`, … | Rust names, as in exact mode. `_` loop variables become `_i`, `_j`, `_k`. Temporaries are still named after their value (expression hints). |
+| Names | Rust names; `_` loop variables become `i`, `i2`, … | Rust names, as in exact mode. `_` loop variables become `i`, `j`, `k`. Temporaries are still named after their value (expression hints). |
 | Locals | Explicit types; `var` only where the type can't be named | `var` when the initializer shows the type (a constructor with type arguments, `Integer.parseInt`, a literal); explicit types otherwise. |
 | Imports and class | `java.util.*` wildcards, `final class Main`, helpers and fields at the end | Explicit, used-only imports. `class Main` with static fields first, then methods in Rust order. |
 | Parsing | `parse` with range checks and Rust error messages | `Integer.parseInt`/`parseUnsignedInt`/`Long.parseLong`/`Double.parseDouble` directly. |
@@ -882,7 +882,7 @@ Implemented (`-s`/`--simple`; `crate::mode` holds the flag because `Ty::java()` 
 - **`&mut` primitive parameters.** A free function returning `()` with one `&mut i32`-style parameter, only used as `*n` and only called as a statement with `&mut local`/`&mut a.field`, returns the value: `static int bump(int n) { n += 1; return n; }`, called as `a = bump(a);` (`lower/mutret.rs`).
 - **Control flow.** A returned `match` is `return switch (..) { .. };`, with `Err` arms as `throw`. `vec![vec![0; m]; n]` fills a list in a `for` loop.
 - **Literals.** `for x in [a, b]` and `&[a, b]` / `&vec![..]` arguments are `List.of(a, b)`.
-- **Names and locals.** `_` loop counters are `_i`, `_j`, `_k`. `var` when the initializer is `new X<..>(..)` of the declared class, or a parse call; `List<T> v = new ArrayList<>()` is `var v = new ArrayList<T>()` when `v` is never reassigned.
+- **Names and locals.** `_` loop counters are `i`, `j`, `k`. `var` when the initializer is `new X<..>(..)` of the declared class, or a parse call; `List<T> v = new ArrayList<>()` is `var v = new ArrayList<T>()` when `v` is never reassigned.
 - **Cleanup post-pass** (`javafmt.rs`, on the exact-layout text before re-layout):
   - Generated methods nothing calls are dropped (`debug`, `clone`, `partial_cmp`, the `debug_*` helpers, the embedded `Result` type's methods), with liveness followed through calls between them.
   - Redundant parentheses (around primaries, and in argument, initializer, return and assignment slots), casts of a local to its own declared type, `String.valueOf(x)` inside a string concatenation, and enum discriminants nothing reads (`Small(0)`, `final int value`).

@@ -99,7 +99,7 @@ fn lower_for_kind(
         // Lambdas can't capture a mutating loop counter: count with a temp, rebind per iteration.
         // `for _ in` gets a Java-only counter, so it can't capture a Rust `i` from outside.
         let counter = if wildcard && crate::mode::simple() {
-            cx.claim_first(&["_i", "_j", "_k", "_l", "_m", "_n"])
+            cx.claim_first(&["i", "j", "k", "l", "m", "n"])
                 .unwrap_or_else(|| cx.fresh(&name))
         } else if captured || wildcard {
             cx.fresh(&name)
