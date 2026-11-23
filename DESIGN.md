@@ -877,6 +877,7 @@ Implemented (`-s`/`--simple`; `crate::mode` holds the flag because `Ty::java()` 
   - `?`, `unwrap` and `expect` disappear; `unwrap_or*`, `ok`, `is_ok`/`is_err`, `match` and `if let` become `try`/`catch`.
   - A `match` may have several `Ok(..)` arms with any inner pattern or guard (`Ok(Some(msg))`, `Ok((name, v))`, `Ok(n) if n > 10`): the try block binds the value and tests it with the usual if-chain. The one `Err(e)` arm (or a `_` after an unguarded `Ok(x)`) is the catch block. A block arm ending either block is spliced into it.
   - `r.map_err(|e| f(e))` is `try { v = r; } catch (X e) { throw <f(e)>; }`, so the converted error travels on.
+  - `r.map(f)` is `f(r)`: `s.parse::<i64>().map(Tok::Num)` → `new Tok.Num(Long.parseLong(s))`; a closure's parameter is bound to the value.
   - `let bal = m.get_mut(&k).ok_or(err)?;` (a map-slot alias) is `if (!m.containsKey(k)) throw ..;`.
   - `s.parse()?` in a function returning a user error with `impl From<ParseIntError>` (or an I/O error) is `try { n = Integer.parseInt(s); } catch (NumberFormatException e) { throw new AppErrorException(AppError.from(e)); }`. Parse errors are typed `NumberFormatException` throughout simple mode.
   - Parsing calls the Java parser directly (`Integer.parseInt`). `ok_or`/`ok_or_else` are `orElseThrow`. Stdin reads wrap `IOException` in `UncheckedIOException`, and `lines()` items are plain Strings.

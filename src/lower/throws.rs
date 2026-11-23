@@ -201,7 +201,7 @@ fn producer_ok(cx: &Cx, e: &ast::Expr) -> bool {
                 // `write_fmt` is a `write!` expansion; the macro call is checked in the file.
                 "read_line" | "read_to_string" | "read" | "flush" | "write_all" | "write_fmt"
                 | "write_str" | "write_char" | "map_err" | "ok_or"
-                | "ok_or_else" => true,
+                | "ok_or_else" | "map" => true,
                 "unwrap" | "expect" => super::std_map::io::phantom_line_result(cx, e),
                 _ => false,
             }
@@ -417,6 +417,7 @@ fn walk_up(node: &SyntaxNode) -> Option<Context> {
                         | "is_ok"
                         | "is_err"
                         | "map_err"
+                        | "map"
                 );
                 return (is_recv && consuming).then_some(Context::Consumed);
             }
@@ -847,6 +848,30 @@ pub fn result_method(
         && let Some(v) = map_err_rethrow(cx, m, recv_ast, recv.clone(), &ok_ty, line, out)
     {
         return Some(v);
+    }
+    // `r.map(f)`: `r` already is the Ok value, so this is `f(r)`.
+    if name == "map" {
+        let arg = strip_parens(&m.arg_list()?.args().next()?);
+        if let ast::Expr::ClosureExpr(c) = &arg
+            && let [p] = c.param_list()?.params().collect::<Vec<_>>().as_slice()
+        {
+            cx.push_scope();
+            super::pat::bind_pattern(cx, &p.pat()?, recv, out);
+            let v = expr::lower_expr(cx, &c.body()?, out);
+            cx.pop_scope();
+            return Some(v);
+        }
+        // A method reference, possibly cast to its functional interface.
+        let f = match args.first()? {
+            Expr::Cast(_, inner) => crate::emit::render_expr(inner),
+            e => crate::emit::render_expr(e),
+        };
+        let (owner, method) = f.rsplit_once("::")?;
+        return Some(if method == "new" {
+            Expr::New { ty: owner.to_string(), args: vec![recv] }
+        } else {
+            Expr::call(Expr::raw(owner), method, vec![recv])
+        });
     }
     let (value, fallback) = match name {
         "unwrap" | "expect" | "map_err" => return Some(recv),
