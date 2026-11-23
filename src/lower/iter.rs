@@ -273,6 +273,13 @@ fn for_each(cx: &mut Cx, f: &ast::ForExpr, p: &ast::Pat, iterable: &ast::Expr, o
     };
     let it_ty = cx.ty(iterable);
     let iter = for_each_source(cx, iterable, &it_ty, &elem_ty, out);
+    // Leaving early must leave the rest of stdin unread.
+    let iter = match iter {
+        Expr::Call { recv: Some(r), name, .. } if name == "toList" && reads_stdin(&r) && exits_early(cx, f) => {
+            Expr::Cast("Iterable<String>".into(), Box::new(Expr::raw(format!("{}::iterator", render(&r)))))
+        }
+        other => other,
+    };
     let (name, mut binds) = match simple_ident(p) {
         Some(n) => (cx.declare(&n), Vec::new()),
         None => {
@@ -331,6 +338,25 @@ fn counted_each(
         );
     }
     ForStmt::Each { ty, name, iter, body }
+}
+
+// A `break`, `return` or `?` in the body (conservatively, at any depth); `line?` on a plain stdin
+// line never leaves.
+fn exits_early(cx: &Cx, f: &ast::ForExpr) -> bool {
+    f.loop_body().is_some_and(|b| {
+        b.syntax().descendants().any(|n| {
+            ast::BreakExpr::can_cast(n.kind())
+                || ast::ReturnExpr::can_cast(n.kind())
+                || ast::TryExpr::cast(n).is_some_and(|t| {
+                    !t.expr().is_some_and(|e| super::std_map::io::phantom_line_result(cx, &e))
+                })
+        })
+    })
+}
+
+// `STDIN.lines()`: the line reader over stdin.
+fn reads_stdin(e: &Expr) -> bool {
+    matches!(e, Expr::Call { recv: Some(r), name, .. } if name == "lines" && matches!(&**r, Expr::Raw(s) | Expr::Name(s) if s == "STDIN"))
 }
 
 // A `continue` (bare or labeled) that restarts this loop.
@@ -568,6 +594,11 @@ fn for_each_source(
     if let Some(list) = collection_stream(&src) {
         return list;
     }
+    if crate::mode::simple()
+        && let Some(plain) = simple_loop_source(&src)
+    {
+        return plain;
+    }
     match it_ty.strip_refs() {
         Ty::Iter(t) => {
             let t = if super::std_map::io::plain_lines_iterable(cx, iterable) {
@@ -581,6 +612,19 @@ fn for_each_source(
             )
         }
         other => collection_iterable(src, other),
+    }
+}
+
+// Simple mode: a split's `Arrays.stream(parts)` iterates `parts`, and a bare `lines()` stream its
+// `toList()` (stdin is read up front, which piped input doesn't notice).
+fn simple_loop_source(src: &Expr) -> Option<Expr> {
+    let Expr::Call { recv: Some(recv), name, args } = src else {
+        return None;
+    };
+    match (name.as_str(), args.as_slice()) {
+        ("stream", [arr]) if matches!(&**recv, Expr::Raw(r) if r == "Arrays") => Some(arr.clone()),
+        ("lines", []) => Some(Expr::call(src.clone(), "toList", vec![])),
+        _ => None,
     }
 }
 

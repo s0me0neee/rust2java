@@ -324,6 +324,7 @@ Rust generics become Java generics, with primitives boxed in type arguments. Std
     - `s.lines()`/`split*()` `.enumerate()`, over the pieces collected first (`List<String> lines = s.lines().toList();`);
     - `a.iter().zip(b.iter())` up to the shorter list, `v.iter().zip(v.iter().skip(1))` as `i + 1 < v.size()`;
     - `v.windows(k)` (`v.subList(i, i + k)`) and `v.chunks(k)` (`i += k`, clamped).
+  - Simple mode, `for part in s.split(',')` iterates the split array (`for (String part : s.split(",", -1))`), and `for line in stdin.lines()` / `s.lines()` iterates `lines().toList()`. Stdin is read up front; piped input doesn't notice. A stdin loop that can leave early (`break`, `return`, a real `?`) keeps the lazy `(Iterable<String>) STDIN.lines()::iterator`, so later reads still see the rest.
   - Simple mode, `enumerate()` over anything else (map entries, stdin lines): `int i = 0;` before the for-each and `i++;` as its last statement. When a `continue` could skip that, it would be unreachable, or a lambda captures `i`, it's `int index = 0;` and `int i = index++;` first in the body.
   - Map iteration becomes `for (var e : m.entrySet()) { var k = e.getKey(); var v = e.getValue();`.
   - Any other iterator becomes `for (var it = <stream>.iterator(); it.hasNext();) { var x = it.next();`. That keeps `break`/`continue`/`return` working, which `forEach` would not.
