@@ -47,7 +47,17 @@ pub fn eligible(cx: &Cx, root: &SyntaxNode) -> Result<(), (SyntaxNode, &'static 
             .and_then(ast::CallExpr::cast)
             .and_then(|c| c.expr())
             .is_some_and(|f| f.syntax() == &node);
-        if !callee && nested_result(&ty, false) {
+        // `r.and_then(f)` passes `f` by name; it becomes a call `f(r)`.
+        let applied = node
+            .parent()
+            .filter(|a| ast::ArgList::can_cast(a.kind()))
+            .and_then(|a| a.parent())
+            .and_then(ast::MethodCallExpr::cast)
+            .is_some_and(|m| {
+                matches!(method_name(&m).as_str(), "map" | "and_then")
+                    && m.receiver().is_some_and(|r| matches!(cx.ty(&r).strip_refs(), Ty::Result(..)))
+            });
+        if !callee && !applied && nested_result(&ty, false) {
             return Err((node, "a Result inside another type"));
         }
         if let ast::Expr::MethodCallExpr(m) = &e
@@ -201,7 +211,7 @@ fn producer_ok(cx: &Cx, e: &ast::Expr) -> bool {
                 // `write_fmt` is a `write!` expansion; the macro call is checked in the file.
                 "read_line" | "read_to_string" | "read" | "flush" | "write_all" | "write_fmt"
                 | "write_str" | "write_char" | "map_err" | "ok_or"
-                | "ok_or_else" | "map" => true,
+                | "ok_or_else" | "map" | "and_then" => true,
                 "unwrap" | "expect" => super::std_map::io::phantom_line_result(cx, e),
                 _ => false,
             }
@@ -245,6 +255,8 @@ fn same_error(cx: &Cx, e: &ast::Expr) -> bool {
         return true;
     };
     match fn_error(cx, e.syntax()) {
+        // Every error travels as a RuntimeException, which is what a `dyn Error` is caught as.
+        Some(Ty::Other(n)) if n.contains("dyn Error") || n.contains("dyn std::error::Error") => true,
         Some(to) => {
             let user = user_error(&from).is_some() || user_error(&to).is_some();
             !user || from.strip_refs() == to.strip_refs() || from_conversion(cx, e.syntax(), &from, &to)
@@ -418,6 +430,7 @@ fn walk_up(node: &SyntaxNode) -> Option<Context> {
                         | "is_err"
                         | "map_err"
                         | "map"
+                        | "and_then"
                 );
                 return (is_recv && consuming).then_some(Context::Consumed);
             }
@@ -702,8 +715,13 @@ fn lower_try_catch(
                 line,
                 StmtKind::Local { ty: stmt::decl_type_explicit(&ok_ty), name: value.clone(), init: Some(v) },
             ));
-            super::pat::chain_over(cx, Expr::name(value), arms, dest, &mut body);
-            flatten_tail_block(&mut body);
+            // `case Tok.Num(var n) when n > 40 ->` reads better than an if-chain with casts.
+            if super::pat::can_switch_alts(cx, arms, &ok_ty) {
+                super::pat::switch_over(cx, Expr::name(value), arms, dest, &mut body, line);
+            } else {
+                super::pat::chain_over(cx, Expr::name(value), arms, dest, &mut body);
+                flatten_tail_block(&mut body);
+            }
         }
     }
     ok_body(cx, &mut body);
@@ -849,8 +867,8 @@ pub fn result_method(
     {
         return Some(v);
     }
-    // `r.map(f)`: `r` already is the Ok value, so this is `f(r)`.
-    if name == "map" {
+    // `r.map(f)` / `r.and_then(f)`: `r` already is the Ok value, so this is `f(r)` (which may throw).
+    if name == "map" || name == "and_then" {
         let arg = strip_parens(&m.arg_list()?.args().next()?);
         if let ast::Expr::ClosureExpr(c) = &arg
             && let [p] = c.param_list()?.params().collect::<Vec<_>>().as_slice()
@@ -869,6 +887,8 @@ pub fn result_method(
         let (owner, method) = f.rsplit_once("::")?;
         return Some(if method == "new" {
             Expr::New { ty: owner.to_string(), args: vec![recv] }
+        } else if owner == "Main" {
+            Expr::static_call(method, vec![recv])
         } else {
             Expr::call(Expr::raw(owner), method, vec![recv])
         });

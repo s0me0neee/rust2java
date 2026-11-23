@@ -898,12 +898,43 @@ fn lower_switch_stmt(
     line: u32,
 ) {
     let value = place(cx, scrut, out);
+    let alts: Vec<(Option<ast::Pat>, &ast::MatchArm)> = arms.iter().map(|a| (a.pat(), a)).collect();
+    switch_over(cx, value, &alts, dest, out, line);
+}
+
+// Whether `(pattern, arm)` pairs over a value of type `ty` can be Java switch cases.
+pub(super) fn can_switch_alts(cx: &mut Cx, alts: &[(Option<ast::Pat>, &ast::MatchArm)], ty: &Ty) -> bool {
+    selector_switchable(ty)
+        && alts.iter().all(|(p, a)| {
+            let Some(p) = p else { return false };
+            if let Some(g) = a.guard()
+                && (!guard_simple(&g) || constant_only(cx, p))
+            {
+                return false;
+            }
+            if is_binding_pat(cx, p) {
+                a.guard().is_none()
+            } else {
+                pattern_text(cx, p, false).is_some()
+            }
+        })
+}
+
+// A switch statement over `value` with one case per `(pattern, arm)`.
+pub(super) fn switch_over(
+    cx: &mut Cx,
+    value: Expr,
+    alts: &[(Option<ast::Pat>, &ast::MatchArm)],
+    dest: &Dest,
+    out: &mut Vec<Stmt>,
+    line: u32,
+) {
     let mut jarms = Vec::new();
     // A `break` in an arm body would leave the switch, not the enclosing loop.
     cx.switch_depth += 1;
-    for arm in arms {
+    for (p, arm) in alts {
         let aline = cx.line(arm.syntax());
-        let Some(p) = arm.pat() else { continue };
+        let Some(p) = p.clone() else { continue };
         cx.push_scope();
         let mut binds = PatLowering::default();
         let mut label = if is_binding_pat(cx, &p) {

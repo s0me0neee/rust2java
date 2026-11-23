@@ -1325,6 +1325,10 @@ pub fn std_error_display(cx: &mut Cx, v: Expr, ty: &Ty) -> Option<Expr> {
     if name.contains("ParseIntError") || name.contains("ParseFloatError") {
         return Some(parse_error_text(v));
     }
+    // Throws mode: a `dyn Error` is a caught exception whose message is the Display text.
+    if crate::mode::throws() && matches!(v, Expr::Name(_)) {
+        return Some(Expr::call(v, "getMessage", vec![]));
+    }
     let bound = cx.fresh("err_value");
     Some(Expr::Ternary(
         Box::new(Expr::InstanceOf(
