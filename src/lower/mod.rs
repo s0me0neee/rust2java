@@ -551,6 +551,7 @@ impl<'a, 'db> Cx<'a, 'db> {
                     !c.syntax()
                         .text_range()
                         .contains_range(ip.syntax().text_range())
+                        && !iter::closure_is_loop(self, &c)
                 });
             if borrowed_mut || (is_mut && in_closure) {
                 return true;

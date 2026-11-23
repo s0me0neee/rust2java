@@ -880,7 +880,10 @@ Implemented (`-s`/`--simple`; `crate::mode` holds the flag because `Ty::java()` 
   - `unwrap`/`expect` on such a value is the value; `is_some`/`is_none` compare with null.
   - `Option` in signatures and fields stays `Optional`.
 - **`&mut` primitive parameters.** A free function returning `()` with one `&mut i32`-style parameter, only used as `*n` and only called as a statement with `&mut local`/`&mut a.field`, returns the value: `static int bump(int n) { n += 1; return n; }`, called as `a = bump(a);` (`lower/mutret.rs`).
-- **Control flow.** A returned `match` is `return switch (..) { .. };`, with `Err` arms as `throw`. `vec![vec![0; m]; n]` fills a list in a `for` loop.
+- **Control flow.**
+  - A returned `match` is `return switch (..) { .. };`, with `Err` arms as `throw`.
+  - `vec![vec![0; m]; n]` fills a list in a `for` loop.
+  - `v.iter().for_each(|x| ..)` as a statement over a list, set or deque, with no `return` or `?` in the closure, is `for (T x : v) { .. }`. Locals it assigns stay plain locals instead of one-element-array cells.
 - **Stdin.**
   - `read_line(&mut buf)` into a buffer that is otherwise only trimmed, split on whitespace or cleared is `buf = STDIN.readLine();`: the lost `\n` can't show.
   - Methods calling `readLine()`, and their callers, declare `throws IOException`. A function that may run inside a closure keeps the exact form, since a lambda can't throw a checked exception.

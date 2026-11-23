@@ -570,6 +570,112 @@ fn collection_stream(e: &Expr) -> Option<Expr> {
     }
 }
 
+// Simple mode: `v.iter().for_each(|x| { .. })` as a statement over a list, set or deque is a
+// for-each loop, so the body may assign outer locals without one-element-array cells.
+pub fn closure_is_loop(cx: &Cx, c: &ast::ClosureExpr) -> bool {
+    if !crate::mode::simple() {
+        return false;
+    }
+    let Some(call) = c
+        .syntax()
+        .parent()
+        .filter(|a| ast::ArgList::can_cast(a.kind()))
+        .and_then(|a| a.parent())
+        .and_then(ast::MethodCallExpr::cast)
+    else {
+        return false;
+    };
+    let statement = call
+        .syntax()
+        .parent()
+        .is_some_and(|p| ast::ExprStmt::can_cast(p.kind()));
+    let Some(ast::Expr::MethodCallExpr(src)) = call.receiver().map(|r| strip_parens(&r)) else {
+        return false;
+    };
+    let collection = matches!(method_name(&src).as_str(), "iter" | "into_iter")
+        && src.receiver().is_some_and(|v| {
+            matches!(
+                cx.ty(&v).strip_refs(),
+                Ty::Vec(_) | Ty::Set { .. } | Ty::Deque(_)
+            )
+        });
+    let one_param = c.param_list().is_some_and(|pl| pl.params().count() == 1);
+    // `return` in the closure body means `continue`; `?` would leave the enclosing function.
+    let plain_body = c.body().is_some_and(|b| {
+        !b.syntax().descendants().any(|n| {
+            (ast::ReturnExpr::can_cast(n.kind()) || ast::TryExpr::can_cast(n.kind()))
+                && !n
+                    .ancestors()
+                    .take_while(|a| a != c.syntax())
+                    .any(|a| ast::ClosureExpr::can_cast(a.kind()))
+        })
+    });
+    method_name(&call) == "for_each" && statement && collection && one_param && plain_body
+}
+
+fn for_each_loop(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    recv: &ast::Expr,
+    c: &ast::ClosureExpr,
+    out: &mut Vec<Stmt>,
+) {
+    let line = cx.line(m.syntax());
+    let (Some(ast::Expr::MethodCallExpr(src)), Some(p)) = (
+        Some(strip_parens(recv)),
+        c.param_list()
+            .and_then(|pl| pl.params().next())
+            .and_then(|p| p.pat()),
+    ) else {
+        return;
+    };
+    let Some(coll) = src.receiver() else { return };
+    let cty = cx.ty(&coll);
+    let v = expr::lower_expr(cx, &coll, out);
+    let iter = collection_iterable(v, &cty);
+    cx.push_scope();
+    let ty = cx.pat_ty(&p);
+    let jty = if ty.is_nameable() {
+        ty.strip_refs().java()
+    } else {
+        "var".into()
+    };
+    let mut prelude = Vec::new();
+    let name = match simple_ident(&p) {
+        Some(n) => cx.declare(&n),
+        None => {
+            let tmp = cx.fresh("item");
+            super::pat::bind_pattern(cx, &p, Expr::name(&tmp), &mut prelude);
+            tmp
+        }
+    };
+    let mut body = match c.body() {
+        Some(ast::Expr::BlockExpr(b)) => stmt::lower_block(cx, &b, &Dest::Discard),
+        Some(e) => {
+            let mut stmts = Vec::new();
+            stmt::lower_to_dest(cx, &e, &Dest::Discard, &mut stmts);
+            Block {
+                stmts,
+                close_line: cx.end_line(e.syntax()),
+            }
+        }
+        None => Block::default(),
+    };
+    cx.pop_scope();
+    prelude.append(&mut body.stmts);
+    body.stmts = prelude;
+    out.push(Stmt::new(
+        line,
+        StmtKind::ForEach {
+            label: None,
+            ty: jty,
+            name,
+            iter,
+            body,
+        },
+    ));
+}
+
 fn collection_iterable(v: Expr, ty: &Ty) -> Expr {
     match ty.strip_refs() {
         Ty::Map { .. } => Expr::call(v, "entrySet", vec![]),
@@ -777,6 +883,13 @@ pub fn lower_iter_method(
         && let Some(e) = iter_mut_for_each(cx, m, &recv_ast, out)
     {
         return Some(e);
+    }
+    if name == "for_each"
+        && let Some(ast::Expr::ClosureExpr(c)) = arg_exprs(m).first().map(strip_parens)
+        && closure_is_loop(cx, &c)
+    {
+        for_each_loop(cx, m, &recv_ast, &c, out);
+        return Some(Expr::raw("null"));
     }
     // `(a..b).contains(&x)`: two comparisons.
     if name == "contains"
