@@ -1705,6 +1705,16 @@ pub fn lower_args(
     out: &mut Vec<Stmt>,
 ) -> Vec<Expr> {
     args.map(|a| {
+        // `&mut s` / `out` of a `StringBuilder` hands over the builder itself.
+        if matches!(cx.ty(&a), Ty::Ref { mutable: true, .. }) {
+            let inner = match super::strip_parens(&a) {
+                ast::Expr::RefExpr(r) => r.expr().unwrap_or_else(|| a.clone()),
+                other => other,
+            };
+            if let Some(b) = cx.builder_path(&inner) {
+                return Expr::name(b);
+            }
+        }
         // Re-passing a `&mut` cell parameter (`bump(n)` inside `fn f(n: &mut i32)`) passes the array.
         if matches!(cx.ty(&a), Ty::Ref { mutable: true, .. })
             && let Some(cell) = cx.cell_path(&a)

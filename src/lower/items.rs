@@ -1599,10 +1599,12 @@ fn lower_fn_sig(
     }
     // Simple mode: a `&mut` primitive parameter the function returns instead (`mutret`).
     let returned = super::mutret::param_of(cx, f);
+    let def = cx.sema.to_def(f);
     let mut returned_name = None;
     if let Some(pl) = f.param_list() {
         for (index, p) in pl.params().enumerate() {
             let returns = returned == Some(index);
+            let builder = def.is_some_and(|d| cx.builder_params.contains(&(d, index)));
             let ast_ty = p.ty();
             let ty = ast_ty
                 .clone()
@@ -1622,6 +1624,7 @@ fn lower_fn_sig(
             }
             let jty = match &cell {
                 Some(inner) => format!("{}[]", inner.java()),
+                None if builder => "StringBuilder".into(),
                 None if returns => ty.strip_refs().java(),
                 None => bound.map(Ty::java).unwrap_or_else(|| param_type(cx, &ty)),
             };
@@ -1633,7 +1636,11 @@ fn lower_fn_sig(
                         .unwrap_or_else(|| "_".into());
                     let java = cx.declare(&n);
                     params.push(format!("{jty} {java}"));
-                    if returns {
+                    if builder {
+                        if let Some(local) = cx.sema.to_def(&ip) {
+                            cx.builders.insert(local);
+                        }
+                    } else if returns {
                         returned_name = Some((java, ty.strip_refs().java()));
                         if let Some(local) = cx.sema.to_def(&ip) {
                             cx.returned_params.insert(local);

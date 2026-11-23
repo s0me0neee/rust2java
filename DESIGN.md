@@ -885,6 +885,10 @@ Implemented (`-s`/`--simple`; `crate::mode` holds the flag because `Ty::java()` 
   - `unwrap`/`expect` on such a value is the value; `is_some`/`is_none` compare with null.
   - `Option` in signatures and fields stays `Optional`.
 - **`&mut` primitive parameters.** A free function returning `()` with one `&mut i32`-style parameter, only used as `*n` and only called as a statement with `&mut local`/`&mut a.field`, returns the value: `static int bump(int n) { n += 1; return n; }`, called as `a = bump(a);` (`lower/mutret.rs`).
+- **`&mut String` parameters** are `StringBuilder`s, and so are the locals handed to them (`lower/builders.rs`).
+  - Allowed uses: appends (`push`, `push_str`, `+=`, `write!`), `len`/`is_empty`/`clear`, `pop`/`truncate` as statements, reads (`out.toString()`), and passing on to another such parameter.
+  - Every caller must hand over `&mut local` or another builder parameter. A pre-pass drops candidates until that holds, so a `&mut s.field` argument or a closure use keeps the `String[]` cell for everything it touches.
+  - Trait-impl methods keep their signatures.
 - **Control flow.**
   - A returned `match` is `return switch (..) { .. };`, with `Err` arms as `throw`.
   - `vec![vec![0; m]; n]` fills a list in a `for` loop.
@@ -914,11 +918,11 @@ Implemented (`-s`/`--simple`; `crate::mode` holds the flag because `Ty::java()` 
   - `x as u64` from `u32`/`usize` is a plain `(long)` widening, without the unsigned mask.
 - **Tests.**
   - `SIMPLE=1 cargo nextest run --test cases --no-capture`: every case must compile and fail or succeed like Rust (`tests/cases/simple-skip` lists exceptions). Stdout differences are counted, not failures: 243/243 pass, and 119 print differently, mostly `{:?}` text.
-  - `tests/simple/*.rs` are golden files: the §22.2 program, user errors, lookups (records, null lookups, heap loop), counters (`&mut` parameters), a contest-style `read_token!` reader, and index loops. Each also prints what rustc prints.
+  - `tests/simple/*.rs` are golden files: the §22.2 program, user errors, lookups (records, null lookups, heap loop), counters (`&mut` parameters), a contest-style `read_token!` reader, index loops, and `StringBuilder` parameters. Each also prints what rustc prints.
   - All 22 Codeforces programs print the same output in simple mode.
 
 Not yet:
 - `filter` (and other stages) between a `zip`/`enumerate` and its `map` still pairs items with `Map.entry`; `zip` of non-lists still pulls two iterators.
 - Named records for repeated tuple types.
-- `&mut String` parameters as `StringBuilder`.
+- `enumerate()` over map entries and stdin lines still counts with an `AtomicInteger`.
 - Inlining single-use temporaries the Rust source names itself, or that aren't `String`/`var` (the post-pass can't see whether the declared type converts the value).

@@ -1,5 +1,6 @@
 // Rust syntax tree (+ semantics) -> JIR. One submodule per construct family.
 
+pub mod builders;
 pub mod calls;
 pub mod expr;
 pub mod fmt;
@@ -121,6 +122,9 @@ pub struct Cx<'a, 'db> {
     pub debug_to_string: HashSet<String>,
     // Simple mode: functions returning their `&mut` primitive parameter (see `mutret`).
     pub mut_returns: HashMap<ra_ap_hir::Function, usize>,
+    // Simple mode: `&mut String` parameters and the locals handed to them, as `StringBuilder`s.
+    pub builder_params: HashSet<(ra_ap_hir::Function, usize)>,
+    pub builder_locals: HashSet<ra_ap_hir::Local<'db>>,
     // Their parameters, while lowering those functions: `*n` is just `n`.
     pub returned_params: HashSet<ra_ap_hir::Local<'db>>,
     // Every identifier in the Rust file: generated names never take one of these.
@@ -279,6 +283,8 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         pending_name: None,
         debug_to_string: HashSet::new(),
         mut_returns: HashMap::new(),
+        builder_params: HashSet::new(),
+        builder_locals: HashSet::new(),
         returned_params: HashSet::new(),
         macro_locals: HashSet::new(),
         user_locals: HashSet::new(),
@@ -334,6 +340,9 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
     if crate::mode::simple() {
         cx.debug_to_string = items::debug_to_string_types(file.syntax());
         cx.mut_returns = mutret::analyze(&cx, file.syntax());
+        let b = builders::analyze(&cx, file.syntax());
+        cx.builder_params = b.params;
+        cx.builder_locals = b.locals;
     }
     let comments = collect_comments(&cx, file.syntax());
     let last_line = text.trim_end().lines().count().max(1) as u32;
@@ -546,6 +555,10 @@ impl<'a, 'db> Cx<'a, 'db> {
         let Some(local) = self.sema.to_def(ip) else {
             return false;
         };
+        // A shared `StringBuilder` is already the cell.
+        if self.builder_locals.contains(&local) {
+            return false;
+        }
         let Some(scope) = self.enclosing_fn(ip.syntax()) else {
             return false;
         };
@@ -603,6 +616,9 @@ impl<'a, 'db> Cx<'a, 'db> {
         else {
             return false;
         };
+        if self.builder_locals.contains(&local) {
+            return true;
+        }
         if !is_string {
             return false;
         }
@@ -715,7 +731,12 @@ impl<'a, 'db> Cx<'a, 'db> {
 
     // Java name of the `StringBuilder` if `e` is a path to a builder local.
     pub fn builder_path(&self, e: &ast::Expr) -> Option<String> {
-        let ast::Expr::PathExpr(pe) = strip_parens(e) else {
+        // `*out` of a builder parameter is the builder too.
+        let e = match strip_parens(e) {
+            ast::Expr::PrefixExpr(p) if p.op_kind() == Some(ast::UnaryOp::Deref) => p.expr()?,
+            other => other,
+        };
+        let ast::Expr::PathExpr(pe) = strip_parens(&e) else {
             return None;
         };
         match self.sema.resolve_path(&pe.path()?) {

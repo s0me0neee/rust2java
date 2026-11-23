@@ -540,6 +540,16 @@ pub(super) fn lower_str_method(
                 ));
             }
             "clear" => return Some(Expr::call(b, "setLength", vec![Expr::raw("0")])),
+            // As statements only (`builders` checks): the popped char isn't needed.
+            "pop" => {
+                let n = render(&b);
+                return Some(Expr::call(b, "setLength", vec![Expr::raw(format!("Math.max(0, {n}.length() - 1)"))]));
+            }
+            "truncate" => {
+                let n = render(&b);
+                let k = render(&b0);
+                return Some(Expr::call(b, "setLength", vec![Expr::raw(format!("Math.min({k}, {n}.length())"))]));
+            }
             _ => {}
         }
     }
