@@ -84,6 +84,8 @@ fn relayout_masked(src: &str, blank: &dyn Fn(usize) -> bool) -> Option<String> {
         enum_values_read: reads_value_field(root, src),
         moved: HashSet::new(),
         assigned: assigned_names(root, src),
+        ident_uses: ident_uses(root, src),
+        throwing: io_throwing(root, src),
     };
     let mut header = f.header_comments(root);
     f.moved = header.iter().map(|c| c.start_byte()).collect();
@@ -153,6 +155,94 @@ struct Fmt<'a> {
     moved: HashSet<usize>,
     // Names assigned somewhere after their declaration (`x = ...`).
     assigned: HashSet<String>,
+    // How often each identifier appears in the file (declarations included).
+    ident_uses: std::collections::HashMap<String, usize>,
+    // Methods that call `readLine()`, directly or through each other: `throws IOException`.
+    throwing: HashSet<String>,
+}
+
+// Names of methods whose body calls `readLine()` or another such method, outside lambdas.
+fn io_throwing(root: Node, src: &str) -> HashSet<String> {
+    let mut calls: Vec<(String, String)> = Vec::new();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "method_invocation"
+            && let Some(name) = n.child_by_field_name("name")
+            && !n.ancestors_named().any(|a| a.kind() == "lambda_expression")
+            && let Some(m) = n
+                .ancestors_named()
+                .find(|a| a.kind() == "method_declaration")
+                .and_then(|m| m.child_by_field_name("name"))
+        {
+            calls.push((src[m.byte_range()].to_string(), src[name.byte_range()].to_string()));
+        }
+        stack.extend(children(n));
+    }
+    let mut out: HashSet<String> = calls
+        .iter()
+        .filter(|(_, callee)| callee == "readLine")
+        .map(|(m, _)| m.clone())
+        .collect();
+    loop {
+        let more: Vec<String> = calls
+            .iter()
+            .filter(|(m, callee)| out.contains(callee) && !out.contains(m))
+            .map(|(m, _)| m.clone())
+            .collect();
+        if more.is_empty() {
+            return out;
+        }
+        out.extend(more);
+    }
+}
+
+// `x = e;` -> (x, e).
+fn simple_assign(n: Node) -> Option<(Node, Node)> {
+    let a = n.named_child(0).filter(|a| {
+        n.kind() == "expression_statement" && a.kind() == "assignment_expression"
+    })?;
+    let op = a.child_by_field_name("operator")?;
+    let left = a.child_by_field_name("left")?;
+    (op.kind() == "=" && left.kind() == "identifier").then_some((left, a.child_by_field_name("right")?))
+}
+
+fn is_literal(n: Node) -> bool {
+    matches!(
+        n.kind(),
+        "string_literal" | "decimal_integer_literal" | "decimal_floating_point_literal"
+            | "null_literal" | "true" | "false" | "character_literal"
+    )
+}
+
+fn mentions(n: Node, src: &str, name: &str) -> bool {
+    let mut stack = vec![n];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "identifier" && &src[n.byte_range()] == name {
+            return true;
+        }
+        stack.extend(children(n));
+    }
+    false
+}
+
+// The one declarator of `T x = e;`.
+fn single_declarator(n: Node) -> Option<Node> {
+    if n.kind() != "local_variable_declaration" || n.named_child_count() != 2 {
+        return None;
+    }
+    n.child_by_field_name("declarator")
+}
+
+fn ident_uses(root: Node, src: &str) -> std::collections::HashMap<String, usize> {
+    let mut out = std::collections::HashMap::new();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "identifier" {
+            *out.entry(src[n.byte_range()].to_string()).or_insert(0) += 1;
+        }
+        stack.extend(children(n));
+    }
+    out
 }
 
 fn assigned_names(root: Node, src: &str) -> HashSet<String> {
@@ -289,7 +379,15 @@ impl Fmt<'_> {
         }
         let mut out = String::new();
         let mut prev: Option<Node> = None;
+        // `readLine()` throws a checked IOException; the method declares it.
+        let throws = n.kind() == "method_declaration"
+            && n.child_by_field_name("name")
+                .is_some_and(|m| self.throwing.contains(self.text(m)))
+            && !children(n).iter().any(|c| c.kind() == "throws");
         for c in children(n) {
+            if throws && c.kind() == "block" {
+                out.push_str(" throws IOException");
+            }
             if let Some(p) = prev {
                 out.push_str(&self.gap(p, c, ind));
             }
@@ -434,7 +532,40 @@ impl Fmt<'_> {
     fn items(&self, items: &[Node], ind: usize, class: bool) -> String {
         let mut out = String::new();
         let mut prev: Option<Node> = None;
-        for &c in items {
+        let mut skip = None;
+        for (at, &c) in items.iter().enumerate() {
+            if skip == Some(at) {
+                continue;
+            }
+            // `x = "";` right before `x = e;` is never read.
+            if let (Some((l1, r1)), Some((l2, r2))) =
+                (simple_assign(c), items.get(at + 1).and_then(|n| simple_assign(*n)))
+                && self.text(l1) == self.text(l2)
+                && is_literal(r1)
+                && !mentions(r2, self.src, self.text(l1))
+            {
+                continue;
+            }
+            // `List<T> xs = e; ListIterator<T> it = xs.listIterator();` with `xs` used nowhere
+            // else: one line, `ListIterator<T> it = e.listIterator();`. Likewise
+            // `String x = ""; x = e;` is `String x = e;`.
+            if let Some(&next) = items.get(at + 1)
+                && let Some(merged) = self
+                    .merge_list_iterator(c, next, ind)
+                    .or_else(|| self.merge_initializer(c, next, ind))
+            {
+                if let Some(p) = prev
+                    && self.blank_between(p, c, class)
+                {
+                    out.push('\n');
+                }
+                out.push('\n');
+                out.push_str(&indent(ind));
+                out.push_str(&merged);
+                prev = Some(next);
+                skip = Some(at + 1);
+                continue;
+            }
             if let Some(p) = prev {
                 if is_comment(c) && p.end_position().row == c.start_position().row {
                     out.push(' ');
@@ -452,6 +583,47 @@ impl Fmt<'_> {
             prev = Some(c);
         }
         out
+    }
+
+    fn merge_initializer(&self, decl: Node, assign: Node, ind: usize) -> Option<String> {
+        let d = single_declarator(decl)?;
+        let name = self.text(d.child_by_field_name("name")?);
+        let (left, right) = simple_assign(assign)?;
+        if self.text(left) != name
+            || !is_literal(d.child_by_field_name("value")?)
+            || mentions(right, self.src, name)
+        {
+            return None;
+        }
+        let ty = self.text(decl.child_by_field_name("type")?);
+        // `var` would take the literal's type; keep the declared one.
+        Some(format!("{ty} {name} = {};", self.render(right, ind)))
+    }
+
+    fn merge_list_iterator(&self, list: Node, iter: Node, ind: usize) -> Option<String> {
+        let (ld, id) = (single_declarator(list)?, single_declarator(iter)?);
+        let name = self.text(ld.child_by_field_name("name")?);
+        let init = ld.child_by_field_name("value")?;
+        let call = id.child_by_field_name("value")?;
+        let reads_list = call.kind() == "method_invocation"
+            && call.child_by_field_name("object").map(|o| self.text(o)) == Some(name)
+            && call.child_by_field_name("name").map(|o| self.text(o)) == Some("listIterator")
+            && call
+                .child_by_field_name("arguments")
+                .is_some_and(|a| a.named_child_count() == 0);
+        let chainable = matches!(
+            init.kind(),
+            "method_invocation" | "object_creation_expression" | "identifier"
+        );
+        if !reads_list || !chainable || self.ident_uses.get(name).copied() != Some(2) {
+            return None;
+        }
+        Some(format!(
+            "{} {} = {}.listIterator();",
+            self.text(iter.child_by_field_name("type")?),
+            self.text(id.child_by_field_name("name")?),
+            self.render(init, ind)
+        ))
     }
 
     fn blank_between(&self, p: Node, c: Node, class: bool) -> bool {

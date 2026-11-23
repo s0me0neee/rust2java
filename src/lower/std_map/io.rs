@@ -170,6 +170,99 @@ fn read_into(cx: &mut Cx, m: &ast::MethodCallExpr, to_string: bool, out: &mut Ve
 
 // read_line/read_to_string on a line-mode STDIN. `lines()` drops the terminator, so `\n` is put
 // back (a final line without one gains it, and `\r\n` loses the `\r`: accepted).
+// Whether `f` may run inside a closure: called from one, or from a function that is.
+fn run_from_closure(cx: &Cx, root: &ra_ap_syntax::SyntaxNode, f: ra_ap_hir::Function) -> bool {
+    let callee = |n: &ra_ap_syntax::SyntaxNode| -> Option<ra_ap_hir::Function> {
+        if let Some(c) = ast::CallExpr::cast(n.clone()) {
+            let ast::Expr::PathExpr(p) = c.expr()? else {
+                return None;
+            };
+            return match cx.sema.resolve_path(&p.path()?)? {
+                ra_ap_hir::PathResolution::Def(ra_ap_hir::ModuleDef::Function(g)) => Some(g),
+                _ => None,
+            };
+        }
+        ast::MethodCallExpr::cast(n.clone()).and_then(|m| cx.sema.resolve_method_call(&m))
+    };
+    let nodes = cx.expanded_descendants(root);
+    let mut reached: std::collections::HashSet<ra_ap_hir::Function> = nodes
+        .iter()
+        .filter(|n| n.ancestors().any(|a| ast::ClosureExpr::can_cast(a.kind())))
+        .filter_map(&callee)
+        .collect();
+    // Callees of reached functions run there too.
+    loop {
+        let more: Vec<ra_ap_hir::Function> = nodes
+            .iter()
+            .filter(|n| {
+                n.ancestors()
+                    .find_map(ast::Fn::cast)
+                    .and_then(|g| cx.sema.to_def(&g))
+                    .is_some_and(|g| reached.contains(&g))
+            })
+            .filter_map(&callee)
+            .filter(|g| !reached.contains(g))
+            .collect();
+        if more.is_empty() {
+            return reached.contains(&f);
+        }
+        reached.extend(more);
+    }
+}
+
+// The `read_line` buffer is a local that is otherwise only trimmed, split on whitespace, cleared
+// or read into again, and never captured by a closure.
+fn trimmed_buffer(cx: &Cx, m: &ast::MethodCallExpr) -> bool {
+    let Some(arg) = arg_asts(m).into_iter().next() else {
+        return false;
+    };
+    let Some(local) = cx.local_of_path(&ref_inner(&arg)) else {
+        return false;
+    };
+    let Some(scope) = cx.enclosing_fn(m.syntax()) else {
+        return false;
+    };
+    // `readLine` throws IOException, which a lambda calling this function couldn't.
+    let root = m.syntax().ancestors().last().unwrap_or_else(|| scope.clone());
+    if ast::Fn::cast(scope.clone())
+        .and_then(|f| cx.sema.to_def(&f))
+        .is_some_and(|f| run_from_closure(cx, &root, f))
+    {
+        return false;
+    }
+    for node in cx.expanded_descendants(&scope) {
+        let Some(pe) = ast::PathExpr::cast(node) else {
+            continue;
+        };
+        if cx.local_of_path(&ast::Expr::PathExpr(pe.clone())) != Some(local) {
+            continue;
+        }
+        if pe.syntax().ancestors().any(|a| ast::ClosureExpr::can_cast(a.kind())) {
+            return false;
+        }
+        let parent = pe.syntax().parent();
+        let read_into = parent
+            .clone()
+            .and_then(ast::RefExpr::cast)
+            .and_then(|r| r.syntax().parent()?.parent())
+            .and_then(ast::MethodCallExpr::cast)
+            .is_some_and(|c| method_name(&c) == "read_line");
+        let trimmed = parent
+            .and_then(ast::MethodCallExpr::cast)
+            .filter(|c| is_receiver(c, pe.syntax()))
+            .is_some_and(|c| {
+                matches!(
+                    method_name(&c).as_str(),
+                    "trim" | "trim_end" | "split_whitespace" | "clear"
+                )
+            });
+        if !read_into && !trimmed {
+            return false;
+        }
+    }
+    true
+}
+
 fn read_line_mode(
     cx: &mut Cx,
     m: &ast::MethodCallExpr,
@@ -186,6 +279,26 @@ fn read_line_mode(
     };
     let e = ast::Expr::MethodCallExpr(m.clone());
     let unwrapped = unwrapped(cx, &e);
+    // Simple mode: `buf = STDIN.readLine();` when the buffer is only read trimmed, so the lost
+    // `\n` (and the append onto a cleared buffer) can't show.
+    let as_stmt = unwrapped && unwrap_in_stmt(&e)
+        || e.syntax().parent().is_some_and(|p| ast::ExprStmt::can_cast(p.kind()));
+    if crate::mode::simple()
+        && !to_string
+        && as_stmt
+        && cx.lambda_depth == 0
+        && trimmed_buffer(cx, m)
+    {
+        out.push(Stmt::new(
+            line,
+            StmtKind::Expr(Expr::Assign(
+                Box::new(Expr::raw(place)),
+                "=",
+                Box::new(Expr::call(Expr::raw(reader), "readLine", vec![])),
+            )),
+        ));
+        return Expr::raw("null");
+    }
     if unwrapped && unwrap_in_stmt(&e) {
         out.push(Stmt::new(
             line,

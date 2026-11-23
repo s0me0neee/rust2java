@@ -10,8 +10,7 @@ class Main {
     static final BufferedReader STDIN = new BufferedReader(new InputStreamReader(System.in));
 
     public static void main(String[] args) {
-        List<String> lines_items = STDIN.lines().toList();
-        ListIterator<String> lines = lines_items.listIterator();
+        ListIterator<String> lines = STDIN.lines().toList().listIterator();
         var t = Integer.parseUnsignedInt(lines.next());
         for (int i = 0; i < t; i++) {
             List<Integer> cs = Arrays.stream(lines.next().split(Pattern.quote(" "), -1)).map(c -> Integer.parseUnsignedInt(c)).toList();
