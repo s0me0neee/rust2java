@@ -528,7 +528,31 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
                 };
                 Expr::bin(l, if negated { "!=" } else { "==" }, r)
             } else {
-                let eq = Expr::call(l, "equals", vec![r]);
+                // Simple mode: `v.get(i) == Some(c)` is `i < v.size() && v.get(i) == c`.
+                let of = |e: &Expr| match e {
+                    Expr::Call { recv: Some(o), name, args }
+                        if matches!(&**o, Expr::Raw(s) if s == "Optional") && name.ends_with("of") && args.len() == 1 =>
+                    {
+                        Some(args[0].clone())
+                    }
+                    _ => None,
+                };
+                let eq = match (crate::mode::simple(), std_map::guarded_some(&l), of(&r), lt.strip_refs()) {
+                    (true, Some((cond, v)), Some(c), Ty::Option(inner)) => {
+                        let same = if inner.is_primitive() {
+                            let v = if maybe_boxed(&v) && maybe_boxed(&c) {
+                                Expr::Cast(inner.strip_refs().java(), Box::new(v))
+                            } else {
+                                v
+                            };
+                            Expr::bin(v, "==", c)
+                        } else {
+                            Expr::call(v, "equals", vec![c])
+                        };
+                        Expr::bin(cond, "&&", same)
+                    }
+                    _ => Expr::call(l, "equals", vec![r]),
+                };
                 if negated {
                     Expr::Unary("!", Box::new(eq))
                 } else {
