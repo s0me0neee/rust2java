@@ -974,7 +974,12 @@ fn for_uses_unwrap(cx: &Cx, f: &ast::ForExpr) -> bool {
     if lines_call(cx, &iter).is_none() {
         return false;
     }
-    let Some(local) = cx.sema.to_def(&ip) else {
+    binding_unwrapped(cx, &ip, &body)
+}
+
+// Every use of the line binding `ip` in `body` is `ip?` / `ip.unwrap()` / `ip.expect(..)`.
+fn binding_unwrapped(cx: &Cx, ip: &ast::IdentPat, body: &ast::BlockExpr) -> bool {
+    let Some(local) = cx.sema.to_def(ip) else {
         return false;
     };
     let mut uses = 0;
@@ -1025,6 +1030,19 @@ pub(crate) fn plain_lines(cx: &Cx, m: &ast::MethodCallExpr) -> bool {
         "flatten" => true,
         "map" | "inspect" => first_arg(&c).is_some_and(|a| closure_unwraps_param(cx, &a)),
         "map_while" => first_arg(&c).is_some_and(|a| is_result_ok(&a)),
+        // Simple mode's `for (i, line) in ..lines().enumerate()` iterates the lines directly.
+        "enumerate" if crate::mode::simple() => {
+            let Some(f) = c.syntax().parent().and_then(ast::ForExpr::cast) else {
+                return false;
+            };
+            let (Some(ast::Pat::TuplePat(tp)), Some(body)) = (f.pat(), f.loop_body()) else {
+                return false;
+            };
+            match tp.fields().collect::<Vec<_>>().as_slice() {
+                [ast::Pat::IdentPat(_), ast::Pat::IdentPat(line)] => binding_unwrapped(cx, line, &body),
+                _ => false,
+            }
+        }
         _ => false,
     }
 }
@@ -1150,6 +1168,16 @@ pub(crate) fn phantom_line_result(cx: &Cx, e: &ast::Expr) -> bool {
                             .is_some_and(|r| plain_lines_iterable(cx, &r))
                     }),
                 Some(p) if ast::LetStmt::can_cast(p.kind()) => local_is_plain_iterator(cx, local),
+                // `for (i, line) in ..lines().enumerate()`.
+                Some(p) if ast::TuplePat::can_cast(p.kind()) => p
+                    .parent()
+                    .and_then(ast::ForExpr::cast)
+                    .and_then(|f| f.iterable())
+                    .and_then(|it| match strip_parens(&it) {
+                        ast::Expr::MethodCallExpr(m) if method_name(&m) == "enumerate" => m.receiver(),
+                        _ => None,
+                    })
+                    .is_some_and(|r| plain_lines_iterable(cx, &r)),
                 _ => false,
             }
         }
@@ -1178,10 +1206,11 @@ pub(crate) fn phantom_line_let(cx: &Cx, init: &ast::Expr) -> Option<String> {
     }
     let local = cx.local_of_path(&recv)?;
     let ip = local_ident(cx, local)?;
+    // The loop variable itself, or the line in `for (i, line) in ..enumerate()`.
     if !ip
         .syntax()
         .parent()
-        .is_some_and(|p| ast::ForExpr::can_cast(p.kind()))
+        .is_some_and(|p| ast::ForExpr::can_cast(p.kind()) || ast::TuplePat::can_cast(p.kind()))
     {
         return None;
     }
