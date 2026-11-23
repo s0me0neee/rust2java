@@ -4,12 +4,10 @@ import java.util.List;
 class Main {
     sealed interface AppError {
         default String display() {
-            var f = new StringBuilder();
-            switch (this) {
-                case AppError.Negative(var n) -> f.append("negative: " + n);
-                case AppError.Empty() -> f.append("empty");
-            }
-            return f.toString();
+            return switch (this) {
+                case AppError.Negative(var n) -> "negative: " + n;
+                case AppError.Empty() -> "empty";
+            };
         }
 
         record Negative(int _0) implements AppError {

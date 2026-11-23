@@ -1459,10 +1459,19 @@ fn write_method(cx: &mut Cx, imp: &ast::Impl, target: &Target, header: &str) -> 
         }
     }
     let close_line = cx.end_line(fmt_fn.syntax());
-    stmts.push(Stmt::new(
-        close_line,
-        StmtKind::Return(Some(Expr::raw(format!("{fname}.toString()")))),
-    ));
+    // Simple mode: one `write!` (or one per `match` arm) returns its text, with no builder.
+    if crate::mode::simple()
+        && let [_, only] = stmts.as_slice()
+        && let Some(value) = written_value(&only.kind, &fname)
+    {
+        let line = only.line;
+        stmts = vec![Stmt::new(line, StmtKind::Return(Some(value)))];
+    } else {
+        stmts.push(Stmt::new(
+            close_line,
+            StmtKind::Return(Some(Expr::raw(format!("{fname}.toString()")))),
+        ));
+    }
     cx.in_display = saved_display;
     cx.self_ty_java = saved_self;
     Some(Method {
@@ -1470,6 +1479,61 @@ fn write_method(cx: &mut Cx, imp: &ast::Impl, target: &Target, header: &str) -> 
         header: header.to_string(),
         body: Some(crate::jir::Block { stmts, close_line }),
     })
+}
+
+// The String a fmt body writes when it's a single `f.append(e)`, or a switch whose every arm is.
+fn written_value(kind: &StmtKind, f: &str) -> Option<Expr> {
+    let appended = |e: &Expr| -> Option<Expr> {
+        let Expr::Call { recv: Some(r), name, args } = e else { return None };
+        if name != "append" || !matches!(&**r, Expr::Name(n) if n == f) {
+            return None;
+        }
+        let [v] = args.as_slice() else { return None };
+        // `f.alternate()` and the like still need the formatter.
+        let text = crate::emit::render_expr(v);
+        if text.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| w == f) {
+            return None;
+        }
+        Some(if is_string(v) { v.clone() } else { Expr::call(Expr::raw("String"), "valueOf", vec![v.clone()]) })
+    };
+    match kind {
+        StmtKind::Expr(e) => appended(e),
+        StmtKind::Switch { scrut, arms } => {
+            let arms = arms
+                .iter()
+                .map(|a| {
+                    let body = match &a.body {
+                        crate::jir::ArmBody::Expr(e) => crate::jir::ArmBody::Expr(appended(e)?),
+                        crate::jir::ArmBody::Block(b) => match b.stmts.as_slice() {
+                            [s] => match &s.kind {
+                                StmtKind::Expr(e) => crate::jir::ArmBody::Expr(appended(e)?),
+                                StmtKind::Throw(e) => crate::jir::ArmBody::Throw(e.clone()),
+                                _ => return None,
+                            },
+                            _ => return None,
+                        },
+                        crate::jir::ArmBody::Throw(e) => crate::jir::ArmBody::Throw(e.clone()),
+                    };
+                    Some(crate::jir::Arm { line: a.line, label: a.label.clone(), body })
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some(Expr::Switch { scrut: Box::new(scrut.clone()), arms })
+        }
+        _ => None,
+    }
+}
+
+// Java text that's already a String: a literal, a concatenation with one, `String.format(..)`.
+fn is_string(e: &Expr) -> bool {
+    match e {
+        Expr::Raw(r) => r.starts_with('"') || r.starts_with("String.format(") || r.starts_with("String.valueOf("),
+        Expr::Binary(l, "+", r) => is_string(l) || is_string(r),
+        Expr::Call { recv: Some(r), name, .. } => {
+            matches!(&**r, Expr::Raw(s) if s == "String") && matches!(name.as_str(), "format" | "valueOf" | "join")
+                || matches!(name.as_str(), "formatted" | "toString" | "repeat" | "display" | "toUpperCase" | "toLowerCase")
+        }
+        _ => false,
+    }
 }
 
 // `impl Trait for ForeignType` -> static methods in a `<Trait>Impls` nested class.
