@@ -881,7 +881,11 @@ Implemented (`-s`/`--simple`; `crate::mode` holds the flag because `Ty::java()` 
   - `Option` in signatures and fields stays `Optional`.
 - **`&mut` primitive parameters.** A free function returning `()` with one `&mut i32`-style parameter, only used as `*n` and only called as a statement with `&mut local`/`&mut a.field`, returns the value: `static int bump(int n) { n += 1; return n; }`, called as `a = bump(a);` (`lower/mutret.rs`).
 - **Control flow.** A returned `match` is `return switch (..) { .. };`, with `Err` arms as `throw`. `vec![vec![0; m]; n]` fills a list in a `for` loop.
-- **Literals.** `for x in [a, b]` and `&[a, b]` / `&vec![..]` arguments are `List.of(a, b)`.
+- **Stdin.**
+  - `read_line(&mut buf)` into a buffer that is otherwise only trimmed, split on whitespace or cleared is `buf = STDIN.readLine();`: the lost `\n` can't show.
+  - Methods calling `readLine()`, and their callers, declare `throws IOException`. A function that may run inside a closure keeps the exact form, since a lambda can't throw a checked exception.
+  - A pulled `lines()` iterator is `ListIterator<String> lines = STDIN.lines().toList().listIterator();` when nothing else reads the backing list.
+- **Literals.** `for x in [a, b]` and `&[a, b]` / `&vec![..]` arguments are `List.of(a, b)`. `String x = ""; x = e;` is `String x = e;`, and a literal store the next statement overwrites is dropped.
 - **Names and locals.** `_` loop counters are `i`, `j`, `k`. `var` when the initializer is `new X<..>(..)` of the declared class, or a parse call; `List<T> v = new ArrayList<>()` is `var v = new ArrayList<T>()` when `v` is never reassigned.
 - **Cleanup post-pass** (`javafmt.rs`, on the exact-layout text before re-layout):
   - Generated methods nothing calls are dropped (`debug`, `clone`, `partial_cmp`, the `debug_*` helpers, the embedded `Result` type's methods), with liveness followed through calls between them.
