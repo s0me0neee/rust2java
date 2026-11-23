@@ -879,6 +879,11 @@ Implemented (`-s`/`--simple`; `crate::mode` holds the flag because `Ty::java()` 
 - **Numbers.** No unsigned display, comparison, division or min/max helpers: `u32`/`u64` are plain `int`/`long`.
 - **`{:?}`** is `toString` for primitives, strings and std collections of them. A type with `#[derive(Debug)]` and no Display (or manual Debug) generates its Debug text as `toString()`, so `{:?}` of it, or of a list of it, prints directly. Types with a Display keep `debug()`; tuples and `Ordering` keep the exact text.
 - **Structs.** A struct nothing changes in place is a `record` (no field assignment, no `&mut` to it or its fields, no `Cell` fields). `Main` may read a nested record's private fields, so `p.x` stays as written. Records skip the generated `equals`/`hashCode` unless a field is a float.
+- **Tuples as named records** (one-file crates; `lower/tuples.rs`, registry in `crate::tuples`, which `Ty::java()` reads). A tuple type the program builds itself is `record Pos(int r, int c) {}` rather than `Map.Entry` / `TupleN`.
+  - Record name: a `type Pos = (usize, usize)` alias. Otherwise the most common name of the bindings and fields holding it, camel-cased (`start` → `Start`), or a collection's singular (`edges: Vec<..>` → `Edge`). Vague names (`tmp`, `cur`, `pair`, ...) don't count. Fallback: `Pair`, `Triple`, `Tuple`, with a number on a clash.
+  - Field names: per position, the most common binding in the patterns that unpack it (`let (r, c) = p`, `for (from, to, w) in &edges`). Fallback: `first`/`second`/`third`, else `_0`...
+  - Left as is: a tuple type that std makes or takes as a `Map.Entry`. That covers a map's `(K, V)` items, `enumerate`, `zip`, `char_indices`, `partition`/`unzip`, `split_*`, and `overflowing_*`. Also generic tuples, and tuples written with a `Cell` component (stored as an array).
+  - Field access, patterns, comparators, Debug (including the generic `debug_any` helper) and defaults all go through `tuples::accessor`.
 - **`Option` as null** where the value comes from a nullable Java call (`m.get(k)`, `q.poll()`, ...):
   - `if let Some(x) = m.get(k)` is `Item x = m.get(k); if (x != null)`; `match` with `Some`/`None` arms is the same if/else.
   - `while let Some(x) = q.pop()` is `T x; while ((x = q.poll()) != null)`; `Some(Job { .. })` destructures inside the loop.
@@ -918,11 +923,11 @@ Implemented (`-s`/`--simple`; `crate::mode` holds the flag because `Ty::java()` 
   - `x as u64` from `u32`/`usize` is a plain `(long)` widening, without the unsigned mask.
 - **Tests.**
   - `SIMPLE=1 cargo nextest run --test cases --no-capture`: every case must compile and fail or succeed like Rust (`tests/cases/simple-skip` lists exceptions). Stdout differences are counted, not failures: 243/243 pass, and 119 print differently, mostly `{:?}` text.
-  - `tests/simple/*.rs` are golden files: the §22.2 program, user errors, lookups (records, null lookups, heap loop), counters (`&mut` parameters), a contest-style `read_token!` reader, index loops, and `StringBuilder` parameters. Each also prints what rustc prints.
+  - `tests/simple/*.rs` are golden files: the §22.2 program, user errors, lookups (records, null lookups, heap loop), counters (`&mut` parameters), a contest-style `read_token!` reader, index loops, `StringBuilder` parameters and tuple records. Each also prints what rustc prints.
   - All 22 Codeforces programs print the same output in simple mode.
 
 Not yet:
 - `filter` (and other stages) between a `zip`/`enumerate` and its `map` still pairs items with `Map.entry`; `zip` of non-lists still pulls two iterators.
-- Named records for repeated tuple types.
+- Named tuple records in multi-file crates (the registry is per file).
 - `enumerate()` over map entries and stdin lines still counts with an `AtomicInteger`.
 - Inlining single-use temporaries the Rust source names itself, or that aren't `String`/`var` (the post-pass can't see whether the declared type converts the value).

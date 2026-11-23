@@ -111,7 +111,7 @@ fn differential() {
     let (_, _, diag) = run_with_stdin(&mut cmd, &None);
 
     let mut failures = Vec::new();
-    let mut stdout_diffs = 0;
+    let mut stdout_diffs = Vec::new();
     let (mut total_stmts, mut total_drift, mut drift_notes) = (0u64, 0u64, Vec::new());
     for case in &cases {
         let (want, want_code) = expected(case, work.path());
@@ -162,7 +162,7 @@ fn differential() {
         // Simple mode keeps whether the program fails, not the exit code or the panic text.
         let code_ok = got_code == want_code || simple && (got_code != 0) == (want_code != 0);
         if simple && code_ok && got != want {
-            stdout_diffs += 1;
+            stdout_diffs.push(case.name.clone());
             continue;
         }
         if (got != want || !code_ok) && !skip.contains(&case.name) {
@@ -175,7 +175,11 @@ fn differential() {
     let passed = cases.len() - failures.len();
     eprintln!("\n{passed}/{} cases passed", cases.len());
     if simple {
-        eprintln!("simple mode: {stdout_diffs} case(s) print differently from Rust");
+        eprintln!(
+            "simple mode: {} case(s) print differently from Rust: {}",
+            stdout_diffs.len(),
+            stdout_diffs.join(" ")
+        );
     }
     let exact = if total_stmts == 0 {
         100.0

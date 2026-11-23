@@ -1558,16 +1558,16 @@ fn lower_pat(
         }
         ast::Pat::TuplePat(tp) => {
             let ty = cx.pat_ty(p);
-            let arity = match ty.strip_refs() {
-                Ty::Tuple(ts) => ts.len(),
-                _ => tp.fields().count(),
+            let ts = match ty.strip_refs() {
+                Ty::Tuple(ts) => ts.clone(),
+                _ => vec![Ty::Other("?".into()); tp.fields().count()],
             };
             let mut conds = Vec::new();
             for (i, f) in tp.fields().enumerate() {
                 conds.extend(lower_pat(
                     cx,
                     &f,
-                    expr::tuple_field(value.clone(), i, arity),
+                    expr::tuple_field(value.clone(), i, &ts),
                     mode,
                     out,
                 ));

@@ -2812,9 +2812,9 @@ pub fn debug_value(cx: &mut Cx, ty: &Ty, v: Expr, depth: usize) -> Expr {
         }
         Ty::Tuple(ts) if ts.len() == 2 => str_concat(vec![
             Expr::str_lit("("),
-            debug_value(cx, &ts[0], Expr::call(v.clone(), "getKey", vec![]), depth),
+            debug_value(cx, &ts[0], super::expr::tuple_field(v.clone(), 0, ts), depth),
             Expr::str_lit(", "),
-            debug_value(cx, &ts[1], Expr::call(v, "getValue", vec![]), depth),
+            debug_value(cx, &ts[1], super::expr::tuple_field(v, 1, ts), depth),
             Expr::str_lit(")"),
         ]),
         Ty::Result(..) => Expr::call(v, "debug", vec![]),
@@ -3076,6 +3076,10 @@ pub(crate) fn default_value(cx: &mut Cx, ty: &Ty) -> String {
         Ty::Heap(_) => "new PriorityQueue<>()".into(),
         Ty::Option(_) => "Optional.empty()".into(),
         Ty::Adt { java, .. } => format!("{java}.default_()"),
+        Ty::Tuple(ts) if let Some(n) = crate::tuples::named(ts) => {
+            let parts: Vec<String> = ts.iter().map(|t| default_value(cx, t)).collect();
+            format!("new {}({})", n.name, parts.join(", "))
+        }
         Ty::Tuple(ts) if ts.len() == 2 => {
             format!(
                 "Map.entry({}, {})",

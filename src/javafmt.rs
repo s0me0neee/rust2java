@@ -1191,7 +1191,7 @@ const GENERATED: [&str; 8] = [
 // Drops generated methods (and the embedded `Result` type's methods) that nothing calls. Removed
 // text is blanked to spaces so line numbers, which `relayout` maps to Rust lines, stay put.
 pub fn drop_unused(src: &str) -> String {
-    let mut text = src.to_string();
+    let mut text = drop_unused_records(src);
     loop {
         let Some(masked) = mask_qualified_calls(&text) else {
             return text;
@@ -1225,6 +1225,59 @@ pub fn drop_unused(src: &str) -> String {
         }
         text = String::from_utf8(bytes).unwrap_or_default().replace(MASK, ".");
     }
+}
+
+// `record Pair(int a, int b) {}` that nothing names (a tuple only a macro's expansion built).
+fn drop_unused_records(src: &str) -> String {
+    let Some(masked) = mask_qualified_calls(src) else {
+        return src.to_string();
+    };
+    let Some(tree) = parse(&masked) else {
+        return src.to_string();
+    };
+    if tree.root_node().has_error() {
+        return src.to_string();
+    }
+    // Members of the top-level class only: enum variants nested in an interface are used through
+    // `Shape.Circle`.
+    let mut records = Vec::new();
+    for class in children(tree.root_node()).into_iter().filter(|c| c.kind() == "class_declaration") {
+        let Some(body) = class.child_by_field_name("body") else { continue };
+        for n in children(body) {
+            if n.kind() == "record_declaration"
+                && n.child_by_field_name("body").is_some_and(|b| b.named_child_count() == 0)
+                && let Some(name) = n.child_by_field_name("name")
+            {
+                records.push((&masked[name.byte_range()], n.start_byte(), n.end_byte()));
+            }
+        }
+    }
+    let word_count = |name: &str| {
+        src.match_indices(name)
+            .filter(|(i, _)| {
+                let before = src[..*i].chars().next_back();
+                let after = src[i + name.len()..].chars().next();
+                let ident = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$');
+                !ident(before) && !ident(after)
+            })
+            .count()
+    };
+    let mut bytes = masked.clone().into_bytes();
+    let mut dropped = false;
+    for (name, s, e) in records {
+        if word_count(name) == 1 {
+            dropped = true;
+            for b in &mut bytes[s..e] {
+                if *b != b'\n' {
+                    *b = b' ';
+                }
+            }
+        }
+    }
+    if !dropped {
+        return src.to_string();
+    }
+    String::from_utf8(bytes).unwrap_or_default().replace(MASK, ".")
 }
 
 // Calls as (callee, the candidate method containing the call), and the candidate declarations.

@@ -193,6 +193,7 @@ impl Ty {
             Ty::Option(t) => format!("Optional<{}>", t.boxed()),
             Ty::Result(t, e) => format!("Result<{}, {}>", t.boxed(), e.boxed()),
             Ty::Tuple(ts) if ts.is_empty() => "Void".into(),
+            Ty::Tuple(ts) if let Some(n) = crate::tuples::named(ts) => n.name,
             Ty::Tuple(ts) if ts.len() == 2 => {
                 format!("Map.Entry<{}, {}>", ts[0].boxed(), ts[1].boxed())
             }

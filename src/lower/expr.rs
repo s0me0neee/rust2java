@@ -1127,7 +1127,7 @@ fn lower_field(cx: &mut Cx, f: &ast::FieldExpr, out: &mut Vec<Stmt>) -> Expr {
     if let Some(idx) = f.index_token() {
         let i: usize = idx.text().parse().unwrap_or(0);
         if let Ty::Tuple(ts) = bt.strip_refs() {
-            return tuple_field(b, i, ts.len());
+            return tuple_field(b, i, ts);
         }
         return Expr::Field(Box::new(b), format!("_{i}"));
     }
@@ -1138,7 +1138,7 @@ fn lower_field(cx: &mut Cx, f: &ast::FieldExpr, out: &mut Vec<Stmt>) -> Expr {
     let name = if !name.is_empty() && name.chars().all(|c| c.is_ascii_digit()) {
         // rust-analyzer reports `t.1` as a name_ref; tuples are Map.Entry/TupleN, not records.
         if let Ty::Tuple(ts) = bt.strip_refs() {
-            return tuple_field(b, name.parse().unwrap_or(0), ts.len());
+            return tuple_field(b, name.parse().unwrap_or(0), ts);
         }
         format!("_{name}")
     } else {
@@ -1159,15 +1159,16 @@ fn lower_field(cx: &mut Cx, f: &ast::FieldExpr, out: &mut Vec<Stmt>) -> Expr {
     field
 }
 
-pub fn tuple_field(b: Expr, i: usize, arity: usize) -> Expr {
-    if arity == 2 {
-        Expr::call(b, if i == 0 { "getKey" } else { "getValue" }, vec![])
-    } else {
-        Expr::call(b, format!("_{i}"), vec![])
-    }
+pub fn tuple_field(b: Expr, i: usize, ts: &[Ty]) -> Expr {
+    Expr::call(b, crate::tuples::accessor(ts, i), vec![])
 }
 
 pub fn tuple_expr(cx: &mut Cx, ty: &Ty, args: Vec<Expr>) -> Expr {
+    if let Ty::Tuple(ts) = ty.strip_refs()
+        && let Some(n) = crate::tuples::named(ts)
+    {
+        return Expr::New { ty: n.name, args };
+    }
     match args.len() {
         0 => Expr::raw("null"),
         2 => Expr::Call {
@@ -1282,10 +1283,7 @@ fn tuple_field_assign(
         return cx.unsupported(lhs.syntax(), "assigning a tuple field here");
     };
     let b = crate::emit::render_expr(&lower_expr(cx, base, out));
-    let getter = |j: usize| match ts.len() {
-        2 => Expr::raw(format!("{b}.{}", ["getKey()", "getValue()"][j])),
-        _ => Expr::raw(format!("{b}._{j}()")),
-    };
+    let getter = |j: usize| Expr::raw(format!("{b}.{}()", crate::tuples::accessor(ts, j)));
     let fields = (0..ts.len())
         .map(|j| match j {
             _ if j != index => getter(j),

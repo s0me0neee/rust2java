@@ -3,7 +3,6 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
 import java.util.stream.LongStream;
 
 // read_line into a buffer that is only read trimmed: `buf = STDIN.readLine();`, and
@@ -17,16 +16,16 @@ class Main {
         return Long.parseLong(s.strip());
     }
 
-    static Map.Entry<Long, Long> read_pair() throws IOException {
+    static Pair read_pair() throws IOException {
         String s = STDIN.readLine();
         List<Long> v = Arrays.stream(s.strip().split("\\s+")).filter(w -> !w.isEmpty()).map(Long::parseLong).toList();
-        return Map.entry(v.get(0), v.get(1));
+        return new Pair(v.get(0), v.get(1));
     }
 
     static long solve() throws IOException {
-        Map.Entry<Long, Long> read_pair = read_pair();
-        long a = read_pair.getKey();
-        long b = read_pair.getValue();
+        Pair read_pair = read_pair();
+        long a = read_pair.a();
+        long b = read_pair.b();
         return a + b;
     }
 
@@ -35,4 +34,6 @@ class Main {
         List<Long> xs = LongStream.range(0L, n).boxed().map(unused -> read_num()).toList();
         System.out.println(xs + " " + solve());
     }
+
+    record Pair(long a, long b) {}
 }

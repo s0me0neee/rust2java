@@ -187,8 +187,9 @@ fn tuple_comparator(cx: &mut Cx, ty: &Ty, cmps: Vec<Option<String>>) -> String {
     let n_fields = cmps.len();
     let mut chain = String::new();
     for (n, cmp) in cmps.into_iter().enumerate() {
-        let get = match n_fields {
-            2 => ["getKey()", "getValue()"][n].to_string(),
+        let get = match ty.strip_refs() {
+            Ty::Tuple(ts) => format!("{}()", crate::tuples::accessor(ts, n)),
+            _ if n_fields == 2 => ["getKey()", "getValue()"][n].to_string(),
             _ => format!("_{n}()"),
         };
         chain += &match n {

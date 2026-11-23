@@ -1,7 +1,6 @@
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.PriorityQueue;
 
 // Records for immutable structs, map lookups and heap pops as nullable locals, Debug as toString.
@@ -33,9 +32,9 @@ class Main {
 
     public static void main(String[] args) {
         var stock = new HashMap<String, Item>();
-        for (Map.Entry<String, Integer> item2 : List.of(Map.entry("pen", 3), Map.entry("lamp", 40))) {
-            String name = item2.getKey();
-            int price = item2.getValue();
+        for (Pair item2 : List.of(new Pair("pen", 3), new Pair("lamp", 40))) {
+            String name = item2.name();
+            int price = item2.price();
             stock.put(name, new Item(name, price));
         }
 
@@ -67,4 +66,6 @@ class Main {
         s.codePoints().forEach(c -> b.append(c == q ? "\\" + q : c == '\\' ? "\\\\" : c == '\n' ? "\\n" : c == '\r' ? "\\r" : c == '\t' ? "\\t" : c == 0 ? "\\0" : Character.isISOControl(c) ? "\\u{" + Integer.toHexString(c) + "}" : Character.toString(c)));
         return b.append(q).toString();
     }
+
+    record Pair(String name, int price) {}
 }

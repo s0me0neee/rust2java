@@ -554,7 +554,8 @@ fn lower_dbg(cx: &mut Cx, mc: &ast::MacroCall, out: &mut Vec<Stmt>) -> Expr {
         if discarded {
             return Expr::raw("null");
         }
-        return expr::tuple_expr(cx, &Ty::Other("?".into()), values);
+        let ty = cx.ty(&ast::Expr::TupleExpr(tuple));
+        return expr::tuple_expr(cx, &ty, values);
     }
     dbg_one(cx, mc, labels.into_iter().next(), discarded, out)
 }

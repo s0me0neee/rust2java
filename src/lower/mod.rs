@@ -14,6 +14,7 @@ pub mod std_map;
 pub mod stmt;
 pub mod throws;
 pub mod traits;
+pub mod tuples;
 pub mod values;
 pub mod views;
 pub mod wide;
@@ -224,6 +225,7 @@ fn report_external_crates(cx: &mut Cx, root: &SyntaxNode) {
 
 pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
     let file = sema.parse(unit.file_id);
+    crate::tuples::clear();
     let text = file.syntax().text().to_string();
     let mut line_starts = vec![0u32];
     for (i, b) in text.bytes().enumerate() {
@@ -343,6 +345,9 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         let b = builders::analyze(&cx, file.syntax());
         cx.builder_params = b.params;
         cx.builder_locals = b.locals;
+        if crate::tuples::enabled() {
+            tuples::analyze(&mut cx, file.syntax());
+        }
     }
     let comments = collect_comments(&cx, file.syntax());
     let last_line = text.trim_end().lines().count().max(1) as u32;

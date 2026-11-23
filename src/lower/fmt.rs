@@ -1489,7 +1489,7 @@ fn debug_with_spec(
                 if i != 0 {
                     parts.push(Expr::str_lit(", "));
                 }
-                let field = expr::tuple_field(value.clone(), i, ts.len());
+                let field = expr::tuple_field(value.clone(), i, ts);
                 parts.push(format_one(cx, node, field, t, spec, counts, out));
             }
             if ts.len() == 1 {
@@ -1616,6 +1616,18 @@ fn debug_pretty(cx: &mut Cx, compact: Expr) -> Expr {
 fn debug_any(cx: &mut Cx, v: Expr) -> Expr {
     debug_quote(cx, Expr::raw("\"\""), '"');
     debug_float(cx, Expr::raw("0.0"), false);
+    // Simple mode's named tuple records print like the tuples they stand for.
+    let records: String = crate::tuples::all()
+        .iter()
+        .map(|n| {
+            let parts: Vec<String> = n.fields.iter().map(|f| format!("debug_any(t.{f}())")).collect();
+            format!(
+                "if (o instanceof {} t) return \"(\" + {} + \")\"; ",
+                n.name,
+                parts.join(" + \", \" + ")
+            )
+        })
+        .collect();
     let helper = concat!(
         r#"static String debug_any(Object o) { if (o instanceof String s) return debug_str(s, '"'); "#,
         r#"if (o instanceof Character c) return debug_str(String.valueOf(c), '\''); if (o instanceof Double d) return debug_float(d); "#,
@@ -1625,7 +1637,8 @@ fn debug_any(cx: &mut Cx, v: Expr) -> Expr {
         r#"if (o instanceof Collection<?> c) { StringJoiner j = o instanceof Set ? new StringJoiner(", ", "{", "}") : new StringJoiner(", ", "[", "]"); for (Object x : c) j.add(debug_any(x)); return j.toString(); } "#,
         r#"try { return (String) o.getClass().getMethod("debug").invoke(o); } catch (ReflectiveOperationException e) { return String.valueOf(o); } }"#,
     );
-    file_helper(cx, helper.to_string());
+    let helper = helper.replacen("if (o instanceof Map<?, ?> m)", &format!("{records}if (o instanceof Map<?, ?> m)"), 1);
+    file_helper(cx, helper);
     Expr::static_call("debug_any", vec![v])
 }
 
@@ -1745,7 +1758,7 @@ pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
                 if i != 0 {
                     parts.push(Expr::str_lit(", "));
                 }
-                let field = expr::tuple_field(v.clone(), i, ts.len());
+                let field = expr::tuple_field(v.clone(), i, ts);
                 parts.push(debug_operand(cx, field, t));
             }
             if ts.len() == 1 {

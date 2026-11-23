@@ -4,6 +4,7 @@ mod javafmt;
 mod jir;
 mod lower;
 mod mode;
+mod tuples;
 mod ty;
 
 use std::collections::BTreeMap;
@@ -143,6 +144,7 @@ fn transpile(args: &Args, target: &Target, project: &frontend::Project) -> Resul
     };
     for unit in &units {
         let single = single(unit);
+        tuples::enable(args.simple && single);
         let mut lowered = lower::lower_unit(&sema, unit);
         for d in &lowered.diags {
             eprintln!(
