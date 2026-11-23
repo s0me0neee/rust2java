@@ -35,4 +35,32 @@ fn main() {
         }
     }
     println!();
+
+    // Streams without positions (map entries) count with a plain int.
+    let mut stock = std::collections::BTreeMap::new();
+    stock.insert("pear", 0);
+    stock.insert("apple", 3);
+    stock.insert("fig", 7);
+    for (i, (name, n)) in stock.iter().enumerate() {
+        println!("{i}. {name} x{n}");
+    }
+    for (i, (name, n)) in stock.iter().enumerate() {
+        if *n == 0 {
+            continue;
+        }
+        let label = |s: &str| format!("#{i} {s}");
+        println!("{}", label(name));
+    }
+    println!("{}", first_empty(&stock));
+}
+
+fn first_empty(stock: &std::collections::BTreeMap<&str, i32>) -> usize {
+    for (i, (_, n)) in stock.iter().enumerate() {
+        if *n == 0 {
+            return i;
+        } else {
+            continue;
+        }
+    }
+    usize::MAX
 }

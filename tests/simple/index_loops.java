@@ -1,5 +1,8 @@
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.function.Function;
 import java.util.stream.IntStream;
 
 class Main {
@@ -47,5 +50,44 @@ class Main {
             }
         }
         System.out.println();
+
+        // Streams without positions (map entries) count with a plain int.
+        var stock = new TreeMap<String, Integer>();
+        stock.put("pear", 0);
+        stock.put("apple", 3);
+        stock.put("fig", 7);
+        int i2 = 0;
+        for (Map.Entry<String, Integer> item : stock.entrySet()) {
+            String name = item.getKey();
+            int n = item.getValue();
+            System.out.println(i2 + ". " + name + " x" + n);
+            i2++;
+        }
+        int index = 0;
+        for (Map.Entry<String, Integer> item2 : stock.entrySet()) {
+            int i3 = index++;
+            String name2 = item2.getKey();
+            int n2 = item2.getValue();
+            if (n2 == 0) {
+                continue;
+            }
+            Function<String, String> label = s2 -> "#" + i3 + " " + s2;
+            System.out.println(label.apply(name2));
+        }
+        System.out.println(first_empty(stock));
+    }
+
+    static int first_empty(TreeMap<String, Integer> stock) {
+        int index = 0;
+        for (Map.Entry<String, Integer> item : stock.entrySet()) {
+            int i = index++;
+            int n = item.getValue();
+            if (n == 0) {
+                return i;
+            } else {
+                continue;
+            }
+        }
+        return Integer.MAX_VALUE;
     }
 }

@@ -247,6 +247,24 @@ fn lower_for_kind(
         };
     }
 
+    // Simple mode: `for (i, x) in it.enumerate()` over a stream (map entries, stdin lines) counts
+    // with a plain `int` instead of numbering the stream through an `AtomicInteger`.
+    if crate::mode::simple()
+        && let ast::Expr::MethodCallExpr(m) = iterable
+        && method_name(m) == "enumerate"
+        && let Some(src) = m.receiver()
+        && let ast::Pat::TuplePat(tp) = p
+        && let [idx_pat, elem_pat] = tp.fields().collect::<Vec<_>>().as_slice()
+        && let ast::Pat::IdentPat(idx_ip) = idx_pat
+        && idx_ip.mut_token().is_none()
+        && let Some(idx_name) = simple_ident(idx_pat)
+    {
+        return counted_each(cx, f, idx_ip, &idx_name, elem_pat, &strip_parens(&src), line, out);
+    }
+    for_each(cx, f, p, iterable, out)
+}
+
+fn for_each(cx: &mut Cx, f: &ast::ForExpr, p: &ast::Pat, iterable: &ast::Expr, out: &mut Vec<Stmt>) -> ForStmt {
     // A line-mode stdin `lines()` stream carries plain Strings, not phantom `Result`s.
     let elem_ty = if super::std_map::io::plain_lines_iterable(cx, iterable) {
         Ty::Str
@@ -272,6 +290,83 @@ fn lower_for_kind(
         name,
         iter,
         body,
+    }
+}
+
+// `int i = 0; for (x : src) { ...; i++; }`, or `int i = index++;` first in the body when the
+// increment could be skipped (`continue`), be unreachable, or `i` is captured by a lambda.
+#[allow(clippy::too_many_arguments)]
+fn counted_each(
+    cx: &mut Cx,
+    f: &ast::ForExpr,
+    idx_ip: &ast::IdentPat,
+    idx_name: &str,
+    elem_pat: &ast::Pat,
+    src: &ast::Expr,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) -> ForStmt {
+    let jt = cx.pat_ty(&ast::Pat::IdentPat(idx_ip.clone())).java();
+    let captured = cx.binding_captured(idx_ip);
+    let skips = continues_loop(f);
+    let pos = out.len();
+    let idx = cx.declare(idx_name);
+    let counter = if captured || skips { cx.fresh("index") } else { idx.clone() };
+    let ForStmt::Each { ty, name, iter, mut body } = for_each(cx, f, elem_pat, src, out) else {
+        unreachable!()
+    };
+    let falls_through = body.stmts.last().is_none_or(completes);
+    let counter = if counter == idx && !falls_through { cx.fresh("index") } else { counter };
+    out.insert(
+        pos,
+        Stmt::new(line, StmtKind::Local { ty: jt.clone(), name: counter.clone(), init: Some(Expr::raw("0")) }),
+    );
+    if counter == idx {
+        let end = body.close_line.max(line);
+        body.stmts.push(Stmt::new(end, StmtKind::Expr(Expr::raw(format!("{idx}++")))));
+    } else {
+        body.stmts.insert(
+            0,
+            Stmt::new(line, StmtKind::Local { ty: jt, name: idx, init: Some(Expr::raw(format!("{counter}++"))) }),
+        );
+    }
+    ForStmt::Each { ty, name, iter, body }
+}
+
+// A `continue` (bare or labeled) that restarts this loop.
+fn continues_loop(f: &ast::ForExpr) -> bool {
+    let label = f.label().and_then(|l| l.lifetime()).map(|l| l.text().to_string());
+    let Some(body) = f.loop_body() else { return false };
+    body.syntax().descendants().filter_map(ast::ContinueExpr::cast).any(|c| {
+        match c.lifetime() {
+            Some(l) => Some(l.text().to_string()) == label,
+            // Bare: the innermost loop around it is this one.
+            None => c
+                .syntax()
+                .ancestors()
+                .find(|a| {
+                    ast::ForExpr::can_cast(a.kind())
+                        || ast::WhileExpr::can_cast(a.kind())
+                        || ast::LoopExpr::can_cast(a.kind())
+                })
+                .is_some_and(|a| a == *f.syntax()),
+        }
+    })
+}
+
+// Whether control can reach the statement after `s`.
+fn completes(s: &Stmt) -> bool {
+    match &s.kind {
+        StmtKind::Return(_) | StmtKind::Break(_) | StmtKind::Continue(_) | StmtKind::Throw(_) => false,
+        StmtKind::If { then, els: Some(e), .. } => then.stmts.last().is_none_or(completes) || completes(e),
+        StmtKind::Block(b) => b.stmts.last().is_none_or(completes),
+        StmtKind::Switch { arms, .. } => arms.iter().any(|a| match &a.body {
+            crate::jir::ArmBody::Expr(_) => true,
+            crate::jir::ArmBody::Throw(_) => false,
+            crate::jir::ArmBody::Block(b) => b.stmts.last().is_none_or(completes),
+        }),
+        StmtKind::While { cond, .. } => !matches!(cond, Expr::Raw(t) if t == "true"),
+        _ => true,
     }
 }
 
