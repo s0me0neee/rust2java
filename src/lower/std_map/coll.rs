@@ -1423,6 +1423,56 @@ pub(super) fn lower_vec_method(
                 .is_some_and(|p| ast::ExprStmt::can_cast(p.kind())) =>
         {
             let recv = simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out);
+            // Simple mode: grow and shrink loops; `v.size()` / `s.length()` can be re-read.
+            let rereadable = matches!(&b0, Expr::Call { recv: Some(r), name, args }
+                if args.is_empty() && matches!(name.as_str(), "size" | "length") && is_simple(r));
+            if crate::mode::simple() {
+                let n = if rereadable {
+                    b0
+                } else {
+                    let n = simple(cx, b0, &Ty::Int(Int::Usize), line, out);
+                    match n {
+                        Expr::Name(_) | Expr::Raw(_) => n,
+                        n => Expr::name(push_local(cx, line, "int".into(), Some(n), out, "len")),
+                    }
+                };
+                let size = Expr::call(recv.clone(), "size", vec![]);
+                let grow = Stmt::new(
+                    line,
+                    StmtKind::While {
+                        label: None,
+                        cond: Expr::bin(size.clone(), "<", n.clone()),
+                        body: crate::jir::Block {
+                            stmts: vec![Stmt::new(
+                                line,
+                                StmtKind::Expr(Expr::call(recv.clone(), "add", vec![b1])),
+                            )],
+                            close_line: line,
+                        },
+                    },
+                );
+                let shrink = Stmt::new(
+                    line,
+                    StmtKind::While {
+                        label: None,
+                        cond: Expr::bin(size.clone(), ">", n),
+                        body: crate::jir::Block {
+                            stmts: vec![Stmt::new(
+                                line,
+                                StmtKind::Expr(Expr::call(
+                                    recv,
+                                    "remove",
+                                    vec![Expr::bin(size, "-", Expr::raw("1"))],
+                                )),
+                            )],
+                            close_line: line,
+                        },
+                    },
+                );
+                out.push(grow);
+                out.push(shrink);
+                return Some(Expr::raw("null"));
+            }
             let n = simple(cx, b0, &Ty::Int(Int::Usize), line, out);
             let (v, n) = (render(&recv), render(&n));
             push_raw(

@@ -391,7 +391,31 @@ impl Fmt<'_> {
             if let Some(p) = prev {
                 out.push_str(&self.gap(p, c, ind));
             }
-            out.push_str(&self.render(c, ind));
+            // `if (c) x; else y;` and brace-less loop bodies get braces and their own lines.
+            let branch = ["consequence", "alternative", "body"]
+                .iter()
+                .any(|f| n.child_by_field_name(f) == Some(c));
+            let else_if = n.kind() == "if_statement"
+                && c.kind() == "if_statement"
+                && n.child_by_field_name("alternative") == Some(c);
+            if branch
+                && matches!(
+                    n.kind(),
+                    "if_statement" | "while_statement" | "for_statement"
+                        | "enhanced_for_statement" | "do_statement"
+                )
+                && c.kind() != "block"
+                && !else_if
+            {
+                out.push_str(&format!(
+                    "{{\n{}{}\n{}}}",
+                    indent(ind + 1),
+                    self.render(c, ind + 1),
+                    indent(ind)
+                ));
+            } else {
+                out.push_str(&self.render(c, ind));
+            }
             prev = Some(c);
         }
         out

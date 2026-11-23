@@ -883,6 +883,8 @@ Implemented (`-s`/`--simple`; `crate::mode` holds the flag because `Ty::java()` 
 - **Control flow.**
   - A returned `match` is `return switch (..) { .. };`, with `Err` arms as `throw`.
   - `vec![vec![0; m]; n]` fills a list in a `for` loop.
+  - `v.resize(n, x)` is `while (v.size() < n) v.add(x);` and `while (v.size() > n) v.remove(v.size() - 1);`.
+  - The layout pass gives brace-less `if`/`else` and loop bodies braces and their own lines.
   - `v.iter().for_each(|x| ..)` as a statement over a list, set or deque, with no `return` or `?` in the closure, is `for (T x : v) { .. }`. Locals it assigns stay plain locals instead of one-element-array cells.
 - **Stdin.**
   - `read_line(&mut buf)` into a buffer that is otherwise only trimmed, split on whitespace or cleared is `buf = STDIN.readLine();`: the lost `\n` can't show.
