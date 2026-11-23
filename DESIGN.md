@@ -562,7 +562,7 @@ There is **no helper library**. Apart from translations of the user's own types,
 
 ## 15. Macros
 
-- **std macros** are translated from their arguments, not their expansion: `println!`, `print!`, `eprintln!`, `eprint!`, `format!`, `write!`, `writeln!`, `panic!`, `assert!`, `assert_eq!`, `assert_ne!`, `debug_assert*!`, `vec!`, `matches!`, `unreachable!`, `todo!`, `unimplemented!`, `dbg!`.
+- **std macros** are translated from their arguments, not their expansion: `println!`, `print!`, `eprintln!`, `eprint!`, `format!`, `write!`, `writeln!`, `panic!`, `assert!`, `assert_eq!`, `assert_ne!`, `debug_assert*!`, `vec!`, `matches!`, `unreachable!`, `todo!`, `unimplemented!`, `dbg!`. `dbg!(x * 2)` prints `x * 2 = 10` to stderr in both modes: the argument as written, without Rust's `[file:line:col]` prefix, and the value's Java `toString`. A bare `dbg!()` prints nothing.
   - `assert_eq!(a, b)` → `if (!Objects.equals(a, b)) throw new RuntimeException("assertion `left == right` failed\n  left: " + … );`
   - `matches!(e, P)` → `e instanceof P` or a switch expression returning a boolean.
 - **User `macro_rules!`** are expanded by the frontend, and every emitted node is tagged with the **call-site line**.

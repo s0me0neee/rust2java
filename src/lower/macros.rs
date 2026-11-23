@@ -522,25 +522,93 @@ fn lower_assert(cx: &mut Cx, mc: &ast::MacroCall, name: &str, out: &mut Vec<Stmt
 }
 
 fn lower_dbg(cx: &mut Cx, mc: &ast::MacroCall, out: &mut Vec<Stmt>) -> Expr {
+    let discarded = mc
+        .syntax()
+        .parent()
+        .and_then(|p| p.parent())
+        .is_some_and(|p| ast::ExprStmt::can_cast(p.kind()));
+    // The arguments as written (the expansion has lost their spacing: `x*2`).
+    let labels = mc
+        .token_tree()
+        .map(|t| split_args(&t.syntax().text().to_string()))
+        .unwrap_or_default();
+    // `dbg!(a, b)` expands to `(dbg!(a), dbg!(b))` (in a statement, wrapped in an expr stmt).
     if let Some(expansion) = cx.sema.expand_macro_call(mc)
-        && let Some(tuple) = ast::TupleExpr::cast(expansion.value)
+        && let Some(tuple) = expansion
+            .value
+            .descendants()
+            .find_map(ast::TupleExpr::cast)
+            .filter(|t| t.fields().all(|f| matches!(f, ast::Expr::MacroExpr(_))))
     {
-        let values: Vec<_> = tuple
-            .fields()
-            .map(|e| expr::lower_expr(cx, &e, out))
-            .collect();
+        let mut values = Vec::new();
+        for (i, field) in tuple.fields().enumerate() {
+            let inner = match &field {
+                ast::Expr::MacroExpr(m) => m.macro_call(),
+                _ => None,
+            };
+            values.push(match inner {
+                Some(inner) => dbg_one(cx, &inner, labels.get(i).cloned(), discarded, out),
+                None => expr::lower_expr(cx, &field, out),
+            });
+        }
+        if discarded {
+            return Expr::raw("null");
+        }
         return expr::tuple_expr(cx, &Ty::Other("?".into()), values);
     }
+    dbg_one(cx, mc, labels.into_iter().next(), discarded, out)
+}
+
+// Top-level comma-separated pieces of `(a, f(b, c), "x,y")`, trimmed, without a trailing empty one.
+fn split_args(tree: &str) -> Vec<String> {
+    let inner = tree
+        .trim()
+        .strip_prefix('(')
+        .and_then(|t| t.strip_suffix(')'))
+        .unwrap_or(tree);
+    let (mut out, mut cur, mut depth, mut quote) = (Vec::new(), String::new(), 0i32, None);
+    let mut escaped = false;
+    for ch in inner.chars() {
+        match quote {
+            Some(q) => {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == q {
+                    quote = None;
+                }
+            }
+            None => match ch {
+                '"' => quote = Some('"'),
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                ',' if depth == 0 => {
+                    out.push(cur.trim().to_string());
+                    cur.clear();
+                    continue;
+                }
+                _ => {}
+            },
+        }
+        cur.push(ch);
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur.trim().to_string());
+    }
+    out
+}
+
+// One `dbg!(x)`: prints `x = <value>` to stderr (no `[file:line:col]`) and yields the value.
+fn dbg_one(
+    cx: &mut Cx,
+    mc: &ast::MacroCall,
+    label: Option<String>,
+    discarded: bool,
+    out: &mut Vec<Stmt>,
+) -> Expr {
+    // A bare `dbg!()` only prints its location, which isn't kept.
     let Some(matched) = expanded_node::<ast::MatchExpr>(cx, mc) else {
-        let line = cx.line(mc.syntax());
-        out.push(Stmt::new(
-            line,
-            StmtKind::Expr(Expr::call(
-                Expr::raw("System.err"),
-                "println",
-                vec![Expr::str_lit(&format!("[line {line}]"))],
-            )),
-        ));
         return Expr::raw("null");
     };
     let Some(value) = matched.expr() else {
@@ -550,12 +618,8 @@ fn lower_dbg(cx: &mut Cx, mc: &ast::MacroCall, out: &mut Vec<Stmt>) -> Expr {
     let ty = cx.ty(&value);
     let lowered = expr::lower_expr(cx, &value, out);
     let line = cx.line(mc.syntax());
-    let label = Expr::str_lit(&format!("[line {line}] {} = ", value.syntax().text()));
-    let discarded = mc
-        .syntax()
-        .parent()
-        .and_then(|p| p.parent())
-        .is_some_and(|p| ast::ExprStmt::can_cast(p.kind()));
+    let text = label.unwrap_or_else(|| value.syntax().text().to_string());
+    let label = Expr::str_lit(&format!("{text} = "));
     let print = |v: Expr| {
         Stmt::new(
             line,
