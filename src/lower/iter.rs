@@ -1192,8 +1192,8 @@ fn lower_source(
                 }
                 _ => return cx.unsupported(m.syntax(), "matches() pattern"),
             };
+            let quoted = regex_of(cx, literal_pattern(&pat_ast), pat);
             cx.import("java.util.regex.Pattern");
-            let quoted = Expr::call(Expr::raw("Pattern"), "quote", vec![pat]);
             let matcher = Expr::call(
                 Expr::call(Expr::raw("Pattern"), "compile", vec![quoted]),
                 "matcher",
@@ -1217,8 +1217,7 @@ fn lower_source(
                 Ty::Char => Expr::call(Expr::raw("String"), "valueOf", vec![p]),
                 _ => return cx.unsupported(m.syntax(), "rsplit by closure/char set"),
             };
-            cx.import("java.util.regex.Pattern");
-            let quoted = Expr::call(Expr::raw("Pattern"), "quote", vec![pat]);
+            let quoted = regex_of(cx, literal_pattern(&pat_ast), pat);
             let parts = Expr::call(recv, "split", vec![quoted, Expr::raw("-1")]);
             let list = Expr::call(Expr::raw("Arrays"), "asList", vec![parts]);
             Expr::call(Expr::call(list, "reversed", vec![]), "stream", vec![])
@@ -1248,8 +1247,8 @@ fn lower_source(
                 Ty::Char => Expr::call(Expr::raw("String"), "valueOf", vec![p]),
                 _ => return cx.unsupported(m.syntax(), "rsplitn by closure/char set"),
             };
-            cx.import("java.util.regex.Pattern");
-            let quoted = Expr::call(Expr::raw("Pattern"), "quote", vec![pat]);
+            let reversed = literal_pattern(&pat_ast).map(|s| s.chars().rev().collect());
+            let quoted = regex_of(cx, reversed, pat);
             let parts = Expr::call(rev(recv), "split", vec![quoted, limit]);
             let x = cx.fresh_param("part");
             let back = Expr::Lambda {
@@ -1273,8 +1272,7 @@ fn lower_source(
                 Ty::Char => Expr::call(Expr::raw("String"), "valueOf", vec![p]),
                 _ => return cx.unsupported(m.syntax(), "split_terminator by closure/char set"),
             };
-            cx.import("java.util.regex.Pattern");
-            let quoted = Expr::call(Expr::raw("Pattern"), "quote", vec![pat]);
+            let quoted = regex_of(cx, literal_pattern(&pat_ast), pat);
             let parts = super::std_map::push_local(
                 cx,
                 line,
@@ -1312,8 +1310,7 @@ fn lower_source(
                 Ty::Char => Expr::call(Expr::raw("String"), "valueOf", vec![p]),
                 _ => return cx.unsupported(m.syntax(), "split by closure/char set"),
             };
-            cx.import("java.util.regex.Pattern");
-            let quoted = Expr::call(Expr::raw("Pattern"), "quote", vec![pat]);
+            let quoted = regex_of(cx, literal_pattern(&pat_ast), pat);
             Expr::call(
                 Expr::raw("Arrays"),
                 "stream",
@@ -1357,6 +1354,34 @@ fn char_set(e: &ast::Expr) -> Option<Vec<char>> {
         chars.push(c.value().ok()?);
     }
     (!chars.is_empty()).then_some(chars)
+}
+
+// The text of a string or char literal pattern (`","`, `&","`, `' '`).
+fn literal_pattern(e: &ast::Expr) -> Option<String> {
+    let e = match strip_parens(e) {
+        ast::Expr::RefExpr(r) => strip_parens(&r.expr()?),
+        other => other,
+    };
+    let ast::Expr::Literal(lit) = e else {
+        return None;
+    };
+    match lit.kind() {
+        ast::LiteralKind::Char(c) => c.value().ok().map(String::from),
+        ast::LiteralKind::String(s) => s.value().ok().map(|v| v.to_string()),
+        _ => None,
+    }
+}
+
+// A literal with no regex metacharacters is its own regex; anything else goes through `Pattern.quote`.
+fn regex_of(cx: &mut Cx, literal: Option<String>, pat: Expr) -> Expr {
+    if let Some(s) = literal
+        && !s.is_empty()
+        && !s.chars().any(|c| "\\^$.|?*+()[]{}".contains(c))
+    {
+        return Expr::str_lit(&s);
+    }
+    cx.import("java.util.regex.Pattern");
+    Expr::call(Expr::raw("Pattern"), "quote", vec![pat])
 }
 
 // Regex character class matching any of `chars`.

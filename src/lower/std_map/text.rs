@@ -1051,8 +1051,10 @@ pub(super) fn direct_parse(cx: &Cx, e: &ast::Expr) -> Option<DirectParse> {
     // Simple mode: every parse throws on bad input, like a person would write it.
     if crate::mode::throws() {
         return match t.strip_refs() {
+            // Simple mode has no unsigned types, so the signed parsers read as intended.
+            Ty::Int(Int::U64) => Some(DirectParse::Call("Long.parseLong")),
             Ty::Int(i) if i.is_long() => Some(DirectParse::Call(int_parser(*i)?)),
-            Ty::Int(Int::U32 | Int::Usize) => Some(DirectParse::Call("Integer.parseUnsignedInt")),
+            Ty::Int(Int::U32 | Int::Usize) => Some(DirectParse::Call("Integer.parseInt")),
             Ty::Int(i @ (Int::I8 | Int::I16)) => Some(DirectParse::Call(int_parser(*i)?)),
             Ty::Int(Int::U16) => Some(DirectParse::Bounded(65535)),
             Ty::Int(_) => Some(DirectParse::Call("Integer.parseInt")),

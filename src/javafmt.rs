@@ -295,6 +295,38 @@ fn is_string_expr(n: Node, src: &str) -> bool {
     }
 }
 
+// Whether `n`'s type comes from a declared target: an explicitly typed initializer, an assignment
+// or a method's `return`, possibly through parentheses and `?:` branches.
+fn typed_slot(n: Node, src: &str) -> bool {
+    let mut cur = n;
+    while let Some(p) = cur.parent() {
+        match p.kind() {
+            "parenthesized_expression" => {}
+            "ternary_expression" if p.child_by_field_name("condition") != Some(cur) => {}
+            "variable_declarator" => {
+                let typed = p.parent().and_then(|d| d.child_by_field_name("type"));
+                return typed.is_some_and(|t| &src[t.byte_range()] != "var");
+            }
+            "assignment_expression" => return p.child_by_field_name("right") == Some(cur),
+            "return_statement" => {
+                // A lambda's return type is inferred, so it gives no target.
+                let mut up = p.parent();
+                while let Some(u) = up {
+                    match u.kind() {
+                        "lambda_expression" => return false,
+                        "method_declaration" => return true,
+                        _ => up = u.parent(),
+                    }
+                }
+                return false;
+            }
+            _ => return false,
+        }
+        cur = p;
+    }
+    false
+}
+
 // `String.valueOf(x)` with one argument.
 fn is_value_of(n: Node, src: &str) -> bool {
     n.kind() == "method_invocation"
@@ -370,7 +402,7 @@ impl Fmt<'_> {
         if n.child_count() == 0 || ATOMS.contains(&n.kind()) {
             return self.text(n).trim_end().to_string();
         }
-        if let Some(text) = self.var_list(n, ind) {
+        if let Some(text) = self.var_list(n, ind).or_else(|| self.idiom(n, ind)) {
             return text;
         }
         let plain = self.plain(n);
@@ -442,6 +474,90 @@ impl Fmt<'_> {
         }
         let args = self.render(value.child_by_field_name("arguments")?, ind);
         Some(format!("var {name} = new ArrayList{targs}{args};"))
+    }
+
+    // The shorter JDK spelling of a generated expression, when one means the same thing.
+    fn idiom(&self, n: Node, ind: usize) -> Option<String> {
+        match n.kind() {
+            "method_invocation" => {}
+            "lambda_expression" => return self.method_ref(n),
+            _ => return None,
+        }
+        let name = self.text(n.child_by_field_name("name")?);
+        let object = n.child_by_field_name("object");
+        let args: Vec<Node> = n
+            .child_by_field_name("arguments")
+            .map(|a| children(a).into_iter().filter(|c| c.is_named() && !is_comment(*c)).collect())
+            .unwrap_or_default();
+        // `Arrays.stream(a)` of an object array, as its one argument.
+        let stream_of_array = |o: Node| -> Option<String> {
+            let inner: Vec<Node> = o
+                .child_by_field_name("arguments")
+                .map(|a| children(a).into_iter().filter(|c| c.is_named()).collect())?;
+            (self.text(o.child_by_field_name("object")?) == "Arrays"
+                && self.text(o.child_by_field_name("name")?) == "stream"
+                && inner.len() == 1)
+                .then(|| self.render(inner[0], ind))
+        };
+        match (name, object, args.as_slice()) {
+            // A literal char made a String is a String literal.
+            ("valueOf", Some(o), [c]) if self.text(o) == "String" && c.kind() == "character_literal" => {
+                let inner = &self.text(*c)[1..self.text(*c).len() - 1];
+                let inner = match inner {
+                    "\\'" => "'",
+                    "\"" => "\\\"",
+                    other => other,
+                };
+                Some(format!("\"{inner}\""))
+            }
+            // `toList()` is never mutated, so the fixed-size `asList` view serves.
+            ("toList", Some(o), []) => Some(format!("Arrays.asList({})", stream_of_array(o)?)),
+            ("collect", Some(o), [c]) if self.text(*c) == "Collectors.toCollection(ArrayList::new)" => {
+                if let Some(a) = stream_of_array(o) {
+                    return Some(format!("new ArrayList<>(Arrays.asList({a}))"));
+                }
+                let src = o.child_by_field_name("object")?;
+                let empty = o.child_by_field_name("arguments")?.named_child_count() == 0;
+                let collection = self.decl_types.get(self.text(src)).is_some_and(|t| {
+                    ["List<", "ArrayList<", "Set<", "HashSet<", "TreeSet<", "Deque<", "ArrayDeque<"]
+                        .iter()
+                        .any(|p| t.starts_with(p))
+                });
+                (src.kind() == "identifier"
+                    && self.text(o.child_by_field_name("name")?) == "stream"
+                    && empty
+                    && collection)
+                    .then(|| format!("new ArrayList<>({})", self.text(src)))
+            }
+            ("empty", Some(o), [])
+                if self.text(o) == "Optional"
+                    && n.child_by_field_name("type_arguments").is_some()
+                    && typed_slot(n, self.src) =>
+            {
+                Some("Optional.empty()".into())
+            }
+            _ => None,
+        }
+    }
+
+    // `s -> Integer.parseInt(s)` -> `Integer::parseInt`.
+    fn method_ref(&self, n: Node) -> Option<String> {
+        let p = n.child_by_field_name("parameters").filter(|p| p.kind() == "identifier")?;
+        let body = n.child_by_field_name("body").filter(|b| b.kind() == "method_invocation")?;
+        let class = self.text(body.child_by_field_name("object")?);
+        let method = self.text(body.child_by_field_name("name")?);
+        let args = body.child_by_field_name("arguments")?;
+        let parsers = [
+            ("Integer", "parseInt"),
+            ("Long", "parseLong"),
+            ("Double", "parseDouble"),
+            ("Integer", "parseUnsignedInt"),
+            ("Long", "parseUnsignedLong"),
+        ];
+        (parsers.contains(&(class, method))
+            && args.named_child_count() == 1
+            && args.named_child(0).is_some_and(|a| self.text(a) == self.text(p)))
+        .then(|| format!("{class}::{method}"))
     }
 
     // `n` without redundant wrapping: a cast of a local to its declared type, or parentheses
@@ -1027,6 +1143,15 @@ mod tests {
         assert_eq!(
             layout(src),
             "class Main {\n    static int N = 3;\n\n    static void f() {\n        var s = xs.stream().map(y -> {\n            return y;\n        }).toList();\n    }\n}\n"
+        );
+    }
+
+    #[test]
+    fn jdk_idioms() {
+        let src = "class Main { static Optional<Integer> f(String l) { List<String> a = Arrays.stream(l.split(\",\")).toList(); List<String> b = Arrays.stream(l.split(\",\")).collect(Collectors.toCollection(ArrayList::new)); var c = a.stream().map(s -> Integer.parseInt(s)).toList(); boolean d = l.endsWith(String.valueOf('\\'')); Function<Integer, Optional<Integer>> g = x -> x > 0 ? Optional.of(x) : Optional.<Integer>empty(); return d ? Optional.of(1) : Optional.<Integer>empty(); } }";
+        assert_eq!(
+            layout(src),
+            "class Main {\n    static Optional<Integer> f(String l) {\n        List<String> a = Arrays.asList(l.split(\",\"));\n        List<String> b = new ArrayList<>(Arrays.asList(l.split(\",\")));\n        var c = a.stream().map(Integer::parseInt).toList();\n        boolean d = l.endsWith(\"'\");\n        Function<Integer, Optional<Integer>> g = x -> x > 0 ? Optional.of(x) : Optional.<Integer>empty();\n        return d ? Optional.of(1) : Optional.empty();\n    }\n}\n"
         );
     }
 

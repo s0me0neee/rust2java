@@ -4,16 +4,15 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.ListIterator;
-import java.util.regex.Pattern;
 
 class Main {
     static final BufferedReader STDIN = new BufferedReader(new InputStreamReader(System.in));
 
     public static void main(String[] args) {
         ListIterator<String> lines = STDIN.lines().toList().listIterator();
-        var t = Integer.parseUnsignedInt(lines.next());
+        var t = Integer.parseInt(lines.next());
         for (int i = 0; i < t; i++) {
-            List<Integer> cs = Arrays.stream(lines.next().split(Pattern.quote(" "), -1)).map(c -> Integer.parseUnsignedInt(c)).toList();
+            List<Integer> cs = Arrays.stream(lines.next().split(" ", -1)).map(Integer::parseInt).toList();
             var hash = new HashSet<String>();
             for (int j = 0; j < cs.get(0); j++) {
                 hash.add(lines.next());

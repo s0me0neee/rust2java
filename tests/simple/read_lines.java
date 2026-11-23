@@ -19,7 +19,7 @@ class Main {
 
     static Map.Entry<Long, Long> read_pair() throws IOException {
         String s = STDIN.readLine();
-        List<Long> v = Arrays.stream(s.strip().split("\\s+")).filter(w -> !w.isEmpty()).map(x -> Long.parseLong(x)).toList();
+        List<Long> v = Arrays.stream(s.strip().split("\\s+")).filter(w -> !w.isEmpty()).map(Long::parseLong).toList();
         return Map.entry(v.get(0), v.get(1));
     }
 

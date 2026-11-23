@@ -896,6 +896,8 @@ Implemented (`-s`/`--simple`; `crate::mode` holds the flag because `Ty::java()` 
   - Generated methods nothing calls are dropped (`debug`, `clone`, `partial_cmp`, the `debug_*` helpers, the embedded `Result` type's methods), with liveness followed through calls between them.
   - Redundant parentheses (around primaries, and in argument, initializer, return and assignment slots), casts of a local to its own declared type, `String.valueOf(x)` inside a string concatenation, and enum discriminants nothing reads (`Small(0)`, `final int value`).
   - The file's leading comment (set off by a blank line) goes above `class Main`.
+  - JDK spellings: `Arrays.asList(a)` for `Arrays.stream(a).toList()`, `new ArrayList<>(..)` for a `toCollection(ArrayList::new)` of an array or a typed collection, `"c"` for `String.valueOf('c')`, `Integer::parseInt` for `s -> Integer.parseInt(s)`, and `Optional.empty()` without a type witness where a declared type, assignment or method `return` gives it.
+- **Parsing and splitting.** `u32`/`u64` parse with `Integer.parseInt`/`Long.parseLong`. In both modes a literal separator with no regex metacharacters is its own regex: `s.split(",", -1)`, not `Pattern.quote(",")`.
 - **Tests.**
   - `SIMPLE=1 cargo nextest run --test cases --no-capture`: every case must compile and fail or succeed like Rust (`tests/cases/simple-skip` lists exceptions). Stdout differences are counted, not failures: 243/243 pass, and 119 print differently, mostly `{:?}` text.
   - `tests/simple/*.rs` are golden files: the §22.2 program, user errors, lookups (records, null lookups, heap loop), and counters (`&mut` parameters). Each also prints what rustc prints.
