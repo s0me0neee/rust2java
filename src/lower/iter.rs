@@ -2548,14 +2548,19 @@ fn lower_pulled(
         };
     };
     let peeked = format!("{items}.get({it}.nextIndex())");
+    // `it.hasNext() ? Optional.<T>of(v) : Optional.<T>empty()`, which `unwrap_or` and friends
+    // can take apart (`option::guarded_some`).
+    let guarded = |v: String| {
+        Expr::Ternary(
+            Box::new(Expr::call(Expr::raw(&it), "hasNext", vec![])),
+            Box::new(Expr::call(Expr::raw("Optional"), &format!("<{t}>of"), vec![Expr::raw(v)])),
+            Box::new(Expr::raw(format!("Optional.<{t}>empty()"))),
+        )
+    };
     match name {
         "next" if is_unwrapped_next(cx, m) => Expr::call(Expr::raw(it), "next", vec![]),
-        "next" => Expr::raw(format!(
-            "({it}.hasNext() ? Optional.<{t}>of({it}.next()) : Optional.<{t}>empty())"
-        )),
-        "peek" => Expr::raw(format!(
-            "({it}.hasNext() ? Optional.<{t}>of({peeked}) : Optional.<{t}>empty())"
-        )),
+        "next" => guarded(format!("{it}.next()")),
+        "peek" => guarded(peeked),
         "next_if_eq" => {
             let x = render(&lower_arg(cx, &args[0], out));
             Expr::raw(format!(

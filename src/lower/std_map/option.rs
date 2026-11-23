@@ -68,6 +68,17 @@ fn is_parse_error(ty: &Ty) -> bool {
 
 // ---- Option ----------------------------------------------------------------------------------
 
+// `cond ? Optional.of(v) : Optional.empty()`, as `(cond, v)`.
+pub(crate) fn guarded_some(e: &Expr) -> Option<(Expr, Expr)> {
+    let Expr::Ternary(cond, some, none) = e else { return None };
+    if !matches!(&**none, Expr::Raw(r) if r.starts_with("Optional.") && r.ends_with("empty()")) {
+        return None;
+    }
+    let Expr::Call { recv: Some(o), name, args } = &**some else { return None };
+    (matches!(&**o, Expr::Raw(r) if r == "Optional") && name.ends_with("of") && args.len() == 1)
+        .then(|| ((**cond).clone(), args[0].clone()))
+}
+
 pub(super) fn lower_option_method(
     cx: &mut Cx,
     m: &ast::MethodCallExpr,
@@ -103,6 +114,30 @@ pub(super) fn lower_option_method(
             "unwrap" | "expect" => return Some(v),
             "is_some" => return Some(Expr::bin(v, "!=", Expr::raw("null"))),
             "is_none" => return Some(Expr::bin(v, "==", Expr::raw("null"))),
+            _ => {}
+        }
+    }
+    // Simple mode: `cond ? Optional.of(v) : Optional.empty()` (`v.get(i)`, `it.next()`) taken
+    // apart on the spot: `parts.next().unwrap_or("")` is `parts.hasNext() ? parts.next() : ""`.
+    if crate::mode::simple()
+        && let Some((cond, v)) = guarded_some(&recv)
+    {
+        // `it.next().is_some()` still has to advance the iterator.
+        let pure = !render(&v).contains("next(");
+        let fallback = match name {
+            "unwrap_or" => Some(b0.clone()),
+            "unwrap_or_default" => Some(default_value_cx(cx, &inner.clone().unwrap_or(Ty::Other("?".into())))),
+            "unwrap_or_else" => match &b0 {
+                Expr::Lambda { params, body: LambdaBody::Expr(b) } if params.is_empty() => Some((**b).clone()),
+                _ => None,
+            },
+            _ => None,
+        };
+        match name {
+            "unwrap" | "expect" => return Some(v),
+            "is_some" if pure => return Some(cond),
+            "is_none" if pure => return Some(Expr::Unary("!", Box::new(cond))),
+            _ if fallback.is_some() => return Some(conditional(cond, v, fallback?)),
             _ => {}
         }
     }

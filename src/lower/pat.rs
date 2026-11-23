@@ -79,7 +79,11 @@ pub fn lower_condition(
         let first = i == 0;
         let value = if first {
             match mut_element_condition(cx, &p, &init, out) {
-                Some(v) => v,
+                Some((test, true)) => {
+                    tests.push(test);
+                    continue;
+                }
+                Some((v, false)) => v,
                 None if crate::mode::simple() && parts.len() == 1 => {
                     match nullable_some(cx, &p, &init, out, binds) {
                         Ok(test) => {
@@ -115,12 +119,13 @@ pub fn lower_condition(
     and(tests).unwrap_or(Expr::raw("true"))
 }
 
+// The Optional value to match, or (`true`) in simple mode the test itself.
 fn mut_element_condition(
     cx: &mut Cx,
     pat: &ast::Pat,
     init: &ast::Expr,
     out: &mut Vec<Stmt>,
-) -> Option<Expr> {
+) -> Option<(Expr, bool)> {
     use ra_ap_syntax::ast::HasArgList;
     let ast::Pat::TupleStructPat(some) = pat else {
         return None;
@@ -162,6 +167,13 @@ fn mut_element_condition(
         return None;
     }
     let local = cx.sema.to_def(&binding)?;
+    // `v.get_mut(i - 1)` can go negative in Java; a literal or a `len()` can't.
+    let index_ast_negative_possible = name == "get_mut"
+        && !map
+        && !call
+            .arg_list()
+            .and_then(|a| a.args().next())
+            .is_some_and(|a| super::std_map::coll::non_negative(cx, &a, 3));
     let index_ast = if name == "get_mut" {
         let index = call.arg_list()?.args().next()?;
         if !map && !matches!(cx.ty(&index).strip_refs(), Ty::Int(_)) {
@@ -172,8 +184,20 @@ fn mut_element_condition(
         None
     };
     let source = place(cx, &source, out);
+    let simple = crate::mode::simple();
     let index = if let Some(index) = index_ast {
-        place(cx, &index, out)
+        // A literal index reads as itself; anything else is evaluated once.
+        match super::strip_parens(&index) {
+            ast::Expr::Literal(_) if simple => expr::lower_expr(cx, &index, out),
+            _ => place(cx, &index, out),
+        }
+    } else if simple {
+        // `first_mut` / `last_mut`: `0` / `v.size() - 1` read as they are.
+        if name == "first_mut" {
+            Expr::raw("0")
+        } else {
+            Expr::bin(Expr::call(source.clone(), "size", vec![]), "-", Expr::raw("1"))
+        }
     } else {
         let value = if name == "first_mut" {
             Expr::raw("0")
@@ -196,6 +220,23 @@ fn mut_element_condition(
         Expr::name(index)
     };
     let get = Expr::call(source.clone(), "get", vec![index.clone()]);
+    // Simple mode: the binding only names the slot, so the test is the slot's existence.
+    if crate::mode::simple() {
+        let test = if map {
+            Expr::call(source.clone(), "containsKey", vec![index.clone()])
+        } else if name != "get_mut" || matches!(&index, Expr::Raw(r) if r == "0") {
+            Expr::Unary("!", Box::new(Expr::call(source.clone(), "isEmpty", vec![])))
+        } else {
+            let mut t = Expr::bin(index.clone(), "<", Expr::call(source.clone(), "size", vec![]));
+            if index_ast_negative_possible {
+                t = Expr::bin(Expr::bin(index.clone(), ">=", Expr::raw("0")), "&&", t);
+            }
+            t
+        };
+        let kind = if map { super::ElemAliasKind::Map } else { super::ElemAliasKind::List };
+        cx.elem_aliases.insert(local, (crate::emit::render_expr(&source), crate::emit::render_expr(&index), kind));
+        return Some((test, true));
+    }
     let value = if map {
         Expr::call(Expr::raw("Optional"), "ofNullable", vec![get])
     } else {
@@ -234,7 +275,7 @@ fn mut_element_condition(
             },
         ),
     );
-    Some(Expr::name(temp))
+    Some((Expr::name(temp), false))
 }
 
 // Value for one `let` component of a chain, evaluated exactly once.
@@ -414,6 +455,30 @@ fn nullable_some(
         Ty::Option(t) if t.is_nameable() => Some((**t).clone()),
         _ => None,
     };
+    // Simple mode: `if let Some(x) = v.get(i)` / `it.next()` tests the guard itself and reads
+    // the value inside: `if (i < v.size()) { int x = v.get(i); ... }`.
+    let some_wild = matches!(p, ast::Pat::TupleStructPat(tp)
+        if tp.path().is_some_and(|q| q.syntax().text() == "Some")
+            && matches!(tp.fields().next(), Some(ast::Pat::WildcardPat(_))));
+    if crate::mode::simple()
+        && let Some((cond, val)) = super::std_map::guarded_some(&v)
+        && (bind.is_some() || some_wild)
+        && let Some(elem) = &elem
+    {
+        match &bind {
+            Some(name) => {
+                let java = cx.declare(name.text().as_ref());
+                binds.push(Stmt::new(
+                    line,
+                    StmtKind::Local { ty: elem.strip_refs().java(), name: java, init: Some(val) },
+                ));
+            }
+            // `Some(_)` still takes the item from an iterator.
+            None if crate::emit::render_expr(&val).contains("next(") => stmt::push_discard(binds, line, val),
+            None => {}
+        }
+        return Ok(cond);
+    }
     // `Some(Job { prio, .. })`: the value in a nullable temp, destructured in the body.
     if bind.is_none()
         && let (Some(inner), Some(elem)) = (&inner, &elem)

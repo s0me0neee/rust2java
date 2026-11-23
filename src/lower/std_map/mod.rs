@@ -23,6 +23,7 @@ use coll::{
 use io::{duration_method, fs_read, fs_write, is_stdin, is_stdout, stdio_method};
 use mem::{mem_replace, mem_swap, ref_inner};
 use num::{conditional, lower_float_method, lower_int_method, lower_ordering_method};
+pub(crate) use option::guarded_some;
 use option::{lower_option_method, lower_result_method};
 use text::{lower_small_method, lower_str_method};
 
