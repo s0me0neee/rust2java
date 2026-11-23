@@ -672,6 +672,19 @@ pub fn is_target_typed(e: &Expr) -> bool {
     matches!(e, Expr::Call { name, .. } if name == "collect")
 }
 
+// Simple mode: types whose `toString` stands in for Debug. User types keep their `debug()`, and
+// tuples (`Map.Entry` prints `a=1`) and `Ordering` (an int) keep the exact text.
+fn debug_via_to_string(ty: &Ty) -> bool {
+    match ty.strip_refs() {
+        Ty::Bool | Ty::Char | Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Str => true,
+        Ty::Vec(t) | Ty::Deque(t) | Ty::Set { t, .. } | Ty::Heap(t) | Ty::Option(t) => {
+            debug_via_to_string(t)
+        }
+        Ty::Map { k, v, .. } => debug_via_to_string(k) && debug_via_to_string(v),
+        _ => false,
+    }
+}
+
 // Java's `toString` already prints Rust's Debug text for these (`[1, 2, 3]`, `true`).
 pub(crate) fn debug_is_to_string(ty: &Ty) -> bool {
     match ty.strip_refs() {
@@ -887,6 +900,19 @@ fn format_one(
         return cx.unsupported(node, &format!("format argument type `{}`", ty.describe()));
     }
     let numeric = matches!(ty.strip_refs(), Ty::Int(_) | Ty::F32 | Ty::F64);
+    // Simple mode: `{:?}` is Java's `toString` (`[1, 2]`, `{a=1}`, `Optional[3]`, unquoted text).
+    if crate::mode::simple()
+        && spec.kind == "?"
+        && !spec.alternate
+        && width.is_none()
+        && precision.is_none()
+        && !spec.plus
+        && !spec.zero
+        && debug_via_to_string(ty)
+        && !is_target_typed(&v)
+    {
+        return v;
+    }
     if spec.alternate && spec.kind == "?" {
         if width.is_some() || precision.is_some() || spec.plus || spec.zero {
             return cx.unsupported(node, "flags on a pretty Debug format");

@@ -49,13 +49,14 @@ pub fn lower_source_file(cx: &mut Cx, file: &ast::SourceFile, is_root: bool) -> 
             .unwrap_or(members.len());
         members.insert(at, Member::Method(m));
     }
-    if is_root {
+    if is_root && !(crate::mode::simple() && plain_main(cx, &mut members)) {
         let entry = entry_point(cx, file);
         cx.file_trailer.push(entry);
     }
+    let fin = if crate::mode::simple() { "" } else { "final " };
     Class {
         line: 1,
-        header: format!("public final class {}", cx.class_name),
+        header: format!("public {fin}class {}", cx.class_name),
         members,
         close_line: 1,
         trailer: Vec::new(),
@@ -106,6 +107,34 @@ fn entry_point(cx: &mut Cx, file: &ast::SourceFile) -> String {
     format!(
         "{field}public static void main(String[] args) throws InterruptedException {{ {keep}Thread t = new Thread(null, () -> {{ try {{ {call} }} {panic} catch (StackOverflowError e) {{ System.out.flush(); System.err.println(\"thread 'main' has overflowed its stack\"); System.exit(134); }} }}, \"main\", 1L << 29); t.start(); t.join(); }}"
     )
+}
+
+// Simple mode: the Rust `main` itself is the Java entry point. False when it returns a value
+// (a Result kept as a value), which still needs the exact-mode wrapper.
+fn plain_main(cx: &mut Cx, members: &mut [Member]) -> bool {
+    let Some(m) = members.iter_mut().find_map(|m| match m {
+        Member::Method(m) if m.header == "static void main()" => Some(m),
+        _ => None,
+    }) else {
+        return false;
+    };
+    // A Rust `let args = ...` keeps its name; the parameter steps aside.
+    let param = if cx.file_idents.contains("args") {
+        "argv"
+    } else {
+        "args"
+    };
+    m.header = format!("public static void main(String[] {param})");
+    if cx.uses_args
+        && let Some(body) = &mut m.body
+    {
+        body.stmts.insert(
+            0,
+            Stmt::new(m.line, StmtKind::Raw(format!("ARGS = {param};"))),
+        );
+        cx.file_trailer.push("static String[] ARGS;".into());
+    }
+    true
 }
 
 // A function that calls itself (directly, by name) anywhere in the file.
@@ -1517,6 +1546,11 @@ fn lower_fn_sig(
             Some(d) => cx.convert(&d.ret_type(cx.db)),
             None => Ty::Unit,
         },
+    };
+    // Simple mode: `Result<T, E>` returns `T`; an `Err` is thrown.
+    let ret = match ret {
+        Ty::Result(ok, _) if crate::mode::throws() => *ok,
+        t => t,
     };
     let mut params = Vec::new();
     let mut prelude = Vec::new();

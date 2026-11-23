@@ -760,6 +760,13 @@ pub fn is_control_flow(e: &ast::Expr) -> bool {
 // Lowers `e` in statement context, sending its value to `dest`.
 pub fn lower_to_dest(cx: &mut Cx, e: &ast::Expr, dest: &Dest, out: &mut Vec<Stmt>) {
     let line = cx.line(e.syntax());
+    if crate::mode::throws()
+        && matches!(dest, Dest::Return)
+        && let Some(payload) = super::throws::err_payload(cx, e)
+    {
+        super::throws::push_throw(cx, &payload, line, out);
+        return;
+    }
     match e {
         ast::Expr::BlockExpr(b) => {
             if b.unsafe_token().is_some() || b.async_token().is_some() || b.const_token().is_some()
@@ -1018,6 +1025,15 @@ fn lower_break(cx: &mut Cx, b: &ast::BreakExpr, out: &mut Vec<Stmt>) {
 pub fn lower_if(cx: &mut Cx, i: &ast::IfExpr, dest: &Dest, out: &mut Vec<Stmt>) {
     let line = cx.line(i.syntax());
     let Some(cond) = i.condition() else { return };
+    if crate::mode::throws()
+        && let ast::Expr::LetExpr(le) = &cond
+        && le
+            .expr()
+            .is_some_and(|s| matches!(cx.ty(&s).strip_refs(), Ty::Result(..)))
+        && super::throws::lower_if_let(cx, i, dest, out)
+    {
+        return;
+    }
     cx.push_scope();
     let mut binds = Vec::new();
     let c = pat::lower_condition(cx, &cond, out, &mut binds);

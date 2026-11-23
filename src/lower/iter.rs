@@ -98,7 +98,10 @@ fn lower_for_kind(
         let captured = matches!(p, ast::Pat::IdentPat(ip) if cx.binding_captured(ip));
         // Lambdas can't capture a mutating loop counter: count with a temp, rebind per iteration.
         // `for _ in` gets a Java-only counter, so it can't capture a Rust `i` from outside.
-        let counter = if captured || wildcard {
+        let counter = if wildcard && crate::mode::simple() {
+            cx.claim_first(&["_i", "_j", "_k", "_l", "_m", "_n"])
+                .unwrap_or_else(|| cx.fresh(&name))
+        } else if captured || wildcard {
             cx.fresh(&name)
         } else {
             cx.declare(&name)

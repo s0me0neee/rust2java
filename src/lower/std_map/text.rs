@@ -1045,15 +1045,30 @@ pub(super) enum DirectParse {
 }
 
 pub(super) fn direct_parse(cx: &Cx, e: &ast::Expr) -> Option<DirectParse> {
+    let Ty::Result(t, _) = cx.ty(e) else {
+        return None;
+    };
+    // Simple mode: every parse throws on bad input, like a person would write it.
+    if crate::mode::throws() {
+        return match t.strip_refs() {
+            Ty::Int(i) if i.is_long() => Some(DirectParse::Call(int_parser(*i)?)),
+            Ty::Int(Int::U32 | Int::Usize) => Some(DirectParse::Call("Integer.parseUnsignedInt")),
+            Ty::Int(i @ (Int::I8 | Int::I16)) => Some(DirectParse::Call(int_parser(*i)?)),
+            Ty::Int(Int::U16) => Some(DirectParse::Bounded(65535)),
+            Ty::Int(_) => Some(DirectParse::Call("Integer.parseInt")),
+            Ty::F64 => Some(DirectParse::Call("Double.parseDouble")),
+            Ty::F32 => Some(DirectParse::Call("Float.parseFloat")),
+            Ty::Bool => Some(DirectParse::Call("Boolean.parseBoolean")),
+            Ty::Str => Some(DirectParse::Identity),
+            _ => None,
+        };
+    }
     let parent = ast::MethodCallExpr::cast(e.syntax().parent()?)?;
     if !matches!(method_name(&parent).as_str(), "unwrap" | "expect")
         || parent.receiver()?.syntax() != e.syntax()
     {
         return None;
     }
-    let Ty::Result(t, _) = cx.ty(e) else {
-        return None;
-    };
     match t.strip_refs() {
         Ty::Int(Int::U8) => Some(DirectParse::Bounded(255)),
         Ty::Int(Int::U16) => Some(DirectParse::Bounded(65535)),

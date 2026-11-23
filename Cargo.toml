@@ -20,6 +20,8 @@ ra_ap_load-cargo = "=0.0.358"
 ra_ap_project_model = "=0.0.358"
 ra_ap_paths = "=0.0.358"
 ra_ap_vfs = "=0.0.358"
+tree-sitter = "0.27"
+tree-sitter-java = "0.23.5"
 
 [dev-dependencies]
 duct = "1"

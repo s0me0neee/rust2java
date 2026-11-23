@@ -601,6 +601,12 @@ pub fn lower_match_stmt(cx: &mut Cx, m: &ast::MatchExpr, dest: &Dest, out: &mut 
         return;
     }
     let scrut_ty = cx.ty(&scrut);
+    if crate::mode::throws()
+        && matches!(scrut_ty.strip_refs(), Ty::Result(..))
+        && super::throws::lower_match(cx, m, dest, out)
+    {
+        return;
+    }
     let arm_dest = match dest {
         Dest::Return if cx.ret_ty.as_ref().is_none_or(Ty::is_unit) => Dest::Discard,
         d => d.clone(),
@@ -623,7 +629,9 @@ pub fn lower_match_stmt(cx: &mut Cx, m: &ast::MatchExpr, dest: &Dest, out: &mut 
 // `match` in value position as a Java switch expression, when every arm allows it.
 pub fn try_match_expr(cx: &mut Cx, m: &ast::MatchExpr, out: &mut Vec<Stmt>) -> Option<Expr> {
     let scrut = m.expr()?;
-    if cx.ty(&ast::Expr::MatchExpr(m.clone())).is_unit() {
+    if cx.ty(&ast::Expr::MatchExpr(m.clone())).is_unit()
+        || crate::mode::throws() && matches!(cx.ty(&scrut).strip_refs(), Ty::Result(..))
+    {
         return None;
     }
     let arms: Vec<ast::MatchArm> = m.match_arm_list()?.arms().collect();
@@ -1840,6 +1848,14 @@ pub fn lower_try(cx: &mut Cx, t: &ast::TryExpr, out: &mut Vec<Stmt>) -> Expr {
         return cx.unsupported(t.syntax(), "`?` without an operand");
     };
     let ty = cx.ty(&inner);
+    // Simple mode: the operand already is the Ok value; an error propagates as an exception.
+    if crate::mode::throws() && matches!(ty.strip_refs(), Ty::Result(..)) {
+        if let Some(payload) = super::throws::err_payload(cx, &inner) {
+            super::throws::push_throw(cx, &payload, line, out);
+            return Expr::raw("null");
+        }
+        return expr::lower_expr(cx, &inner, out);
+    }
     let v = expr::lower_expr(cx, &inner, out);
     match ty.strip_refs() {
         Ty::Result(ok, err) => try_result(cx, t, v, ok, err, line, out),

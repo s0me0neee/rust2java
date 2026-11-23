@@ -447,7 +447,7 @@ pub(crate) fn unsigned_arith(ty: &Ty, op: ast::ArithOp, a: Expr, b: Expr) -> Opt
         return None;
     };
     // `usize`/`u8` are Java ints that never exceed the signed range in practice: keep `/` and `%`.
-    if !i.is_unsigned() || matches!(i, Int::Usize | Int::U8) {
+    if !i.is_unsigned() || matches!(i, Int::Usize | Int::U8) || crate::mode::simple() {
         return None;
     }
     match op {
@@ -460,7 +460,7 @@ pub(crate) fn unsigned_arith(ty: &Ty, op: ast::ArithOp, a: Expr, b: Expr) -> Opt
 // Whether Display/Debug of this integer type differs from Java's signed rendering.
 pub(crate) fn unsigned_display(i: Int) -> bool {
     // `usize` is a Java `int`, so its value is already what Rust prints.
-    matches!(i, Int::U16 | Int::U32 | Int::U64 | Int::U128)
+    matches!(i, Int::U16 | Int::U32 | Int::U64 | Int::U128) && !crate::mode::simple()
 }
 
 // Unsigned literals above the signed range need a cast (u32) or two's-complement digits (u64).
@@ -486,6 +486,10 @@ pub(crate) fn unsigned_literal(i: Int, digits: &str) -> Option<String> {
 
 // Rust formats unsigned types as such; Java's own `toString` prints them signed.
 pub(crate) fn unsigned_string(i: Int, v: Expr) -> Option<Expr> {
+    // Simple mode: unsigned values are plain Java ints and longs throughout (DESIGN §22.3).
+    if crate::mode::simple() {
+        return None;
+    }
     match i {
         Int::U16 => {
             let masked = Expr::bin(v, "&", Expr::raw("0xFFFF"));
@@ -511,7 +515,9 @@ pub(crate) fn compare_expr(ty: &Ty, a: Expr, b: Expr) -> Option<Expr> {
             vec![signum(a), signum(b)],
         )),
         // `usize` stays signed like its Display, so `i < v.len()` reads naturally.
-        Ty::Int(i) if i.is_unsigned() && !matches!(i, Int::U8 | Int::Usize) => {
+        Ty::Int(i)
+            if i.is_unsigned() && !matches!(i, Int::U8 | Int::Usize) && !crate::mode::simple() =>
+        {
             Some(unsigned_compare(*i, a, b))
         }
         _ => None,
@@ -550,6 +556,10 @@ fn is_compare_class(s: &str) -> bool {
 }
 
 fn unsigned_compare(i: Int, a: Expr, b: Expr) -> Expr {
+    if crate::mode::simple() {
+        let cls = if i.is_long() { "Long" } else { "Integer" };
+        return Expr::call(Expr::raw(cls), "compare", vec![a, b]);
+    }
     match i {
         Int::U16 => Expr::call(
             Expr::raw("Integer"),

@@ -1,7 +1,9 @@
 mod emit;
 mod frontend;
+mod javafmt;
 mod jir;
 mod lower;
+mod mode;
 mod ty;
 
 use std::collections::BTreeMap;
@@ -41,6 +43,12 @@ struct Args {
         help = "Compile with javac and run each program; exits with the program's exit code"
     )]
     run: bool,
+    #[arg(
+        short,
+        long,
+        help = "Simple mode: Java a person would write (exceptions, plain main, normal layout); exact output only for well-behaved programs"
+    )]
+    simple: bool,
     #[arg(short, long, help = "Don't print the paths of written files")]
     quiet: bool,
     #[arg(
@@ -103,6 +111,7 @@ fn run() -> Result<ExitCode> {
     if args.line_report && matches!(target, Target::Stdout) {
         bail!("--line-report needs an output directory or file");
     }
+    mode::set_simple(args.simple);
     let project = frontend::load(&args.inputs)?;
     ra_ap_hir::attach_db(&project.db, || transpile(&args, &target, &project))
 }
@@ -171,6 +180,20 @@ fn transpile(args: &Args, target: &Target, project: &frontend::Project) -> Resul
         );
         if lowered.needs_result && single {
             java.push_str(&embedded_result());
+        }
+        if args.simple {
+            let blank = |l: usize| lowered.blank_lines.contains(&(l as u32));
+            match javafmt::relayout(&java, &blank) {
+                Some(j) => java = javafmt::explicit_imports(&j),
+                None if lowered.diags.is_empty() => {
+                    let (l, c) = javafmt::first_error(&java).unwrap_or_default();
+                    eprintln!(
+                        "warning: {}: generated Java doesn't parse at Java {l}:{c}; left in exact layout",
+                        unit.path.display()
+                    );
+                }
+                None => {}
+            }
         }
         // Prefixed on line 1 so the incomplete file can't compile, and line numbers still match.
         if !lowered.diags.is_empty() {

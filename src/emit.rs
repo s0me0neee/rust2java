@@ -83,6 +83,40 @@ pub fn render_member_flat(m: &Member) -> String {
     p.out
 }
 
+// Simple mode: `var` where the initializer names the type (`var m = new HashMap<String, Integer>()`,
+// `var n = Integer.parseInt(s)`). Only when the declared and constructed classes are the same, so
+// later assignments keep compiling.
+fn var_local(ty: &str, init: &Expr) -> Option<(String, Expr)> {
+    match init {
+        Expr::New { ty: new_ty, args } => {
+            let class = new_ty.strip_suffix("<>")?;
+            let targs = ty.strip_prefix(class)?;
+            if !targs.starts_with('<') {
+                return None;
+            }
+            Some((
+                "var".into(),
+                Expr::New {
+                    ty: format!("{class}{targs}"),
+                    args: args.clone(),
+                },
+            ))
+        }
+        Expr::Call {
+            recv: None, name, ..
+        } if matches!(
+            (ty, name.as_str()),
+            ("int", "Integer.parseInt" | "Integer.parseUnsignedInt")
+                | ("long", "Long.parseLong")
+                | ("double", "Double.parseDouble")
+        ) =>
+        {
+            Some(("var".into(), init.clone()))
+        }
+        _ => None,
+    }
+}
+
 fn prec(e: &Expr) -> u8 {
     match e {
         Expr::Lambda { .. } => 0,
@@ -219,7 +253,10 @@ impl Printer {
         match &s.kind {
             StmtKind::Local { ty, name, init } => match init {
                 Some(e) => {
-                    let e = self.expr_str(e, 0);
+                    let (ty, e) = match crate::mode::simple().then(|| var_local(ty, e)).flatten() {
+                        Some((t, e)) => (t, self.expr_str(&e, 0)),
+                        None => (ty.clone(), self.expr_str(e, 0)),
+                    };
                     self.word(&format!("{ty} {name} = {e};"));
                 }
                 None => self.word(&format!("{ty} {name};")),
@@ -293,6 +330,16 @@ impl Printer {
             StmtKind::Throw(e) => {
                 let e = self.expr_str(e, 0);
                 self.word(&format!("throw {e};"));
+            }
+            StmtKind::Try {
+                body,
+                decl,
+                handler,
+            } => {
+                self.word("try");
+                self.block(body);
+                self.word(&format!("catch ({decl})"));
+                self.block(handler);
             }
             StmtKind::Block(b) => self.block(b),
             StmtKind::Labeled { label, body } => {

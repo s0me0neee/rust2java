@@ -9,6 +9,7 @@ pub mod macros;
 pub mod pat;
 pub mod std_map;
 pub mod stmt;
+pub mod throws;
 pub mod traits;
 pub mod values;
 pub mod views;
@@ -165,6 +166,8 @@ pub struct Lowered {
     pub diags: Vec<Diag>,
     pub warnings: Vec<Diag>,
     pub needs_result: bool,
+    // 1-based Rust lines that are empty (simple mode keeps them as blank lines).
+    pub blank_lines: HashSet<u32>,
 }
 
 // Names each non-std dependency once, at its first use, so later per-call errors have a cause.
@@ -285,8 +288,23 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
             .collect(),
     };
     report_external_crates(&mut cx, file.syntax());
-    cx.wide = wide::analyze(&cx, file.syntax());
     cx.stdin_lines = !std_map::io::has_byte_reads(&cx, file.syntax());
+    if crate::mode::simple() {
+        crate::mode::set_throws(true);
+        let verdict = throws::eligible(&cx, file.syntax());
+        crate::mode::set_throws(verdict.is_ok());
+        if let Err((node, why)) = verdict {
+            let text = node.text().to_string();
+            let text: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let short: String = text.chars().take(48).collect();
+            let more = if short.len() < text.len() { "…" } else { "" };
+            cx.warn(
+                &node,
+                format!("Result kept as a value (not exceptions) in this file: {why}: `{short}{more}`"),
+            );
+        }
+    }
+    cx.wide = wide::analyze(&cx, file.syntax());
     let comments = collect_comments(&cx, file.syntax());
     let last_line = text.trim_end().lines().count().max(1) as u32;
     let class = items::lower_source_file(&mut cx, &file, unit.is_root);
@@ -306,6 +324,12 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         diags: cx.diags,
         warnings: cx.warnings,
         needs_result: cx.needs_result,
+        blank_lines: text
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| l.trim().is_empty())
+            .map(|(i, _)| i as u32 + 1)
+            .collect(),
     }
 }
 
@@ -885,6 +909,15 @@ impl<'a, 'db> Cx<'a, 'db> {
     fn name_taken(&self, name: &str) -> bool {
         self.method_names.contains(name)
             || (!self.param_mode && self.stmt_lambda_names.contains(name))
+    }
+
+    // The first of `names` not yet used in this method, now taken.
+    pub fn claim_first(&mut self, names: &[&str]) -> Option<String> {
+        let name = names
+            .iter()
+            .find(|n| !self.name_taken(n) && !self.file_idents.contains(**n))?;
+        self.method_names.insert(name.to_string());
+        Some(name.to_string())
     }
 
     pub fn push_scope(&mut self) {

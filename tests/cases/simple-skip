@@ -1,0 +1,2 @@
+# Cases that rely on exact-mode semantics, excluded from SIMPLE=1 exit checks.
+prog_deep_recursion  # needs the big-stack thread exact mode adds

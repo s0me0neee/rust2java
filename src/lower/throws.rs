@@ -1,0 +1,761 @@
+// Simple mode: `Result` as exceptions (DESIGN §22.3). A function returning `Result<T, E>` returns
+// `T` and throws on `Err`; `?`, `unwrap` and `expect` disappear; `match`/`if let` on a Result
+// become try/catch. A file using Result any other way keeps exact-mode Result values.
+
+use ra_ap_hir::{ModuleDef, PathResolution};
+use ra_ap_syntax::{AstNode, SyntaxKind, SyntaxNode, ast, ast::HasArgList, ast::HasName};
+
+use super::stmt::{self, Dest};
+use super::{Cx, expr, strip_parens};
+use crate::jir::{Block, Expr, Stmt, StmtKind};
+use crate::ty::Ty;
+
+// `e.unwrap()`, `e.expect(..)`, or in throws mode `e?`: the node taking the Ok value out of `e`.
+pub fn unwrapper(e: &SyntaxNode) -> Option<SyntaxNode> {
+    let p = e.parent()?;
+    if let Some(m) = ast::MethodCallExpr::cast(p.clone()) {
+        let is_recv = m
+            .receiver()
+            .is_some_and(|r| r.syntax().text_range() == e.text_range());
+        let name = m.name_ref().map(|n| n.text().to_string()).unwrap_or_default();
+        return (is_recv && matches!(name.as_str(), "unwrap" | "expect")).then_some(p);
+    }
+    (crate::mode::throws() && ast::TryExpr::can_cast(p.kind())).then_some(p)
+}
+
+// Whether every Result in the file can be erased; otherwise the first use that can't, and why.
+// Runs with `mode::throws()` already on, so the stdin-lines analysis counts `?` as an unwrap.
+pub fn eligible(cx: &Cx, root: &SyntaxNode) -> Result<(), (SyntaxNode, &'static str)> {
+    // Macro expansions too: `println!("{:?}", f())` prints a Result.
+    for node in cx.expanded_descendants(root) {
+        if in_fmt_impl(&node) {
+            continue;
+        }
+        if let Some(t) = ast::Type::cast(node.clone()) {
+            if has_result(&cx.type_ref(&t)) && !allowed_type(cx, &t) {
+                return Err((node, "a Result type outside a function's return type"));
+            }
+            continue;
+        }
+        let Some(e) = ast::Expr::cast(node.clone()) else {
+            continue;
+        };
+        let ty = cx.ty(&e);
+        // The callee of a call (`Ok` in `Ok(x)`, `f` in `f()`) has a function type.
+        let callee = node
+            .parent()
+            .and_then(ast::CallExpr::cast)
+            .and_then(|c| c.expr())
+            .is_some_and(|f| f.syntax() == &node);
+        if !callee && nested_result(&ty, false) {
+            return Err((node, "a Result inside another type"));
+        }
+        if let ast::Expr::MethodCallExpr(m) = &e
+            && method_name(m) == "lines"
+            && matches!(ty.strip_refs(), Ty::Iter(t) if matches!(**t, Ty::Result(..)))
+            && !super::std_map::io::plain_lines(cx, m)
+        {
+            return Err((node, "stdin lines used as Results"));
+        }
+        if !matches!(ty.strip_refs(), Ty::Result(..)) {
+            continue;
+        }
+        if !producer_ok(cx, &e) {
+            return Err((node, "a Result from a call that can't become a throwing call"));
+        }
+        if !context_ok(cx, &e) {
+            return Err((node, "a Result value that is stored or passed on"));
+        }
+        if !error_reads_ok(cx, &e) {
+            return Err((node, "an error value of this type read after it is caught"));
+        }
+    }
+    Ok(())
+}
+
+// `impl Display`/`Debug` bodies keep their own `fmt::Result` handling (`in_display`).
+fn in_fmt_impl(node: &SyntaxNode) -> bool {
+    node.ancestors()
+        .filter_map(ast::Fn::cast)
+        .any(|f| f.name().is_some_and(|n| n.text() == "fmt"))
+}
+
+fn has_result(ty: &Ty) -> bool {
+    matches!(ty.strip_refs(), Ty::Result(..)) || nested_result(ty, false)
+}
+
+// A Result inside another type. Stdin lines (`Result<String, io::Error>` items) are allowed:
+// their uses are checked like any other Result.
+fn nested_result(ty: &Ty, inner: bool) -> bool {
+    let here = |t: &Ty| nested_result(t, true);
+    match ty {
+        Ty::Result(ok, err) => {
+            (inner && !(ok.is_str() && is_io_error(err))) || here(ok) || here(err)
+        }
+        Ty::Vec(t) | Ty::Set { t, .. } | Ty::Deque(t) | Ty::Heap(t) | Ty::Option(t) | Ty::Iter(t) => {
+            here(t)
+        }
+        Ty::Map { k, v, .. } => here(k) || here(v),
+        Ty::Tuple(ts) | Ty::Adt { args: ts, .. } => ts.iter().any(here),
+        Ty::Ref { inner: t, .. } => nested_result(t, inner),
+        Ty::Fn { params, ret } => params.iter().any(here) || here(ret),
+        _ => false,
+    }
+}
+
+fn is_io_error(ty: &Ty) -> bool {
+    matches!(ty.strip_refs(), Ty::Other(n) if n == "Error" || n.ends_with("io::Error"))
+}
+
+// A written type mentioning Result: only a function's return type (or a type alias for one).
+fn allowed_type(cx: &Cx, t: &ast::Type) -> bool {
+    for a in t.syntax().ancestors() {
+        match a.kind() {
+            SyntaxKind::TYPE_ALIAS => return true,
+            SyntaxKind::RET_TYPE => {
+                let ret = ast::RetType::cast(a.clone()).and_then(|r| r.ty());
+                return a.parent().is_some_and(|p| ast::Fn::can_cast(p.kind()))
+                    && ret.is_some_and(|r| !nested_result(&cx.type_ref(&r), false));
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn method_name(m: &ast::MethodCallExpr) -> String {
+    m.name_ref().map(|n| n.text().to_string()).unwrap_or_default()
+}
+
+fn is_local_fn(cx: &Cx, f: ra_ap_hir::Function) -> bool {
+    f.module(cx.db).krate(cx.db).origin(cx.db).is_local()
+}
+
+// `Ok`/`Err` when `c` constructs a std Result.
+fn result_ctor(cx: &Cx, c: &ast::CallExpr) -> Option<&'static str> {
+    let ast::Expr::PathExpr(pe) = c.expr()? else {
+        return None;
+    };
+    let PathResolution::Def(ModuleDef::EnumVariant(v)) = cx.sema.resolve_path(&pe.path()?)? else {
+        return None;
+    };
+    let e = v.parent_enum(cx.db);
+    if e.name(cx.db).as_str() != "Result" || e.module(cx.db).krate(cx.db).origin(cx.db).is_local()
+    {
+        return None;
+    }
+    match v.name(cx.db).as_str() {
+        "Ok" => Some("Ok"),
+        "Err" => Some("Err"),
+        _ => None,
+    }
+}
+
+// `Err(x)` (through parentheses) -> `x`.
+pub fn err_payload(cx: &Cx, e: &ast::Expr) -> Option<ast::Expr> {
+    let ast::Expr::CallExpr(c) = strip_parens(e) else {
+        return None;
+    };
+    if result_ctor(cx, &c)? != "Err" {
+        return None;
+    }
+    c.arg_list()?.args().next()
+}
+
+// Expressions whose lowering already yields the Ok value (or throws) in throws mode.
+fn producer_ok(cx: &Cx, e: &ast::Expr) -> bool {
+    match strip_parens(e) {
+        ast::Expr::IfExpr(_) | ast::Expr::MatchExpr(_) | ast::Expr::BlockExpr(_) => true,
+        ast::Expr::CallExpr(c) => {
+            if let Some(ctor) = result_ctor(cx, &c) {
+                return ctor == "Ok" || err_context_ok(&c);
+            }
+            let Some(ast::Expr::PathExpr(pe)) = c.expr() else {
+                return false;
+            };
+            match pe.path().and_then(|p| cx.sema.resolve_path(&p)) {
+                Some(PathResolution::Def(ModuleDef::Function(f))) => {
+                    is_local_fn(cx, f)
+                        || matches!(f.name(cx.db).as_str(), "from_str_radix" | "from_utf8")
+                }
+                _ => false,
+            }
+        }
+        ast::Expr::MethodCallExpr(m) => {
+            if cx
+                .sema
+                .resolve_method_call(&m)
+                .is_some_and(|f| is_local_fn(cx, f))
+            {
+                return true;
+            }
+            let ok = match cx.ty(&ast::Expr::MethodCallExpr(m.clone())).strip_refs() {
+                Ty::Result(ok, _) => (**ok).clone(),
+                _ => return false,
+            };
+            match method_name(&m).as_str() {
+                "parse" => matches!(
+                    ok.strip_refs(),
+                    Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Bool | Ty::Str | Ty::Adt { .. }
+                ),
+                // `write_fmt` is a `write!` expansion; the macro call is checked in the file.
+                "read_line" | "read_to_string" | "read" | "flush" | "write_all" | "write_fmt"
+                | "write_str" | "write_char" | "map_err" | "ok_or"
+                | "ok_or_else" => true,
+                "unwrap" | "expect" => super::std_map::io::phantom_line_result(cx, e),
+                _ => false,
+            }
+        }
+        ast::Expr::MacroExpr(m) => m.macro_call().is_some_and(|mc| {
+            matches!(super::macros::macro_name(&mc).as_str(), "write" | "writeln")
+        }),
+        e @ ast::Expr::PathExpr(_) => super::std_map::io::phantom_line_result(cx, &e),
+        _ => false,
+    }
+}
+
+// `Err(x)` only where a `throw` can stand: returned from the function, or `Err(x)?`.
+fn err_context_ok(c: &ast::CallExpr) -> bool {
+    matches!(
+        walk_up(c.syntax()),
+        Some(Context::Return | Context::Try)
+    )
+}
+
+enum Context {
+    Return,
+    Try,
+    // Unwrapping method (`unwrap`, `ok`, ...), match or if-let scrutinee, or a discarded value.
+    Consumed,
+}
+
+fn context_ok(cx: &Cx, e: &ast::Expr) -> bool {
+    let _ = cx;
+    walk_up(e.syntax()).is_some()
+}
+
+// Where a Result-typed expression's value ends up, looking through blocks and branches.
+fn walk_up(node: &SyntaxNode) -> Option<Context> {
+    let mut cur = node.clone();
+    loop {
+        // The root of a macro expansion (`write!`): the macro call itself is checked in the file.
+        let Some(parent) = cur.parent() else {
+            return (cur.kind() != SyntaxKind::SOURCE_FILE).then_some(Context::Consumed);
+        };
+        if matches!(parent.kind(), SyntaxKind::MACRO_STMTS | SyntaxKind::MACRO_EXPR) {
+            return Some(Context::Consumed);
+        }
+        match parent.kind() {
+            SyntaxKind::PAREN_EXPR => cur = parent,
+            SyntaxKind::STMT_LIST => {
+                let list = ast::StmtList::cast(parent.clone())?;
+                if list.tail_expr()?.syntax() != &cur {
+                    return None;
+                }
+                let block = parent.parent()?;
+                match block.parent() {
+                    Some(p) if ast::Fn::can_cast(p.kind()) => return Some(Context::Return),
+                    Some(p) if ast::ClosureExpr::can_cast(p.kind()) => return None,
+                    _ => cur = block,
+                }
+            }
+            SyntaxKind::IF_EXPR => {
+                let i = ast::IfExpr::cast(parent.clone())?;
+                if i.condition().is_some_and(|c| c.syntax() == &cur) {
+                    return None;
+                }
+                cur = parent;
+            }
+            SyntaxKind::MATCH_ARM => {
+                let arm = ast::MatchArm::cast(parent.clone())?;
+                if arm.expr().is_none_or(|x| x.syntax() != &cur) {
+                    return None;
+                }
+                cur = parent.parent()?.parent()?;
+            }
+            // Only a `match` written in the file: `matches!(r, Ok(_))` lowers as a pattern test.
+            SyntaxKind::MATCH_EXPR => {
+                let in_file = parent
+                    .ancestors()
+                    .last()
+                    .is_some_and(|r| r.kind() == SyntaxKind::SOURCE_FILE);
+                let m = ast::MatchExpr::cast(parent)?;
+                return (in_file && match_on_result_ok(&m)).then_some(Context::Consumed);
+            }
+            SyntaxKind::LET_EXPR => {
+                let le = ast::LetExpr::cast(parent.clone())?;
+                let in_if = parent
+                    .parent()
+                    .and_then(ast::IfExpr::cast)
+                    .and_then(|i| i.condition())
+                    .is_some_and(|c| c.syntax() == &parent);
+                return (in_if && le.pat().is_some_and(|p| simple_result_pat(&p).is_some()))
+                    .then_some(Context::Consumed);
+            }
+            SyntaxKind::RETURN_EXPR => {
+                let owner = parent
+                    .ancestors()
+                    .find(|a| ast::Fn::can_cast(a.kind()) || ast::ClosureExpr::can_cast(a.kind()))?;
+                return ast::Fn::can_cast(owner.kind()).then_some(Context::Return);
+            }
+            SyntaxKind::TRY_EXPR => return Some(Context::Try),
+            SyntaxKind::FN => return Some(Context::Return),
+            SyntaxKind::METHOD_CALL_EXPR => {
+                let m = ast::MethodCallExpr::cast(parent)?;
+                let is_recv = m.receiver().is_some_and(|r| r.syntax() == &cur);
+                let consuming = matches!(
+                    method_name(&m).as_str(),
+                    "unwrap"
+                        | "expect"
+                        | "unwrap_or"
+                        | "unwrap_or_default"
+                        | "unwrap_or_else"
+                        | "ok"
+                        | "is_ok"
+                        | "is_err"
+                        | "map_err"
+                );
+                return (is_recv && consuming).then_some(Context::Consumed);
+            }
+            SyntaxKind::EXPR_STMT => return Some(Context::Consumed),
+            SyntaxKind::LET_STMT => {
+                let l = ast::LetStmt::cast(parent)?;
+                return matches!(l.pat(), Some(ast::Pat::WildcardPat(_))).then_some(Context::Consumed);
+            }
+            _ => return None,
+        }
+    }
+}
+
+// A caught error can be read back only when its exception carries it: a message string or a
+// std error (the exception itself). `unwrap_or_else(|e| ..)` reading `e` isn't supported.
+fn error_reads_ok(cx: &Cx, e: &ast::Expr) -> bool {
+    let Ty::Result(_, err) = cx.ty(e) else {
+        return true;
+    };
+    let readable = match err.strip_refs() {
+        Ty::Str => true,
+        Ty::Other(n) => n.contains("Error"),
+        _ => false,
+    };
+    let Some(parent) = e.syntax().parent() else {
+        return true;
+    };
+    let binds_err = |p: Option<ast::Pat>| {
+        p.and_then(|p| simple_result_pat(&p))
+            .is_some_and(|(which, b)| which == "Err" && b.is_some())
+    };
+    if let Some(m) = ast::MatchExpr::cast(parent.clone()) {
+        let reads = m
+            .match_arm_list()
+            .is_some_and(|l| l.arms().any(|a| binds_err(a.pat())));
+        return readable || !reads;
+    }
+    if let Some(le) = ast::LetExpr::cast(parent.clone()) {
+        return readable || !binds_err(le.pat());
+    }
+    if let Some(m) = ast::MethodCallExpr::cast(parent)
+        && method_name(&m) == "unwrap_or_else"
+    {
+        return closure_ignores_arg(&m);
+    }
+    true
+}
+
+// `Ok(x)` / `Err(x)` / `Err(_)` / `_` with plain bindings: ("Ok" | "Err" | "_", binding).
+fn simple_result_pat(p: &ast::Pat) -> Option<(&'static str, Option<ast::IdentPat>)> {
+    match p {
+        ast::Pat::WildcardPat(_) => Some(("_", None)),
+        ast::Pat::TupleStructPat(tp) => {
+            let name = tp.path()?.segment()?.name_ref()?.text().to_string();
+            let which = match name.as_str() {
+                "Ok" => "Ok",
+                "Err" => "Err",
+                _ => return None,
+            };
+            let mut fields = tp.fields();
+            let f = fields.next()?;
+            if fields.next().is_some() {
+                return None;
+            }
+            match f {
+                ast::Pat::WildcardPat(_) => Some((which, None)),
+                ast::Pat::TuplePat(t) if t.fields().next().is_none() => Some((which, None)),
+                ast::Pat::IdentPat(ip) if ip.pat().is_none() && ip.ref_token().is_none() => {
+                    Some((which, Some(ip)))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+// One Ok arm and one Err (or `_`) arm, no guards.
+fn match_on_result_ok(m: &ast::MatchExpr) -> bool {
+    result_arms(m).is_some()
+}
+
+fn result_arms(m: &ast::MatchExpr) -> Option<(ast::MatchArm, Option<ast::MatchArm>)> {
+    let arms: Vec<ast::MatchArm> = m.match_arm_list()?.arms().collect();
+    let (mut ok, mut err) = (None, None);
+    for a in arms {
+        if a.guard().is_some() {
+            return None;
+        }
+        match simple_result_pat(&a.pat()?)?.0 {
+            "Ok" if ok.is_none() => ok = Some(a),
+            "Err" | "_" if err.is_none() => err = Some(a),
+            _ => return None,
+        }
+    }
+    Some((ok?, err))
+}
+
+// The Java exception an `Err` of this type travels as.
+pub fn exception_class(err: &Ty) -> &'static str {
+    match err.strip_refs() {
+        Ty::Other(n) if n.contains("ParseIntError") || n.contains("ParseFloatError") => {
+            "NumberFormatException"
+        }
+        t if is_io_error(t) => "UncheckedIOException",
+        _ => "RuntimeException",
+    }
+}
+
+// `throw` for `Err(payload)`.
+pub fn push_throw(cx: &mut Cx, payload: &ast::Expr, line: u32, out: &mut Vec<Stmt>) {
+    let inner = peel_conversions(payload);
+    let ty = cx.ty(&inner);
+    let v = expr::lower_expr(cx, &inner, out);
+    out.push(Stmt::new(line, StmtKind::Throw(exception_of(v, &ty))));
+}
+
+// The type of an error value before `.into()`/`Box::new` (a `&str` boxed as `dyn Error`).
+pub fn payload_ty(cx: &Cx, e: &ast::Expr) -> Ty {
+    let e = match strip_parens(e) {
+        ast::Expr::ClosureExpr(c) => match c.body() {
+            Some(b) => b,
+            None => return Ty::Other("?".into()),
+        },
+        e => e,
+    };
+    cx.ty(&peel_conversions(&e))
+}
+
+// `"msg".into()`, `Box::new(e)`, `X::from(e)`: the message or exception underneath.
+fn peel_conversions(payload: &ast::Expr) -> ast::Expr {
+    let mut inner = strip_parens(payload);
+    loop {
+        let next = match &inner {
+            ast::Expr::MethodCallExpr(m) if method_name(m) == "into" => m.receiver(),
+            ast::Expr::CallExpr(c)
+                if c.expr().is_some_and(|f| {
+                    let t = f.syntax().text().to_string();
+                    t.ends_with("Box::new") || t.ends_with("::from")
+                }) =>
+            {
+                c.arg_list().and_then(|a| a.args().next())
+            }
+            _ => None,
+        };
+        match next {
+            Some(n) => inner = strip_parens(&n),
+            None => return inner,
+        }
+    }
+}
+
+// The exception carrying an error value of type `ty`: a message, or the exception itself.
+pub fn exception_of(v: Expr, ty: &Ty) -> Expr {
+    match ty.strip_refs() {
+        Ty::Str => Expr::New {
+            ty: "RuntimeException".into(),
+            args: vec![v],
+        },
+        // Std errors exist only as caught exceptions; a boxed `dyn Error` may hold any value.
+        Ty::Other(n) if n.contains("Error") && !n.contains("dyn ") => v,
+        _ => Expr::New {
+            ty: "RuntimeException".into(),
+            args: vec![Expr::call(Expr::raw("String"), "valueOf", vec![v])],
+        },
+    }
+}
+
+fn err_ty(cx: &Cx, scrut: &ast::Expr) -> Ty {
+    match cx.ty(scrut).strip_refs() {
+        Ty::Result(_, e) => (**e).clone(),
+        _ => Ty::Other("?".into()),
+    }
+}
+
+fn arm_dest(cx: &Cx, dest: &Dest) -> Dest {
+    match dest {
+        Dest::Return if cx.ret_ty.as_ref().is_none_or(Ty::is_unit) => Dest::Discard,
+        d => d.clone(),
+    }
+}
+
+// try { <ok binding> = scrut; ok_body } catch (X e) { err_body }
+fn lower_try_catch(
+    cx: &mut Cx,
+    scrut: &ast::Expr,
+    ok_bind: Option<ast::IdentPat>,
+    ok_body: &dyn Fn(&mut Cx, &mut Vec<Stmt>),
+    err_bind: Option<ast::IdentPat>,
+    err_body: &dyn Fn(&mut Cx, &mut Vec<Stmt>),
+    line: u32,
+    close_line: u32,
+    out: &mut Vec<Stmt>,
+) {
+    let err = err_ty(cx, scrut);
+    let class = exception_class(&err);
+    if class == "UncheckedIOException" {
+        cx.import("java.io.*");
+    }
+    let mut body = Vec::new();
+    cx.push_scope();
+    let v = expr::lower_expr(cx, scrut, &mut body);
+    match &ok_bind {
+        Some(ip) => super::pat::bind_pattern(cx, &ast::Pat::IdentPat(ip.clone()), v, &mut body),
+        None => stmt::push_discard(&mut body, line, v),
+    }
+    ok_body(cx, &mut body);
+    cx.pop_scope();
+    let mut handler = Vec::new();
+    cx.push_scope();
+    let rust_name = err_bind.as_ref().and_then(|ip| ip.name()).map(|n| n.text().to_string());
+    let decl = match (&rust_name, err.strip_refs()) {
+        (Some(n), Ty::Str) => {
+            let ex = cx.fresh_param("ex");
+            let java = cx.declare(n);
+            handler.push(Stmt::new(
+                line,
+                StmtKind::Local {
+                    ty: "String".into(),
+                    name: java,
+                    init: Some(Expr::call(Expr::name(&ex), "getMessage", vec![])),
+                },
+            ));
+            format!("{class} {ex}")
+        }
+        (Some(n), _) => format!("{class} {}", cx.declare(n)),
+        (None, _) => format!("{class} {}", cx.fresh_param("e")),
+    };
+    err_body(cx, &mut handler);
+    cx.pop_scope();
+    out.push(Stmt::new(
+        line,
+        StmtKind::Try {
+            body: Block {
+                stmts: body,
+                close_line,
+            },
+            decl,
+            handler: Block {
+                stmts: handler,
+                close_line,
+            },
+        },
+    ));
+}
+
+// Result methods on an erased Result (`recv` is the Ok value, or throws).
+pub fn result_method(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    recv_ast: &ast::Expr,
+    recv: Expr,
+    args: Vec<Expr>,
+    name: &str,
+    ret: &Ty,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) -> Option<Expr> {
+    let ok_ty = match cx.ty(recv_ast).strip_refs() {
+        Ty::Result(ok, _) => (**ok).clone(),
+        _ => Ty::Other("?".into()),
+    };
+    let (value, fallback) = match name {
+        "unwrap" | "expect" | "map_err" => return Some(recv),
+        "unwrap_or" => (recv, args.into_iter().next()?),
+        "unwrap_or_default" => (recv, Expr::raw(super::items::default_value(cx, &ok_ty))),
+        // `|_| v`: the closure's value; a closure reading the error isn't supported here.
+        "unwrap_or_else" => match args.into_iter().next()? {
+            Expr::Lambda {
+                body: crate::jir::LambdaBody::Expr(b),
+                ..
+            } if closure_ignores_arg(m) => (recv, *b),
+            _ => {
+                return Some(cx.unsupported(
+                    m.syntax(),
+                    "`unwrap_or_else` reading the error (simple mode)",
+                ));
+            }
+        },
+        "ok" => (
+            Expr::call(Expr::raw("Optional"), "of", vec![recv]),
+            Expr::raw("Optional.empty()"),
+        ),
+        "is_ok" | "is_err" => {
+            let mut try_body = Vec::new();
+            stmt::push_discard(&mut try_body, line, recv);
+            let name_ok = name == "is_ok";
+            let flag = cx
+                .take_let_target(m.syntax())
+                .unwrap_or_else(|| cx.fresh(if name_ok { "ok" } else { "failed" }));
+            out.push(Stmt::new(
+                line,
+                StmtKind::Local {
+                    ty: "boolean".into(),
+                    name: flag.clone(),
+                    init: None,
+                },
+            ));
+            let set = |v: bool| {
+                Stmt::new(
+                    line,
+                    StmtKind::Expr(Expr::Assign(
+                        Box::new(Expr::name(&flag)),
+                        "=",
+                        Box::new(Expr::raw(if v { "true" } else { "false" })),
+                    )),
+                )
+            };
+            try_body.push(set(name_ok));
+            push_try(cx, recv_ast, try_body, vec![set(!name_ok)], line, out);
+            return Some(Expr::name(flag));
+        }
+        _ => return None,
+    };
+    let hint = if name == "ok" { "maybe" } else { "value" };
+    let var = cx.take_let_target(m.syntax()).unwrap_or_else(|| cx.fresh(hint));
+    out.push(Stmt::new(
+        line,
+        StmtKind::Local {
+            ty: stmt::decl_type_explicit(ret),
+            name: var.clone(),
+            init: None,
+        },
+    ));
+    let assign = |v: Expr| {
+        Stmt::new(
+            line,
+            StmtKind::Expr(Expr::Assign(Box::new(Expr::name(&var)), "=", Box::new(v))),
+        )
+    };
+    push_try(cx, recv_ast, vec![assign(value)], vec![assign(fallback)], line, out);
+    Some(Expr::name(var))
+}
+
+fn closure_ignores_arg(m: &ast::MethodCallExpr) -> bool {
+    let Some(ast::Expr::ClosureExpr(c)) = m.arg_list().and_then(|l| l.args().next()) else {
+        return false;
+    };
+    c.param_list()
+        .and_then(|pl| pl.params().next())
+        .and_then(|p| p.pat())
+        .is_some_and(|p| matches!(p, ast::Pat::WildcardPat(_)))
+}
+
+fn push_try(
+    cx: &mut Cx,
+    recv_ast: &ast::Expr,
+    body: Vec<Stmt>,
+    handler: Vec<Stmt>,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) {
+    let class = exception_class(&err_ty(cx, recv_ast));
+    if class == "UncheckedIOException" {
+        cx.import("java.io.*");
+    }
+    let e = cx.fresh_param("e");
+    out.push(Stmt::new(
+        line,
+        StmtKind::Try {
+            body: Block {
+                stmts: body,
+                close_line: line,
+            },
+            decl: format!("{class} {e}"),
+            handler: Block {
+                stmts: handler,
+                close_line: line,
+            },
+        },
+    ));
+    cx.release_param(&e);
+}
+
+// `match r { Ok(v) => a, Err(e) => b }` as try/catch. False when the shape doesn't fit.
+pub fn lower_match(cx: &mut Cx, m: &ast::MatchExpr, dest: &Dest, out: &mut Vec<Stmt>) -> bool {
+    let (Some(scrut), Some((ok, err))) = (m.expr(), result_arms(m)) else {
+        return false;
+    };
+    let line = cx.line(m.syntax());
+    let close = cx.end_line(m.syntax());
+    let dest = arm_dest(cx, dest);
+    let ok_bind = ok.pat().and_then(|p| simple_result_pat(&p)).and_then(|(_, b)| b);
+    let err_bind = err
+        .as_ref()
+        .and_then(|a| a.pat())
+        .and_then(|p| simple_result_pat(&p))
+        .and_then(|(_, b)| b);
+    let ok_expr = ok.expr();
+    let err_expr = err.and_then(|a| a.expr());
+    lower_try_catch(
+        cx,
+        &scrut,
+        ok_bind,
+        &|cx, out| {
+            if let Some(e) = &ok_expr {
+                stmt::lower_to_dest(cx, e, &dest, out);
+            }
+        },
+        err_bind,
+        &|cx, out| {
+            if let Some(e) = &err_expr {
+                stmt::lower_to_dest(cx, e, &dest, out);
+            }
+        },
+        line,
+        close,
+        out,
+    );
+    true
+}
+
+// `if let Ok(v) = r { a } else { b }` / `if let Err(e) = r { b }` as try/catch.
+pub fn lower_if_let(cx: &mut Cx, i: &ast::IfExpr, dest: &Dest, out: &mut Vec<Stmt>) -> bool {
+    let Some(ast::Expr::LetExpr(le)) = i.condition() else {
+        return false;
+    };
+    let (Some(scrut), Some(pat)) = (le.expr(), le.pat()) else {
+        return false;
+    };
+    let Some((which, bind)) = simple_result_pat(&pat) else {
+        return false;
+    };
+    let line = cx.line(i.syntax());
+    let close = cx.end_line(i.syntax());
+    let dest = arm_dest(cx, dest);
+    let then = i.then_branch();
+    let els = i.else_branch();
+    let run_then = |cx: &mut Cx, out: &mut Vec<Stmt>| {
+        if let Some(b) = &then {
+            out.extend(stmt::lower_block(cx, b, &dest).stmts);
+        }
+    };
+    let run_else = |cx: &mut Cx, out: &mut Vec<Stmt>| match &els {
+        Some(ast::ElseBranch::Block(b)) => out.extend(stmt::lower_block(cx, b, &dest).stmts),
+        Some(ast::ElseBranch::IfExpr(ei)) => stmt::lower_if(cx, ei, &dest, out),
+        None => {}
+    };
+    if which == "Ok" {
+        lower_try_catch(cx, &scrut, bind, &run_then, None, &run_else, line, close, out);
+    } else {
+        lower_try_catch(cx, &scrut, None, &run_else, bind, &run_then, line, close, out);
+    }
+    true
+}

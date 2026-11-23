@@ -150,6 +150,10 @@ fn is_simple(e: &Expr) -> bool {
 
 fn consumed_by(cx: &Cx, e: &ast::Expr) -> Option<String> {
     let parent = e.syntax().parent()?;
+    // Simple mode: `?` hands over the Ok value like `unwrap`.
+    if crate::mode::throws() && ast::TryExpr::can_cast(parent.kind()) {
+        return Some("unwrap".into());
+    }
     let mc = ast::MethodCallExpr::cast(parent)?;
     let is_recv = mc
         .receiver()
@@ -716,7 +720,7 @@ fn cmp_min_max(
         .unwrap_or_else(|| Ty::Int(Int::I32));
     let method = if max { "max" } else { "min" };
     match ty.strip_refs() {
-        Ty::Int(i) if i.is_unsigned() && !matches!(i, Int::U8) => {
+        Ty::Int(i) if i.is_unsigned() && !matches!(i, Int::U8) && !crate::mode::simple() => {
             num::min_max(cx, a, b, *i, max, line, out)
         }
         Ty::Int(_) | Ty::F32 | Ty::F64 => Expr::call(Expr::raw("Math"), method, vec![a, b]),
@@ -1057,6 +1061,7 @@ pub fn lower_std_ctor(
         "Some" => Some(opt_of(
             args.first().cloned().unwrap_or_else(|| Expr::raw("null")),
         )),
+        "Ok" if crate::mode::throws() => args.first().cloned(),
         "Ok" => {
             cx.needs_result = true;
             Some(Expr::New {

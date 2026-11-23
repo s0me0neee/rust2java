@@ -133,6 +133,33 @@ pub(super) fn lower_option_method(
             }],
         )),
         "or_else" => Some(Expr::call(recv, "or", vec![b0])),
+        // Simple mode: the missing value throws right away.
+        "ok_or" | "ok_or_else" if crate::mode::throws() => {
+            let err_ty = arg_asts(m)
+                .first()
+                .map(|a| crate::lower::throws::payload_ty(cx, a))
+                .unwrap_or(Ty::Other("?".into()));
+            let err = match (name, b0) {
+                (
+                    "ok_or_else",
+                    Expr::Lambda {
+                        params,
+                        body: LambdaBody::Expr(b),
+                    },
+                ) if params.is_empty() => *b,
+                ("ok_or_else", f) => Expr::call(f, "get", vec![]),
+                (_, e) => e,
+            };
+            let thrown = crate::lower::throws::exception_of(err, &err_ty);
+            Some(Expr::call(
+                recv,
+                "orElseThrow",
+                vec![Expr::Lambda {
+                    params: vec![],
+                    body: LambdaBody::Expr(Box::new(thrown)),
+                }],
+            ))
+        }
         "ok_or" => {
             cx.needs_result = true;
             let v = cx.fresh("v");
@@ -407,6 +434,9 @@ pub(super) fn lower_result_method(
     // the `.unwrap()` call; pass it through.
     if matches!(name, "unwrap" | "expect") && is_unwrapped_source(cx, recv_ast) {
         return Some(recv);
+    }
+    if crate::mode::throws() {
+        return crate::lower::throws::result_method(cx, _m, recv_ast, recv, args, name, ret, line, out);
     }
     let types = result_types(cx, recv_ast);
     let ok_ty = types

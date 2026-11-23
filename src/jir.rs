@@ -106,6 +106,12 @@ pub enum StmtKind {
     Break(Option<String>),
     Continue(Option<String>),
     Throw(Expr),
+    // `try { body } catch (<decl>) { handler }`, `decl` like `NumberFormatException e`.
+    Try {
+        body: Block,
+        decl: String,
+        handler: Block,
+    },
     Block(Block),
     // Labeled block, used for `'a: { ... break 'a; }`.
     Labeled {

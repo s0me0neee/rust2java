@@ -666,9 +666,9 @@ Programs that hit these compile and run, but can print something different from 
 
 Performance: `VecDeque` indexing other than the ends is O(i) (a warning is printed); everything else keeps Rust's complexity.
 
-## 22. Simple mode (`-s`): plan
+## 22. Simple mode (`-s`)
 
-Not implemented yet. This section is the plan.
+Partly implemented; §22.7 lists what works today. The rest of this section is the plan.
 
 ### 22.1 Goal
 
@@ -859,3 +859,24 @@ A second round of cleanup on the generated Java text, after printing. Part of th
 - **Tests.**
   - Each pass is a pure `&str -> String` function with before/after unit tests.
   - Every case still passes `javac` and the output comparison with the pass on.
+
+### 22.7 Status
+
+Implemented (`-s`/`--simple`; `crate::mode` holds the flag because `Ty::java()` and the printers have no `Cx`):
+- **Layout** (`javafmt.rs`). The exact-mode text is re-laid out with tree-sitter: one statement or member per line, 4-space indents, `} else {`, blank lines where the Rust file has them, static fields first. Imports are explicit and used-only. tree-sitter-java 0.23 can't parse qualified record patterns (`case Token.Num(var n)`), so `Upper.Upper(` is masked while parsing. A file that still fails to parse keeps the exact layout, with a warning.
+- **Entry point.** The Rust `main` is `public static void main(String[] args)` (`argv` when the program has its own `args`). No wrapper, no exit-code mapping, no big-stack thread. `env::args()` still reads an `ARGS` field set on entry.
+- **`Result` as exceptions** (`lower/throws.rs`). A pre-pass decides per file. When every `Result` is returned, `?`-ed, unwrapped, matched (`Ok(x)`/`Err(e)`/`_` arms) or tested with `if let`, the file is in throws mode:
+  - Functions return `T`; `Ok(x)` is `x`; `Err(e)` in return position and `Err(e)?` are `throw`.
+  - `?`, `unwrap`, `expect` and `map_err` disappear; `unwrap_or*`, `ok`, `is_ok`/`is_err`, `match` and `if let` become `try`/`catch`.
+  - Parsing calls the Java parser directly (`Integer.parseInt`). `ok_or`/`ok_or_else` are `orElseThrow`. Stdin reads wrap `IOException` in `UncheckedIOException`, and `lines()` items are plain Strings.
+  - Exceptions: `RuntimeException(msg)` for string errors, `NumberFormatException` for parse errors, `UncheckedIOException` for I/O; other error values are thrown as `RuntimeException(String.valueOf(e))`.
+  - Otherwise the file keeps exact-mode `Result` values and a warning names the first use that blocked it (a stored Result, `binary_search`, `Debug` of a Result, ...).
+- **Numbers.** No unsigned display, comparison or division helpers: `u32`/`u64` are plain `int`/`long`.
+- **`{:?}`** is `toString` for primitives, strings and std collections of them. User types, tuples and `Ordering` keep the exact text.
+- **Names and locals.** `_` loop counters are `_i`, `_j`, `_k`. `var` when the initializer is `new X<..>(..)` of the declared class, or a parse call.
+- **Tests.**
+  - `SIMPLE=1 cargo test --test cases`: every case must compile and fail or succeed like Rust (`tests/cases/simple-skip` lists exceptions). Stdout differences are counted, not failures: 243/243 pass, and 118 print differently, mostly `{:?}` text.
+  - `tests/simple/*.rs` are golden files, starting with the §22.2 program, which comes out as the reference apart from `List` vs `ArrayList` declarations.
+  - All 22 Codeforces programs print the same output in simple mode.
+
+Not yet: user error types as exception classes (an `Err(e)` arm reading a user-typed `e` doesn't work yet), `Option` as null (S3), records for immutable structs, loops for index-heavy chains, `ArrayList` declarations for `Vec`, `toString` for `#[derive(Debug)]`, and the §22.6 cleanup passes beyond layout and imports.

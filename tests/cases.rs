@@ -88,14 +88,30 @@ fn differential() {
     }
     let work = tempfile::tempdir().unwrap();
     let out_dir = work.path().join("out");
+    // SIMPLE=1: transpile with `-s`. Every case must compile and exit like Rust (zero or not)
+    // unless listed in tests/cases/simple-skip; stdout differences (`{:?}` is `toString`, unsigned
+    // values print signed) are only counted.
+    let simple = std::env::var("SIMPLE").is_ok();
+    let skip: Vec<String> = if simple {
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases/simple-skip"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| l.split('#').next())
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rust2java"));
     cmd.args(cases.iter().map(|c| &c.src))
         .arg("-o")
         .arg(&out_dir)
-        .arg("--line-report");
+        .arg(if simple { "-s" } else { "--line-report" });
     let (_, _, diag) = run_with_stdin(&mut cmd, &None);
 
     let mut failures = Vec::new();
+    let mut stdout_diffs = 0;
     let (mut total_stmts, mut total_drift, mut drift_notes) = (0u64, 0u64, Vec::new());
     for case in &cases {
         let (want, want_code) = expected(case, work.path());
@@ -143,7 +159,13 @@ fn differential() {
             Command::new("java").arg("-cp").arg(&classes).arg("Main"),
             &case.stdin,
         );
-        if got != want || got_code != want_code {
+        // Simple mode keeps whether the program fails, not the exit code or the panic text.
+        let code_ok = got_code == want_code || simple && (got_code != 0) == (want_code != 0);
+        if simple && code_ok && got != want {
+            stdout_diffs += 1;
+            continue;
+        }
+        if (got != want || !code_ok) && !skip.contains(&case.name) {
             failures.push(format!(
                 "{}: output mismatch (exit {got_code}, want {want_code})\n--- want\n{want}--- got\n{got}--- stderr\n{err}",
                 case.name
@@ -152,6 +174,9 @@ fn differential() {
     }
     let passed = cases.len() - failures.len();
     eprintln!("\n{passed}/{} cases passed", cases.len());
+    if simple {
+        eprintln!("simple mode: {stdout_diffs} case(s) print differently from Rust");
+    }
     let exact = if total_stmts == 0 {
         100.0
     } else {

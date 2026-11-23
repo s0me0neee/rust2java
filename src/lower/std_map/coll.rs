@@ -77,6 +77,7 @@ pub(super) fn fn_call(
 pub(crate) fn ord_comparator(cx: &mut Cx, ty: &Ty) -> Option<String> {
     let boxed = ty.boxed();
     match ty.strip_refs() {
+        Ty::Int(_) if crate::mode::simple() => None,
         Ty::Int(Int::U16) => {
             let x = cx.fresh("x");
             Some(format!(

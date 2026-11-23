@@ -402,11 +402,8 @@ pub(crate) fn write_status(
 
 // `read_line(..).unwrap();` as a statement: nobody wants the count.
 fn unwrap_in_stmt(e: &ast::Expr) -> bool {
-    e.syntax()
-        .parent()
-        .and_then(ast::MethodCallExpr::cast)
-        .filter(|m| matches!(method_name(m).as_str(), "unwrap" | "expect"))
-        .and_then(|m| m.syntax().parent())
+    crate::lower::throws::unwrapper(e.syntax())
+        .and_then(|u| u.parent())
         .is_some_and(|p| ast::ExprStmt::can_cast(p.kind()))
 }
 
@@ -970,11 +967,7 @@ fn next_double_unwrap(pe: &ast::PathExpr) -> bool {
     if !matches!(method_name(&first).as_str(), "unwrap" | "expect") {
         return false;
     }
-    first
-        .syntax()
-        .parent()
-        .and_then(ast::MethodCallExpr::cast)
-        .is_some_and(|second| matches!(method_name(&second).as_str(), "unwrap" | "expect"))
+    crate::lower::throws::unwrapper(first.syntax()).is_some()
 }
 
 fn local_ident(cx: &Cx, local: ra_ap_hir::Local<'_>) -> Option<ast::IdentPat> {
@@ -1018,6 +1011,8 @@ pub(crate) fn phantom_line_result(cx: &Cx, e: &ast::Expr) -> bool {
                     .ancestors()
                     .find_map(ast::ClosureExpr::cast)
                     .and_then(|c| c.syntax().parent())
+                    // The closure sits in the call's argument list.
+                    .and_then(|a| a.parent())
                     .and_then(ast::MethodCallExpr::cast)
                     .is_some_and(|call| {
                         matches!(
