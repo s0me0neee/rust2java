@@ -150,7 +150,7 @@ pub(super) fn lower_option_method(
                 ("ok_or_else", f) => Expr::call(f, "get", vec![]),
                 (_, e) => e,
             };
-            let thrown = crate::lower::throws::exception_of(err, &err_ty);
+            let thrown = crate::lower::throws::exception_of(cx, err, &err_ty);
             Some(Expr::call(
                 recv,
                 "orElseThrow",

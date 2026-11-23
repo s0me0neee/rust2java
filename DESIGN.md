@@ -869,14 +869,14 @@ Implemented (`-s`/`--simple`; `crate::mode` holds the flag because `Ty::java()` 
   - Functions return `T`; `Ok(x)` is `x`; `Err(e)` in return position and `Err(e)?` are `throw`.
   - `?`, `unwrap`, `expect` and `map_err` disappear; `unwrap_or*`, `ok`, `is_ok`/`is_err`, `match` and `if let` become `try`/`catch`.
   - Parsing calls the Java parser directly (`Integer.parseInt`). `ok_or`/`ok_or_else` are `orElseThrow`. Stdin reads wrap `IOException` in `UncheckedIOException`, and `lines()` items are plain Strings.
-  - Exceptions: `RuntimeException(msg)` for string errors, `NumberFormatException` for parse errors, `UncheckedIOException` for I/O; other error values are thrown as `RuntimeException(String.valueOf(e))`.
+  - Exceptions: `RuntimeException(msg)` for string errors, `NumberFormatException` for parse errors, `UncheckedIOException` for I/O. A user error type `AppError` gets a generated `AppErrorException` carrying the value (message = its Display), so a `catch` reads it back as `ex.error`. `?` that converts between error types with `From` keeps the file on Result values. Other error values are thrown as `RuntimeException(String.valueOf(e))`.
   - Otherwise the file keeps exact-mode `Result` values and a warning names the first use that blocked it (a stored Result, `binary_search`, `Debug` of a Result, ...).
 - **Numbers.** No unsigned display, comparison or division helpers: `u32`/`u64` are plain `int`/`long`.
 - **`{:?}`** is `toString` for primitives, strings and std collections of them. User types, tuples and `Ordering` keep the exact text.
 - **Names and locals.** `_` loop counters are `_i`, `_j`, `_k`. `var` when the initializer is `new X<..>(..)` of the declared class, or a parse call.
 - **Tests.**
-  - `SIMPLE=1 cargo test --test cases`: every case must compile and fail or succeed like Rust (`tests/cases/simple-skip` lists exceptions). Stdout differences are counted, not failures: 243/243 pass, and 118 print differently, mostly `{:?}` text.
+  - `SIMPLE=1 cargo test --test cases`: every case must compile and fail or succeed like Rust (`tests/cases/simple-skip` lists exceptions). Stdout differences are counted, not failures: 243/243 pass, and 117 print differently, mostly `{:?}` text.
   - `tests/simple/*.rs` are golden files, starting with the §22.2 program, which comes out as the reference apart from `List` vs `ArrayList` declarations.
   - All 22 Codeforces programs print the same output in simple mode.
 
-Not yet: user error types as exception classes (an `Err(e)` arm reading a user-typed `e` doesn't work yet), `Option` as null (S3), records for immutable structs, loops for index-heavy chains, `ArrayList` declarations for `Vec`, `toString` for `#[derive(Debug)]`, and the §22.6 cleanup passes beyond layout and imports.
+Not yet: `Option` as null (S3), records for immutable structs, loops for index-heavy chains, `ArrayList` declarations for `Vec`, `toString` for `#[derive(Debug)]`, and the §22.6 cleanup passes beyond layout and imports.

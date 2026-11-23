@@ -230,8 +230,32 @@ enum Context {
 }
 
 fn context_ok(cx: &Cx, e: &ast::Expr) -> bool {
-    let _ = cx;
-    walk_up(e.syntax()).is_some()
+    match walk_up(e.syntax()) {
+        None => false,
+        Some(Context::Try) => same_error(cx, e),
+        Some(_) => true,
+    }
+}
+
+// `?` converting between error types via `From`: the exception would keep the original type and
+// slip past a `catch` of the converted one, so only conversions into strings and std errors pass.
+fn same_error(cx: &Cx, e: &ast::Expr) -> bool {
+    let Ty::Result(_, from) = cx.ty(e) else {
+        return true;
+    };
+    let to = e
+        .syntax()
+        .ancestors()
+        .find_map(ast::Fn::cast)
+        .and_then(|f| cx.sema.to_def(&f))
+        .map(|f| cx.convert(&f.ret_type(cx.db)));
+    match to {
+        Some(Ty::Result(_, to)) => {
+            let user = user_error(&from).is_some() || user_error(&to).is_some();
+            !user || from.strip_refs() == to.strip_refs()
+        }
+        _ => true,
+    }
 }
 
 // Where a Result-typed expression's value ends up, looking through blocks and branches.
@@ -336,7 +360,7 @@ fn error_reads_ok(cx: &Cx, e: &ast::Expr) -> bool {
     let readable = match err.strip_refs() {
         Ty::Str => true,
         Ty::Other(n) => n.contains("Error"),
-        _ => false,
+        t => user_error(t).is_some(),
     };
     let Some(parent) = e.syntax().parent() else {
         return true;
@@ -413,14 +437,41 @@ fn result_arms(m: &ast::MatchExpr) -> Option<(ast::MatchArm, Option<ast::MatchAr
 }
 
 // The Java exception an `Err` of this type travels as.
-pub fn exception_class(err: &Ty) -> &'static str {
+pub fn exception_class(cx: &mut Cx, err: &Ty) -> String {
     match err.strip_refs() {
         Ty::Other(n) if n.contains("ParseIntError") || n.contains("ParseFloatError") => {
-            "NumberFormatException"
+            "NumberFormatException".into()
         }
-        t if is_io_error(t) => "UncheckedIOException",
-        _ => "RuntimeException",
+        t if is_io_error(t) => {
+            cx.import("java.io.*");
+            "UncheckedIOException".into()
+        }
+        t => match user_error(t) {
+            Some(name) => user_exception(cx, name),
+            None => "RuntimeException".into(),
+        },
     }
+}
+
+// A user error type (non-generic, declared in this file) travels in its own exception class.
+fn user_error(ty: &Ty) -> Option<&str> {
+    match ty.strip_refs() {
+        Ty::Adt { java, args, .. } if args.is_empty() && !java.contains('.') => Some(java),
+        _ => None,
+    }
+}
+
+// `AppErrorException`, declared once per file: it carries the error value, and its message is
+// the value's Display text.
+fn user_exception(cx: &mut Cx, name: &str) -> String {
+    let class = format!("{name}Exception");
+    let decl = format!(
+        "static class {class} extends RuntimeException {{ final {name} error; {class}({name} error) {{ super(String.valueOf(error)); this.error = error; }} }}"
+    );
+    if !cx.file_trailer.contains(&decl) {
+        cx.file_trailer.push(decl);
+    }
+    class
 }
 
 // `throw` for `Err(payload)`.
@@ -428,7 +479,8 @@ pub fn push_throw(cx: &mut Cx, payload: &ast::Expr, line: u32, out: &mut Vec<Stm
     let inner = peel_conversions(payload);
     let ty = cx.ty(&inner);
     let v = expr::lower_expr(cx, &inner, out);
-    out.push(Stmt::new(line, StmtKind::Throw(exception_of(v, &ty))));
+    let thrown = exception_of(cx, v, &ty);
+    out.push(Stmt::new(line, StmtKind::Throw(thrown)));
 }
 
 // The type of an error value before `.into()`/`Box::new` (a `&str` boxed as `dyn Error`).
@@ -467,7 +519,13 @@ fn peel_conversions(payload: &ast::Expr) -> ast::Expr {
 }
 
 // The exception carrying an error value of type `ty`: a message, or the exception itself.
-pub fn exception_of(v: Expr, ty: &Ty) -> Expr {
+pub fn exception_of(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
+    if let Some(name) = user_error(ty) {
+        return Expr::New {
+            ty: user_exception(cx, name),
+            args: vec![v],
+        };
+    }
     match ty.strip_refs() {
         Ty::Str => Expr::New {
             ty: "RuntimeException".into(),
@@ -509,11 +567,10 @@ fn lower_try_catch(
     out: &mut Vec<Stmt>,
 ) {
     let err = err_ty(cx, scrut);
-    let class = exception_class(&err);
-    if class == "UncheckedIOException" {
-        cx.import("java.io.*");
-    }
+    let class = exception_class(cx, &err);
     let mut body = Vec::new();
+    // Names declared in the try or catch block end with it, as in `stmt::lower_block`.
+    let taken = cx.method_names.clone();
     cx.push_scope();
     let v = expr::lower_expr(cx, scrut, &mut body);
     match &ok_bind {
@@ -522,6 +579,7 @@ fn lower_try_catch(
     }
     ok_body(cx, &mut body);
     cx.pop_scope();
+    cx.method_names = taken.clone();
     let mut handler = Vec::new();
     cx.push_scope();
     let rust_name = err_bind.as_ref().and_then(|ip| ip.name()).map(|n| n.text().to_string());
@@ -539,11 +597,25 @@ fn lower_try_catch(
             ));
             format!("{class} {ex}")
         }
+        (Some(n), t) if user_error(t).is_some() => {
+            let ex = cx.fresh_param("ex");
+            let java = cx.declare(n);
+            handler.push(Stmt::new(
+                line,
+                StmtKind::Local {
+                    ty: t.java(),
+                    name: java,
+                    init: Some(Expr::Field(Box::new(Expr::name(&ex)), "error".into())),
+                },
+            ));
+            format!("{class} {ex}")
+        }
         (Some(n), _) => format!("{class} {}", cx.declare(n)),
         (None, _) => format!("{class} {}", cx.fresh_param("e")),
     };
     err_body(cx, &mut handler);
     cx.pop_scope();
+    cx.method_names = taken;
     out.push(Stmt::new(
         line,
         StmtKind::Try {
@@ -666,10 +738,8 @@ fn push_try(
     line: u32,
     out: &mut Vec<Stmt>,
 ) {
-    let class = exception_class(&err_ty(cx, recv_ast));
-    if class == "UncheckedIOException" {
-        cx.import("java.io.*");
-    }
+    let err = err_ty(cx, recv_ast);
+    let class = exception_class(cx, &err);
     let e = cx.fresh_param("e");
     out.push(Stmt::new(
         line,
