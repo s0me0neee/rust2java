@@ -24,6 +24,10 @@ fn lower_expr_inner(cx: &mut Cx, e: &ast::Expr, out: &mut Vec<Stmt>) -> Expr {
         ast::Expr::PathExpr(p) => lower_path_expr(cx, p),
         ast::Expr::BinExpr(b) => lower_bin(cx, b, out),
         ast::Expr::PrefixExpr(p) => lower_prefix(cx, p, out),
+        ast::Expr::RefExpr(r) if super::mutret::is_returned_arg(cx, r) => match r.expr() {
+            Some(inner) => lower_expr(cx, &inner, out),
+            None => Expr::raw("null"),
+        },
         ast::Expr::RefExpr(r) => match r.expr() {
             // `&mut cell` passes the array itself so the callee can write through it.
             Some(inner) if r.mut_token().is_some() && cx.cell_path(&inner).is_some() => {
@@ -44,7 +48,15 @@ fn lower_expr_inner(cx: &mut Cx, e: &ast::Expr, out: &mut Vec<Stmt>) -> Expr {
                     ),
                 }
             }
-            Some(inner) => lower_expr(cx, &inner, out),
+            Some(inner) => {
+                // Simple mode: `&[1, 2]` / `&vec![..]` is only read, so `List.of(1, 2)`.
+                cx.read_only_literal = crate::mode::simple()
+                    && r.mut_token().is_none()
+                    && super::stmt::is_list_literal(&inner);
+                let v = lower_expr(cx, &inner, out);
+                cx.read_only_literal = false;
+                v
+            }
             None => Expr::raw("null"),
         },
         ast::Expr::CallExpr(c) => calls::lower_call(cx, c, out),
@@ -927,6 +939,14 @@ pub fn place_assign(
         }
         ast::Expr::PrefixExpr(p) if p.op_kind() == Some(ast::UnaryOp::Deref) => {
             let inner = p.expr().unwrap();
+            // `*n += 1` on a parameter the function returns (`mutret`): a plain local write.
+            if cx
+                .local_of_path(&inner)
+                .is_some_and(|l| cx.returned_params.contains(&l))
+            {
+                let target = lower_expr(cx, &inner, out);
+                return Expr::Assign(Box::new(target), sym, Box::new(r));
+            }
             // `*o.get_or_insert(v) += 1`: fill `o`, then write the new value into it.
             if let ast::Expr::MethodCallExpr(call) = super::strip_parens(&inner)
                 && let Some(o) = option_fill_target(cx, &call)
@@ -1070,6 +1090,9 @@ fn lower_prefix(cx: &mut Cx, p: &ast::PrefixExpr, out: &mut Vec<Stmt>) -> Expr {
             // Cells (`n[0]`) and iter_mut aliases (`v.get(i)`) were resolved when lowering `inner`.
             let resolved = cx.cell_path(&inner).is_some()
                 || cx.handle_path(&inner).is_some()
+                || cx
+                    .local_of_path(&inner)
+                    .is_some_and(|l| cx.returned_params.contains(&l))
                 || cx
                     .local_of_path(&inner)
                     .is_some_and(|l| cx.elem_aliases.contains_key(&l));

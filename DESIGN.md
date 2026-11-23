@@ -871,12 +871,29 @@ Implemented (`-s`/`--simple`; `crate::mode` holds the flag because `Ty::java()` 
   - Parsing calls the Java parser directly (`Integer.parseInt`). `ok_or`/`ok_or_else` are `orElseThrow`. Stdin reads wrap `IOException` in `UncheckedIOException`, and `lines()` items are plain Strings.
   - Exceptions: `RuntimeException(msg)` for string errors, `NumberFormatException` for parse errors, `UncheckedIOException` for I/O. A user error type `AppError` gets a generated `AppErrorException` carrying the value (message = its Display), so a `catch` reads it back as `ex.error`. `?` that converts between error types with `From` keeps the file on Result values. Other error values are thrown as `RuntimeException(String.valueOf(e))`.
   - Otherwise the file keeps exact-mode `Result` values and a warning names the first use that blocked it (a stored Result, `binary_search`, `Debug` of a Result, ...).
-- **Numbers.** No unsigned display, comparison or division helpers: `u32`/`u64` are plain `int`/`long`.
-- **`{:?}`** is `toString` for primitives, strings and std collections of them. User types, tuples and `Ordering` keep the exact text.
-- **Names and locals.** `_` loop counters are `_i`, `_j`, `_k`. `var` when the initializer is `new X<..>(..)` of the declared class, or a parse call.
+- **Numbers.** No unsigned display, comparison, division or min/max helpers: `u32`/`u64` are plain `int`/`long`.
+- **`{:?}`** is `toString` for primitives, strings and std collections of them. A type with `#[derive(Debug)]` and no Display (or manual Debug) generates its Debug text as `toString()`, so `{:?}` of it, or of a list of it, prints directly. Types with a Display keep `debug()`; tuples and `Ordering` keep the exact text.
+- **Structs.** A struct nothing changes in place is a `record` (no field assignment, no `&mut` to it or its fields, no `Cell` fields). `Main` may read a nested record's private fields, so `p.x` stays as written. Records skip the generated `equals`/`hashCode` unless a field is a float.
+- **`Option` as null** where the value comes from a nullable Java call (`m.get(k)`, `q.poll()`, ...):
+  - `if let Some(x) = m.get(k)` is `Item x = m.get(k); if (x != null)`; `match` with `Some`/`None` arms is the same if/else.
+  - `while let Some(x) = q.pop()` is `T x; while ((x = q.poll()) != null)`; `Some(Job { .. })` destructures inside the loop.
+  - `unwrap`/`expect` on such a value is the value; `is_some`/`is_none` compare with null.
+  - `Option` in signatures and fields stays `Optional`.
+- **`&mut` primitive parameters.** A free function returning `()` with one `&mut i32`-style parameter, only used as `*n` and only called as a statement with `&mut local`/`&mut a.field`, returns the value: `static int bump(int n) { n += 1; return n; }`, called as `a = bump(a);` (`lower/mutret.rs`).
+- **Control flow.** A returned `match` is `return switch (..) { .. };`, with `Err` arms as `throw`. `vec![vec![0; m]; n]` fills a list in a `for` loop.
+- **Literals.** `for x in [a, b]` and `&[a, b]` / `&vec![..]` arguments are `List.of(a, b)`.
+- **Names and locals.** `_` loop counters are `_i`, `_j`, `_k`. `var` when the initializer is `new X<..>(..)` of the declared class, or a parse call; `List<T> v = new ArrayList<>()` is `var v = new ArrayList<T>()` when `v` is never reassigned.
+- **Cleanup post-pass** (`javafmt.rs`, on the exact-layout text before re-layout):
+  - Generated methods nothing calls are dropped (`debug`, `clone`, `partial_cmp`, the `debug_*` helpers, the embedded `Result` type's methods), with liveness followed through calls between them.
+  - Redundant parentheses (around primaries, and in argument, initializer, return and assignment slots), casts of a local to its own declared type, `String.valueOf(x)` inside a string concatenation, and enum discriminants nothing reads (`Small(0)`, `final int value`).
+  - The file's leading comment (set off by a blank line) goes above `class Main`.
 - **Tests.**
-  - `SIMPLE=1 cargo test --test cases`: every case must compile and fail or succeed like Rust (`tests/cases/simple-skip` lists exceptions). Stdout differences are counted, not failures: 243/243 pass, and 117 print differently, mostly `{:?}` text.
-  - `tests/simple/*.rs` are golden files, starting with the §22.2 program, which comes out as the reference apart from `List` vs `ArrayList` declarations.
+  - `SIMPLE=1 cargo nextest run --test cases --no-capture`: every case must compile and fail or succeed like Rust (`tests/cases/simple-skip` lists exceptions). Stdout differences are counted, not failures: 243/243 pass, and 119 print differently, mostly `{:?}` text.
+  - `tests/simple/*.rs` are golden files: the §22.2 program, user errors, lookups (records, null lookups, heap loop), and counters (`&mut` parameters). Each also prints what rustc prints.
   - All 22 Codeforces programs print the same output in simple mode.
 
-Not yet: `Option` as null (S3), records for immutable structs, loops for index-heavy chains, `ArrayList` declarations for `Vec`, `toString` for `#[derive(Debug)]`, and the §22.6 cleanup passes beyond layout and imports.
+Not yet:
+- Loops for other index-heavy chains (`windows`, `zip`, `enumerate().map(..)` still go through `IntStream`).
+- Named records for repeated tuple types.
+- `&mut String` parameters as `StringBuilder`.
+- Inlining single-use temporaries (§22.6 pass 5).

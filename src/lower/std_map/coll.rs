@@ -2047,6 +2047,41 @@ pub fn lower_repeat(
         }
         x => x,
     };
+    // Simple mode: fill a list in a loop, as people write `vec![vec![0; m]; n]` in Java.
+    if crate::mode::simple() && cx.lambda_depth == 0 {
+        let line = cx.line(node);
+        let target = cx
+            .take_let_target(node)
+            .or_else(|| node.parent().and_then(|p| cx.take_let_target(&p)));
+        let list = target.clone().unwrap_or_else(|| cx.fresh("rows"));
+        let i = cx.fresh("i");
+        out.push(Stmt::new(
+            line,
+            StmtKind::Local {
+                ty: Ty::Vec(Box::new(elem_ty.clone())).java(),
+                name: list.clone(),
+                init: Some(Expr::New {
+                    ty: "ArrayList<>".into(),
+                    args: vec![],
+                }),
+            },
+        ));
+        out.push(Stmt::new(
+            line,
+            StmtKind::For {
+                label: None,
+                header: format!("int {i} = 0; {i} < {}; {i}++", render(&n)),
+                body: crate::jir::Block {
+                    stmts: vec![Stmt::new(
+                        line,
+                        StmtKind::Expr(Expr::call(Expr::name(&list), "add", vec![x])),
+                    )],
+                    close_line: line,
+                },
+            },
+        ));
+        return Expr::name(list);
+    }
     let i = cx.fresh("i");
     let range = Expr::call(Expr::raw("IntStream"), "range", vec![Expr::raw("0"), n]);
     let mapped = Expr::call(

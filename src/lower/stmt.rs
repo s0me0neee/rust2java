@@ -134,7 +134,7 @@ fn var_infers(jty: &str, init: &Expr) -> bool {
 }
 
 // `[a, b]` or `vec![a, b]` (not the `[x; n]` repeat form).
-fn is_list_literal(e: &ast::Expr) -> bool {
+pub(crate) fn is_list_literal(e: &ast::Expr) -> bool {
     match e {
         ast::Expr::ArrayExpr(a) => a.semicolon_token().is_none(),
         ast::Expr::MacroExpr(m) => m.macro_call().is_some_and(|mc| {

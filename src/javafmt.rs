@@ -77,12 +77,16 @@ fn relayout_masked(src: &str, blank: &dyn Fn(usize) -> bool) -> Option<String> {
     if root.has_error() {
         return None;
     }
-    let f = Fmt {
+    let mut f = Fmt {
         src,
         blank,
         decl_types: declared_types(root, src),
         enum_values_read: reads_value_field(root, src),
+        moved: HashSet::new(),
+        assigned: assigned_names(root, src),
     };
+    let mut header = f.header_comments(root);
+    f.moved = header.iter().map(|c| c.start_byte()).collect();
     let mut out = String::new();
     let mut prev: Option<Node> = None;
     for c in children(root) {
@@ -92,6 +96,14 @@ fn relayout_masked(src: &str, blank: &dyn Fn(usize) -> bool) -> Option<String> {
             if !both_imports && !is_comment(p) {
                 out.push('\n');
             }
+        }
+        // The file's leading comment goes above the class, as a person would put it.
+        if c.kind() == "class_declaration" && !header.is_empty() {
+            for h in &header {
+                out.push_str(f.text(*h));
+                out.push('\n');
+            }
+            header.clear();
         }
         out.push_str(&f.render(c, 0));
         prev = Some(c);
@@ -137,6 +149,25 @@ struct Fmt<'a> {
     decl_types: std::collections::HashMap<String, String>,
     // Some code reads `x.value`, so enums keep their discriminant field.
     enum_values_read: bool,
+    // Start bytes of comments printed elsewhere (the file header, above the class).
+    moved: HashSet<usize>,
+    // Names assigned somewhere after their declaration (`x = ...`).
+    assigned: HashSet<String>,
+}
+
+fn assigned_names(root: Node, src: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "assignment_expression"
+            && let Some(l) = n.child_by_field_name("left")
+            && l.kind() == "identifier"
+        {
+            out.insert(src[l.byte_range()].to_string());
+        }
+        stack.extend(children(n));
+    }
+    out
 }
 
 fn reads_value_field(root: Node, src: &str) -> bool {
@@ -217,6 +248,25 @@ impl Fmt<'_> {
         &self.src[n.byte_range()]
     }
 
+    // Comments opening the top class body and set off from the first member by a blank Rust
+    // line: the file's own header comment.
+    fn header_comments<'t>(&self, root: Node<'t>) -> Vec<Node<'t>> {
+        let Some(body) = children(root)
+            .into_iter()
+            .find(|c| c.kind() == "class_declaration")
+            .and_then(|c| c.child_by_field_name("body"))
+        else {
+            return Vec::new();
+        };
+        let items: Vec<Node> = children(body).into_iter().filter(|c| c.is_named()).collect();
+        let lead: Vec<Node> = items.iter().copied().take_while(|c| is_comment(*c)).collect();
+        match (lead.last(), items.get(lead.len())) {
+            (Some(last), Some(next)) if self.blank_between(*last, *next, false) => lead,
+            (Some(_), None) => lead,
+            _ => Vec::new(),
+        }
+    }
+
     fn render(&self, n: Node, ind: usize) -> String {
         if BODIES.contains(&n.kind()) {
             return self.body(n, ind);
@@ -229,6 +279,9 @@ impl Fmt<'_> {
         }
         if n.child_count() == 0 || ATOMS.contains(&n.kind()) {
             return self.text(n).trim_end().to_string();
+        }
+        if let Some(text) = self.var_list(n, ind) {
+            return text;
         }
         let plain = self.plain(n);
         if plain != n {
@@ -244,6 +297,29 @@ impl Fmt<'_> {
             prev = Some(c);
         }
         out
+    }
+
+    // `List<T> v = new ArrayList<>(..);` -> `var v = new ArrayList<T>(..);` when `v` is never
+    // reassigned (a `Vec` stays a mutable `ArrayList`, typed as one).
+    fn var_list(&self, n: Node, ind: usize) -> Option<String> {
+        if n.kind() != "local_variable_declaration" || n.named_child_count() != 2 {
+            return None;
+        }
+        let ty = self.text(n.child_by_field_name("type")?);
+        let targs = ty.strip_prefix("List")?;
+        let decl = n.child_by_field_name("declarator")?;
+        let name = self.text(decl.child_by_field_name("name")?);
+        let value = decl.child_by_field_name("value")?;
+        if !targs.starts_with('<')
+            || self.assigned.contains(name)
+            || value.kind() != "object_creation_expression"
+            || value.child_by_field_name("type").map(|t| self.text(t)) != Some("ArrayList<>")
+            || children(value).iter().any(|c| c.kind() == "class_body")
+        {
+            return None;
+        }
+        let args = self.render(value.child_by_field_name("arguments")?, ind);
+        Some(format!("var {name} = new ArrayList{targs}{args};"))
     }
 
     // `n` without redundant wrapping: a cast of a local to its declared type, or parentheses
@@ -392,6 +468,7 @@ impl Fmt<'_> {
         let mut items: Vec<Node> = children(n)
             .into_iter()
             .filter(|c| c.is_named() || !matches!(c.kind(), "{" | "}" | ";"))
+            .filter(|c| !self.moved.contains(&c.start_byte()))
             .collect();
         if items.is_empty() {
             return "{}".into();

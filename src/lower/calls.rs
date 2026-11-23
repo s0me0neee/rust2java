@@ -54,7 +54,13 @@ pub fn lower_call(cx: &mut Cx, c: &ast::CallExpr, out: &mut Vec<Stmt>) -> Expr {
     {
         match cx.sema.resolve_path(&path) {
             Some(PathResolution::Def(ModuleDef::Function(f))) => {
-                return lower_fn_call(cx, c, f, &path, out);
+                let call = lower_fn_call(cx, c, f, &path, out);
+                // `bump(&mut x)` where `bump` returns the new value: `x = bump(x)`.
+                if let Some(place) = super::mutret::call_place(cx, c) {
+                    let place = expr::lower_expr(cx, &place, out);
+                    return Expr::Assign(Box::new(place), "=", Box::new(call));
+                }
+                return call;
             }
             Some(PathResolution::Def(ModuleDef::Adt(_)))
             | Some(PathResolution::Def(ModuleDef::EnumVariant(_))) => {

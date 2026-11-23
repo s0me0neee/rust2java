@@ -1597,8 +1597,12 @@ fn lower_fn_sig(
     if let Some((ty, pname)) = &self_param {
         params.push(format!("{ty} {}", cx.declare(pname)));
     }
+    // Simple mode: a `&mut` primitive parameter the function returns instead (`mutret`).
+    let returned = super::mutret::param_of(cx, f);
+    let mut returned_name = None;
     if let Some(pl) = f.param_list() {
-        for p in pl.params() {
+        for (index, p) in pl.params().enumerate() {
+            let returns = returned == Some(index);
             let ast_ty = p.ty();
             let ty = ast_ty
                 .clone()
@@ -1618,6 +1622,7 @@ fn lower_fn_sig(
             }
             let jty = match &cell {
                 Some(inner) => format!("{}[]", inner.java()),
+                None if returns => ty.strip_refs().java(),
                 None => bound.map(Ty::java).unwrap_or_else(|| param_type(cx, &ty)),
             };
             match p.pat() {
@@ -1626,8 +1631,14 @@ fn lower_fn_sig(
                         .name()
                         .map(|n| n.text().to_string())
                         .unwrap_or_else(|| "_".into());
-                    params.push(format!("{jty} {}", cx.declare(&n)));
-                    if cell.is_some() {
+                    let java = cx.declare(&n);
+                    params.push(format!("{jty} {java}"));
+                    if returns {
+                        returned_name = Some((java, ty.strip_refs().java()));
+                        if let Some(local) = cx.sema.to_def(&ip) {
+                            cx.returned_params.insert(local);
+                        }
+                    } else if cell.is_some() {
                         cx.mark_cell_handle(&ip);
                     } else if is_cell_param(&ty) {
                         cx.mark_cell(&ip);
@@ -1652,6 +1663,7 @@ fn lower_fn_sig(
     super::std_map::ptr::note_fn(cx, f.syntax(), &ret);
     let ret_java = match super::std_map::ptr::array_cell_ret(cx, f) {
         Some(inner) => format!("{}[]", inner.java()),
+        None if returned_name.is_some() => returned_name.as_ref().unwrap().1.clone(),
         None if ret.is_unit() => "void".to_string(),
         None => ret.java(),
     };
@@ -1669,6 +1681,9 @@ fn lower_fn_sig(
         if !prelude.is_empty() {
             prelude.append(&mut block.stmts);
             block.stmts = prelude;
+        }
+        if let Some((param, _)) = &returned_name {
+            super::mutret::return_param(&mut block, param);
         }
         block
     });

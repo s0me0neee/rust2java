@@ -4,9 +4,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
 
+// Records for immutable structs, map lookups and heap pops as nullable locals, Debug as toString.
 class Main {
-    // Records for immutable structs, map lookups and heap pops as nullable locals, Debug as toString.
-
     record Item(String name, int price) {
         public String toString() {
             return "Item { name: " + debug_str(this.name, '"') + ", price: " + this.price + " }";

@@ -6,6 +6,7 @@ pub mod fmt;
 pub mod items;
 pub mod iter;
 pub mod macros;
+pub mod mutret;
 pub mod pat;
 pub mod std_map;
 pub mod stmt;
@@ -115,6 +116,10 @@ pub struct Cx<'a, 'db> {
     pub pending_name: Option<String>,
     // Simple mode: Java names of types whose derived Debug is their `toString()` (no Display).
     pub debug_to_string: HashSet<String>,
+    // Simple mode: functions returning their `&mut` primitive parameter (see `mutret`).
+    pub mut_returns: HashMap<ra_ap_hir::Function, usize>,
+    // Their parameters, while lowering those functions: `*n` is just `n`.
+    pub returned_params: HashSet<ra_ap_hir::Local<'db>>,
     // Every identifier in the Rust file: generated names never take one of these.
     file_idents: HashSet<String>,
 }
@@ -260,6 +265,8 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         try_let_declared: None,
         pending_name: None,
         debug_to_string: HashSet::new(),
+        mut_returns: HashMap::new(),
+        returned_params: HashSet::new(),
         // Names a later Rust binding (or an unqualified const/static) will claim; function, type
         // and field names live in other Java namespaces.
         file_idents: file
@@ -310,6 +317,7 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
     cx.wide = wide::analyze(&cx, file.syntax());
     if crate::mode::simple() {
         cx.debug_to_string = items::debug_to_string_types(file.syntax());
+        cx.mut_returns = mutret::analyze(&cx, file.syntax());
     }
     let comments = collect_comments(&cx, file.syntax());
     let last_line = text.trim_end().lines().count().max(1) as u32;
@@ -529,7 +537,11 @@ impl<'a, 'db> Cx<'a, 'db> {
                 .syntax()
                 .parent()
                 .and_then(ast::RefExpr::cast)
-                .is_some_and(|r| r.mut_token().is_some() && !is_inline_read_arg(&r));
+                .is_some_and(|r| {
+                    r.mut_token().is_some()
+                        && !is_inline_read_arg(&r)
+                        && !mutret::is_returned_arg(self, &r)
+                });
             let in_closure = pe
                 .syntax()
                 .ancestors()

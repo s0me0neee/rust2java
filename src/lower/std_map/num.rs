@@ -984,7 +984,7 @@ pub(super) fn min_max(
     line: u32,
     out: &mut Vec<Stmt>,
 ) -> Expr {
-    if i.is_unsigned() && !matches!(i, Int::U8) {
+    if i.is_unsigned() && !matches!(i, Int::U8) && !crate::mode::simple() {
         let (a, b) = (
             simple(cx, a, &Ty::Int(i), line, out),
             simple(cx, b, &Ty::Int(i), line, out),

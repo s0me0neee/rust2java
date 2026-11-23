@@ -1,9 +1,7 @@
-import java.util.ArrayList;
 import java.util.List;
 
+// A user error enum carried by an exception class; `?`, `match` and `unwrap_or` on its Results.
 class Main {
-    // A user error enum carried by an exception class; `?`, `match` and `unwrap_or` on its Results.
-
     sealed interface AppError {
         default String display() {
             var f = new StringBuilder();
@@ -47,7 +45,7 @@ class Main {
     }
 
     public static void main(String[] args) {
-        System.out.println(total(new ArrayList<>(List.of("1", "2"))));
+        System.out.println(total(List.of("1", "2")));
 
         try {
             int n = parse("-3");
