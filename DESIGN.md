@@ -921,8 +921,9 @@ Implemented (`-s`/`--simple`; `crate::mode` holds the flag because `Ty::java()` 
   - In both modes a literal separator with no regex metacharacters is its own regex: `s.split(",", -1)`, not `Pattern.quote(",")`.
   - `is_ascii_digit`/`_alphabetic`/`_alphanumeric`/`_whitespace`/`_uppercase`/`_lowercase` are the `Character` tests (the same on ASCII text).
   - `x as u64` from `u32`/`usize` is a plain `(long)` widening, without the unsigned mask.
+  - `u32::MAX`/`u64::MAX` are `Integer.MAX_VALUE`/`Long.MAX_VALUE`, since they're mostly an infinity or a running minimum's start. Under a cast (`u32::MAX as f64`, a scale) they keep the exact value.
 - **Tests.**
-  - `SIMPLE=1 cargo nextest run --test cases --no-capture`: every case must compile and fail or succeed like Rust (`tests/cases/simple-skip` lists exceptions). Stdout differences are counted, not failures: 243/243 pass, and 119 print differently, mostly `{:?}` text.
+  - `SIMPLE=1 cargo nextest run --test cases --no-capture`: every case must compile and fail or succeed like Rust (`tests/cases/simple-skip` lists exceptions), and print like Rust unless listed in `tests/cases/simple-diffs`. That list has 119 cases, grouped by reason: `{:?}` as `toString` (102), unsigned values past the signed range (14), Java double formatting (2) and Java's parse error text (1). A listed case that starts matching is reported for removal.
   - `tests/simple/*.rs` are golden files: the §22.2 program, user errors, lookups (records, null lookups, heap loop), counters (`&mut` parameters), a contest-style `read_token!` reader, index loops, `StringBuilder` parameters and tuple records. Each also prints what rustc prints.
   - All 22 Codeforces programs print the same output in simple mode.
 

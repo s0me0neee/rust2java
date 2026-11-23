@@ -862,7 +862,13 @@ pub fn lower_std_path(cx: &mut Cx, path: &ast::Path, def: ModuleDef) -> Expr {
         "Equal" if text.contains("Ordering") => return Expr::raw("0"),
         "Greater" if text.contains("Ordering") => return Expr::raw("1"),
         "MAX" | "MIN" | "BITS" => {
-            if let Some(e) = int_const(ty_tok, last) {
+            // `u32::MAX as f64` scales by the exact value, so a cast keeps it.
+            let cast = path
+                .syntax()
+                .parent()
+                .and_then(|p| p.parent())
+                .is_some_and(|n| ast::CastExpr::can_cast(n.kind()));
+            if let Some(e) = int_const(ty_tok, last, !cast) {
                 return Expr::raw(e);
             }
         }
@@ -1013,10 +1019,18 @@ pub fn lower_std_path(cx: &mut Cx, path: &ast::Path, def: ModuleDef) -> Expr {
     cx.unsupported(path.syntax(), &format!("std path `{text}`"))
 }
 
-fn int_const(ty: Option<&str>, which: &str) -> Option<&'static str> {
+fn int_const(ty: Option<&str>, which: &str, sentinel: bool) -> Option<&'static str> {
     let max = which == "MAX";
     if which == "BITS" {
         return None;
+    }
+    // Simple mode: MAX is mostly an infinity or a running minimum's start, so the signed max.
+    if crate::mode::simple() && max && sentinel {
+        match ty? {
+            "u32" => return Some("Integer.MAX_VALUE"),
+            "u64" | "u128" => return Some("Long.MAX_VALUE"),
+            _ => {}
+        }
     }
     Some(match (ty?, max) {
         ("i8", true) => "Byte.MAX_VALUE",
