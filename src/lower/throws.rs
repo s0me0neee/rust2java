@@ -239,23 +239,102 @@ fn context_ok(cx: &Cx, e: &ast::Expr) -> bool {
 
 // `?` converting between error types via `From`: the exception would keep the original type and
 // slip past a `catch` of the converted one, so only conversions into strings and std errors pass.
+// A std parse or I/O error converted `From` into a user error is caught and rethrown converted.
 fn same_error(cx: &Cx, e: &ast::Expr) -> bool {
     let Ty::Result(_, from) = cx.ty(e) else {
         return true;
     };
-    let to = e
-        .syntax()
-        .ancestors()
-        .find_map(ast::Fn::cast)
-        .and_then(|f| cx.sema.to_def(&f))
-        .map(|f| cx.convert(&f.ret_type(cx.db)));
-    match to {
-        Some(Ty::Result(_, to)) => {
+    match fn_error(cx, e.syntax()) {
+        Some(to) => {
             let user = user_error(&from).is_some() || user_error(&to).is_some();
-            !user || from.strip_refs() == to.strip_refs()
+            !user || from.strip_refs() == to.strip_refs() || from_conversion(cx, e.syntax(), &from, &to)
         }
-        _ => true,
+        None => true,
     }
+}
+
+// The error type of the function `node` is in, when it returns a Result.
+fn fn_error(cx: &Cx, node: &SyntaxNode) -> Option<Ty> {
+    let f = node.ancestors().find_map(ast::Fn::cast)?;
+    match cx.convert(&cx.sema.to_def(&f)?.ret_type(cx.db)) {
+        Ty::Result(_, to) => Some(*to),
+        _ => None,
+    }
+}
+
+// `from` is a std error with its own exception class, and the file has `impl From<from> for to`.
+fn from_conversion(cx: &Cx, node: &SyntaxNode, from: &Ty, to: &Ty) -> bool {
+    let std_exception = match from.strip_refs() {
+        Ty::Other(n) => n.contains("ParseIntError") || n.contains("ParseFloatError") || is_io_error(from),
+        _ => false,
+    };
+    let Some(to_name) = user_error(to) else { return false };
+    if !std_exception {
+        return false;
+    }
+    let Some(root) = node.ancestors().last() else { return false };
+    root.descendants().filter_map(ast::Impl::cast).any(|imp| {
+        let is_from = imp.trait_().is_some_and(|t| {
+            let text = t.syntax().text().to_string();
+            text.starts_with("From<") || text.contains("::From<")
+        });
+        let for_to = imp.self_ty().is_some_and(|t| cx.type_ref(&t).strip_refs().java() == to_name);
+        let from_arg = imp
+            .trait_()
+            .and_then(|t| t.syntax().descendants().find_map(ast::GenericArgList::cast))
+            .and_then(|g| g.generic_args().next())
+            .and_then(|a| match a {
+                ast::GenericArg::TypeArg(t) => t.ty(),
+                _ => None,
+            })
+            .is_some_and(|t| cx.type_ref(&t).strip_refs() == from.strip_refs());
+        is_from && for_to && from_arg
+    })
+}
+
+// `e?` whose error converts `From` a std error into the function's user error:
+// `try { v = e; } catch (NumberFormatException ex) { throw new AppErrorException(AppError.from(ex)); }`.
+pub fn try_converted(cx: &mut Cx, t: &ast::TryExpr, inner: &ast::Expr, line: u32, out: &mut Vec<Stmt>) -> Option<Expr> {
+    let Ty::Result(ok, from) = cx.ty(inner) else { return None };
+    let to = fn_error(cx, t.syntax())?;
+    if from.strip_refs() == to.strip_refs() || !from_conversion(cx, t.syntax(), &from, &to) {
+        return None;
+    }
+    let to_java = to.strip_refs().java();
+    let class = exception_class(cx, &from);
+    let var = (!ok.is_unit()).then(|| cx.take_let_target(t.syntax()).unwrap_or_else(|| cx.fresh("value")));
+    if let Some(v) = &var {
+        out.push(Stmt::new(
+            line,
+            StmtKind::Local { ty: stmt::decl_type_explicit(&ok), name: v.clone(), init: None },
+        ));
+    }
+    let taken = cx.method_names.clone();
+    cx.push_scope();
+    let mut body = Vec::new();
+    let value = expr::lower_expr(cx, inner, &mut body);
+    match &var {
+        Some(v) => body.push(Stmt::new(
+            line,
+            StmtKind::Expr(Expr::Assign(Box::new(Expr::name(v)), "=", Box::new(value))),
+        )),
+        None => stmt::push_discard(&mut body, line, value),
+    }
+    cx.pop_scope();
+    cx.method_names = taken;
+    let ex = cx.fresh_param("e");
+    let converted = Expr::call(Expr::raw(to_java), "from", vec![Expr::name(&ex)]);
+    let thrown = exception_of(cx, converted, &to);
+    out.push(Stmt::new(
+        line,
+        StmtKind::Try {
+            body: Block { stmts: body, close_line: line },
+            decl: format!("{class} {ex}"),
+            handler: Block { stmts: vec![Stmt::new(line, StmtKind::Throw(thrown))], close_line: line },
+        },
+    ));
+    cx.release_param(&ex);
+    Some(var.map_or(Expr::raw("null"), Expr::name))
 }
 
 // Where a Result-typed expression's value ends up, looking through blocks and branches.

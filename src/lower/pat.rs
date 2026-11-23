@@ -2090,6 +2090,9 @@ pub fn lower_try(cx: &mut Cx, t: &ast::TryExpr, out: &mut Vec<Stmt>) -> Expr {
             super::throws::push_throw(cx, &payload, line, out);
             return Expr::raw("null");
         }
+        if let Some(v) = super::throws::try_converted(cx, t, &inner, line, out) {
+            return v;
+        }
         return expr::lower_expr(cx, &inner, out);
     }
     let v = expr::lower_expr(cx, &inner, out);
