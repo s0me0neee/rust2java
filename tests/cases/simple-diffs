@@ -31,3 +31,6 @@ fmt_debug prog_fmtx
 
 # Java's parse error text.
 prog_calc
+
+# `max_by`/`max_by_key` are Java's `max`, which returns the first of equal maxima (also listed above):
+# coll_edge_cases

@@ -1646,6 +1646,17 @@ pub(super) fn lower_float_method(
         "hypot" => cast(math("hypot", vec![recv, b0])),
         "clamp" => cast(math("clamp", vec![recv, b0, b1])),
         "cmp" | "total_cmp" => Expr::call(Expr::raw(cls), "compare", vec![recv, b0]),
+        // Simple mode: a ternary that `unwrap()` can drop down to the `compare`.
+        "partial_cmp" if crate::mode::simple() => {
+            let a = simple(cx, recv, &fty, line, out);
+            let b = simple(cx, b0, &fty, line, out);
+            let nan = |v: &Expr| Expr::call(Expr::raw(cls), "isNaN", vec![v.clone()]);
+            conditional(
+                Expr::bin(nan(&a), "||", nan(&b)),
+                Expr::raw("Optional.<Integer>empty()"),
+                opt_of(Expr::call(Expr::raw(cls), "compare", vec![a, b])),
+            )
+        }
         "partial_cmp" => {
             let a = simple(cx, recv, &fty, line, out);
             let b = simple(cx, b0, &fty, line, out);

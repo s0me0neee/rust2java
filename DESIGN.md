@@ -923,6 +923,8 @@ Implemented (`-s`/`--simple`; `crate::mode` holds the flag because `Ty::java()` 
   - In both modes a literal separator with no regex metacharacters is its own regex: `s.split(",", -1)`, not `Pattern.quote(",")`.
   - `is_ascii_digit`/`_alphabetic`/`_alphanumeric`/`_whitespace`/`_uppercase`/`_lowercase` are the `Character` tests (the same on ASCII text).
   - `x as u64` from `u32`/`usize` is a plain `(long)` widening, without the unsigned mask.
+  - `a.partial_cmp(&b).unwrap()` on floats is `Double.compare(a, b)` (NaN takes Java's total order instead of panicking); an unwrapped `Optional.of(e)` is `e`.
+  - `max_by`/`max_by_key` are `stream.max(cmp)`, which returns the first of equal maxima where Rust returns the last.
   - `u32::MAX`/`u64::MAX` are `Integer.MAX_VALUE`/`Long.MAX_VALUE`, since they're mostly an infinity or a running minimum's start. Under a cast (`u32::MAX as f64`, a scale) they keep the exact value.
 - **Tests.**
   - `SIMPLE=1 cargo nextest run --test cases --no-capture`: every case must compile and fail or succeed like Rust (`tests/cases/simple-skip` lists exceptions), and print like Rust unless listed in `tests/cases/simple-diffs`. That list has 119 cases, grouped by reason: `{:?}` as `toString` (102), unsigned values past the signed range (14), Java double formatting (2) and Java's parse error text (1). A listed case that starts matching is reported for removal.

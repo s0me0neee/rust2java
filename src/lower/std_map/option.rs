@@ -106,6 +106,25 @@ pub(super) fn lower_option_method(
             _ => {}
         }
     }
+    // Simple mode: `Optional.of(e).orElseThrow()` is `e`, and so is `a.partial_cmp(&b).unwrap()`'s
+    // `(nan ? Optional.empty() : Optional.of(compare))` (NaN left to Java's total order).
+    if crate::mode::simple() && matches!(name, "unwrap" | "unwrap_unchecked" | "expect") {
+        let of = |e: &Expr| match e {
+            Expr::Call { recv: Some(o), name, args }
+                if name == "of" && args.len() == 1 && matches!(&**o, Expr::Raw(r) if r == "Optional") =>
+            {
+                Some(args[0].clone())
+            }
+            _ => None,
+        };
+        let some = match &recv {
+            Expr::Ternary(_, empty, value) if matches!(&**empty, Expr::Raw(r) if r.starts_with("Optional.")) => of(value),
+            other => of(other),
+        };
+        if some.is_some() {
+            return some;
+        }
+    }
     match name {
         "is_some" => Some(Expr::call(recv, "isPresent", vec![])),
         "is_none" => Some(Expr::call(recv, "isEmpty", vec![])),

@@ -2054,8 +2054,9 @@ fn lower_adaptor_core(
                 Some(o) => format!("Comparator.comparing({}, {o})", render(&f)),
                 None => format!("Comparator.comparing({})", render(&f)),
             };
-            if name == "min_by_key" {
-                call("min", vec![Expr::raw(cmp)])
+            // Simple mode takes Java's `max`, which keeps the first of equal maxima, not the last.
+            if name == "min_by_key" || crate::mode::simple() {
+                call(if name == "min_by_key" { "min" } else { "max" }, vec![Expr::raw(cmp)])
             } else {
                 let (a, b) = (cx.fresh("a"), cx.fresh("b"));
                 call(
@@ -2068,8 +2069,8 @@ fn lower_adaptor_core(
         }
         "min_by" | "max_by" => {
             let f = lower_arg(cx, &args[0], out);
-            if name == "min_by" {
-                call("min", vec![f])
+            if name == "min_by" || crate::mode::simple() {
+                call(if name == "min_by" { "min" } else { "max" }, vec![f])
             } else {
                 let cmp = render(&Expr::Cast(
                     format!("Comparator<{}>", item.boxed()),
