@@ -212,6 +212,8 @@ impl Ty {
             Ty::Iter(t) => format!("Stream<{}>", t.boxed()),
             Ty::Fn { params, ret } => fn_interface(params, ret),
             Ty::Param(p) => p.clone(),
+            // Simple mode: parse errors are what Java throws for them.
+            Ty::Other(n) if simple_parse_error(n) => "NumberFormatException".into(),
             Ty::Other(_) => "Object".into(),
         }
     }
@@ -219,6 +221,7 @@ impl Ty {
     // Whether a Java declaration can spell this type (otherwise use `var`).
     pub fn is_nameable(&self) -> bool {
         match self {
+            Ty::Other(n) if simple_parse_error(n) => true,
             Ty::Other(_) | Ty::Never => false,
             Ty::Vec(t)
             | Ty::Set { t, .. }
@@ -244,6 +247,11 @@ pub fn fn_call_method(params: usize, ret_unit: bool) -> &'static str {
         (1 | 2, true) => "accept",
         _ => "apply",
     }
+}
+
+// `ParseIntError` / `ParseFloatError` in simple mode, spelled as Java's `NumberFormatException`.
+fn simple_parse_error(name: &str) -> bool {
+    crate::mode::simple() && (name.contains("ParseIntError") || name.contains("ParseFloatError"))
 }
 
 fn fn_interface(params: &[Ty], ret: &Ty) -> String {
