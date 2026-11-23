@@ -1,0 +1,33 @@
+# Cases whose SIMPLE=1 stdout may differ from rustc's; any other difference fails the run.
+# Names are whitespace-separated; `#` starts a comment.
+
+# `{:?}` is Java's toString: strings and chars unquoted and unescaped, Optional[..], {k=v}, sets as [..].
+basics coll_deque_heap coll_edge_cases coll_entry_modify coll_get_wrapped_index
+coll_map_edge_cases coll_map_mut coll_map_ordered coll_mut_vec coll_ordered_defaults
+coll_ordered_ranges coll_sets coll_slot_alias coll_slot_write coll_vec_mutators
+err_app_errors err_option_misc err_result_misc fmt_basics fmt_printf io_files
+io_lines_errors io_lock_append io_read_line_eof items_generated_names items_thread_local
+iter_basic iter_chains iter_pulled iter_std_basic iter_std_chains iter_std_pulled
+opt_bool_then opt_edge_cases opt_get_or_insert_write prog_adventure prog_bank_cmds
+prog_classic_algos prog_closures2 prog_coll_sort_tuple_vec prog_csv prog_csv_table
+prog_dijkstra prog_dp prog_dyn_shapes prog_errors prog_generic prog_generic_shapes
+prog_geom prog_graphs prog_grid prog_inventory prog_items_impl_bound prog_iters
+prog_job_queue prog_json prog_lexer prog_library prog_linked prog_maze prog_memo_dp
+prog_option_some_fn prog_patterns prog_rooms prog_sched prog_shapes prog_sim prog_sorting
+prog_stack prog_states prog_stock_items prog_strings prog_symbolic prog_text_tools
+prog_textproc prog_todo prog_traits2 prog_tree prog_vecops prog_wordstats prog_wrappers
+ptr_box_rec ptr_cell ptr_cell_more ptr_option_cells ptr_tree short_fmtd_debug
+short_iter_collect short_opt_chain short_opt_seq short_txt_to_digit std_collections
+std_mem std_option std_str std_vec text_conv text_edge_cases text_fnvalues text_methods
+text_split text_views_builders
+
+# Unsigned values past the signed range print (and compare) as Java's signed types.
+coll_ord_keys fmt_unsigned_debug iter_custom_impls iter_pulled_rest num_conversions
+num_edge_cases num_int_methods num_unsigned prog_bitops prog_numeric short_dbg_derive
+short_err_parse short_fmtw_width std_num
+
+# Java's double formatting: 1.0E16, Infinity.
+fmt_debug prog_fmtx
+
+# Java's parse error text.
+prog_calc

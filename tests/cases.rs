@@ -89,20 +89,22 @@ fn differential() {
     let work = tempfile::tempdir().unwrap();
     let out_dir = work.path().join("out");
     // SIMPLE=1: transpile with `-s`. Every case must compile and exit like Rust (zero or not)
-    // unless listed in tests/cases/simple-skip; stdout differences (`{:?}` is `toString`, unsigned
-    // values print signed) are only counted.
+    // unless listed in tests/cases/simple-skip, and print like Rust unless listed in
+    // tests/cases/simple-diffs (`{:?}` is `toString`, unsigned values print signed).
     let simple = std::env::var("SIMPLE").is_ok();
-    let skip: Vec<String> = if simple {
-        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases/simple-skip"))
+    let list = |file: &str| -> Vec<String> {
+        if !simple {
+            return Vec::new();
+        }
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases").join(file))
             .unwrap_or_default()
             .lines()
             .filter_map(|l| l.split('#').next())
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
+            .flat_map(|l| l.split_whitespace().map(str::to_string).collect::<Vec<_>>())
             .collect()
-    } else {
-        Vec::new()
     };
+    let skip = list("simple-skip");
+    let allowed_diffs = list("simple-diffs");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rust2java"));
     cmd.args(cases.iter().map(|c| &c.src))
         .arg("-o")
@@ -111,7 +113,7 @@ fn differential() {
     let (_, _, diag) = run_with_stdin(&mut cmd, &None);
 
     let mut failures = Vec::new();
-    let mut stdout_diffs = Vec::new();
+    let (mut stdout_diffs, mut stale_diffs) = (Vec::new(), Vec::new());
     let (mut total_stmts, mut total_drift, mut drift_notes) = (0u64, 0u64, Vec::new());
     for case in &cases {
         let (want, want_code) = expected(case, work.path());
@@ -161,9 +163,12 @@ fn differential() {
         );
         // Simple mode keeps whether the program fails, not the exit code or the panic text.
         let code_ok = got_code == want_code || simple && (got_code != 0) == (want_code != 0);
-        if simple && code_ok && got != want {
+        if simple && code_ok && got != want && allowed_diffs.contains(&case.name) {
             stdout_diffs.push(case.name.clone());
             continue;
+        }
+        if simple && got == want && allowed_diffs.contains(&case.name) {
+            stale_diffs.push(case.name.clone());
         }
         if (got != want || !code_ok) && !skip.contains(&case.name) {
             failures.push(format!(
@@ -176,10 +181,15 @@ fn differential() {
     eprintln!("\n{passed}/{} cases passed", cases.len());
     if simple {
         eprintln!(
-            "simple mode: {} case(s) print differently from Rust: {}",
-            stdout_diffs.len(),
-            stdout_diffs.join(" ")
+            "simple mode: {} listed case(s) print differently from Rust",
+            stdout_diffs.len()
         );
+        if !stale_diffs.is_empty() {
+            eprintln!(
+                "simple mode: now print like Rust, remove from simple-diffs: {}",
+                stale_diffs.join(" ")
+            );
+        }
     }
     let exact = if total_stmts == 0 {
         100.0
