@@ -444,7 +444,7 @@ Iterator chains become `java.util.stream` pipelines. Both are lazy and process o
 | `.copied()`, `.cloned()` | dropped (or a clone for mutable structs) |
 | `.enumerate()` | `IntStream.range(0, v.size()).mapToObj(i -> Map.entry(i, v.get(i)))` on lists; on other streams, a hoisted `var i = new AtomicInteger();` then `.map(x -> Map.entry(i.getAndIncrement(), x))` |
 | `.zip(other)` | `IntStream.range(0, Math.min(a.size(), b.size())).mapToObj(i -> Map.entry(a.get(i), b.get(i)))`. Sources that aren't lists are collected with `.toList()` first. |
-| `.map(|(a, b)| ..)` / `.any` / `.all` straight on a list `zip` or `enumerate` | `IntStream.range(0, n).mapToObj(i -> f(a.get(i), b.get(i)))`: the closure's fields read the lists, with no `Map.entry` pairs. |
+| `.map(|(a, b)| ..)` / `.any` / `.all` on a list `zip` or `enumerate`, or `s.lines()`/`split*()` `.enumerate()`, after any `.filter(|(a, b)| ..)` stages | `IntStream.range(0, n).filter(i -> p(a.get(i))).mapToObj(i -> f(a.get(i), b.get(i)))`: the closures' fields read the lists, with no `Map.entry` pairs. Every stage names the index alike (the user's name if a stage gives one), and a map back to the index is `.boxed()`. |
 | `.rev()` | `v.reversed().stream()` (Java 21 `List.reversed`); on ranges, a descending `IntStream.iterate` |
 | `.step_by(k)` on ranges | `IntStream.iterate(a, i -> i < b, i -> i + k)` |
 | `.chain(o)` | `Stream.concat(a, o)` |
@@ -930,7 +930,7 @@ Implemented (`-s`/`--simple`; `crate::mode` holds the flag because `Ty::java()` 
   - All 22 Codeforces programs print the same output in simple mode.
 
 Not yet:
-- `filter` (and other stages) between a `zip`/`enumerate` and its `map` still pairs items with `Map.entry`; `zip` of non-lists still pulls two iterators.
+- Stages other than `filter` between a `zip`/`enumerate` and its `map` still pair items with `Map.entry`; `zip` of non-lists still pulls two iterators.
 - Named tuple records in multi-file crates (the registry is per file).
-- `enumerate()` inside a stream chain over a non-list (`text.lines().enumerate().filter(..)`) still counts with an `AtomicInteger`.
+- `enumerate()` in a stream chain over a non-list, non-text source (`v.iter().rev().enumerate()`, a lambda body's `lines().enumerate()`) still counts with an `AtomicInteger`.
 - Inlining single-use temporaries the Rust source names itself, or that aren't `String`/`var` (the post-pass can't see whether the declared type converts the value).

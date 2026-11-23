@@ -15,6 +15,9 @@ class Main {
         List<String> tagged = IntStream.range(0, w.size()).mapToObj(i -> i + ":" + w.get(i)).toList();
         boolean sorted = IntStream.range(0, v.size() - 1).allMatch(j -> v.get(j) <= v.get(j + 1));
         System.out.println(diffs + " " + dot + " " + tagged + " " + sorted);
+        List<Integer> big_at = IntStream.range(0, v.size()).filter(i -> v.get(i) > 4).boxed().toList();
+        int rises = (int) IntStream.range(0, v.size() - 1).filter(j -> v.get(j) < v.get(j + 1)).mapToObj(j -> v.get(j + 1) - v.get(j)).count();
+        System.out.println(big_at + " " + rises);
 
         String s = "hello";
         for (int i = 0; i < s.length(); i++) {

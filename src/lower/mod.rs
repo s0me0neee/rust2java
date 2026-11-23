@@ -99,6 +99,8 @@ pub struct Cx<'a, 'db> {
     pub elem_aliases: HashMap<ra_ap_hir::Local<'db>, (String, String, ElemAliasKind)>,
     // Set while lowering the closure of an `IntStream.range` chain: what its `(a, b)` fields read.
     pub indexed_params: Option<Vec<indexed::Item>>,
+    // The chain's index: the Rust name a stage gives it, then the Java name every stage shares.
+    pub indexed_index: (Option<String>, Option<String>),
     // Local ADTs implementing Iterator/Deref, recorded for their use sites.
     pub local_traits: HashMap<String, traits::TraitImpls>,
     // macro_rules! arms lowered as static methods: macro name -> Java method name.
@@ -273,6 +275,7 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         pulled_iters: HashMap::new(),
         elem_aliases: HashMap::new(),
         indexed_params: None,
+        indexed_index: (None, None),
         local_traits: HashMap::new(),
         macro_methods: HashMap::new(),
         macro_method_defs: Vec::new(),

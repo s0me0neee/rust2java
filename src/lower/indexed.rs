@@ -275,20 +275,46 @@ pub(super) fn fused(
         "all" => "allMatch",
         _ => return None,
     };
-    let shape = shape(cx, recv).filter(|s| s.arity() == 2)?;
-    let closure = match m.arg_list()?.args().next().map(|a| strip_parens(&a))? {
-        ast::Expr::ClosureExpr(c) => c,
-        _ => return None,
+    let closure_arg = |m: &ast::MethodCallExpr| match m.arg_list()?.args().next().map(|a| strip_parens(&a))? {
+        ast::Expr::ClosureExpr(c) => closure_fields(&c).map(|_| c),
+        _ => None,
     };
-    closure_fields(&closure)?;
+    let closure = closure_arg(m)?;
+    // `.filter(|(_, line)| ..)` stages before it filter the indices (outermost last).
+    let mut filters = Vec::new();
+    let mut src = strip_parens(recv);
+    while let ast::Expr::MethodCallExpr(f) = &src
+        && method_name(f) == "filter"
+    {
+        filters.push(closure_arg(f)?);
+        src = strip_parens(&f.receiver()?);
+    }
+    let shape = shape(cx, &src).filter(|s| s.arity() == 2)?;
     let line = cx.line(m.syntax());
     let ix = lower(cx, &shape, line, out);
     let bound = ix.bound.clone()?;
-    cx.indexed_params = Some(ix.items);
-    let f = expr::lower_expr(cx, &ast::Expr::ClosureExpr(closure), out);
-    cx.indexed_params = None;
-    let range = Expr::raw(format!("IntStream.range(0, {bound})"));
-    Some(Expr::call(range, jname, vec![f]))
+    let mut stream = Expr::raw(format!("IntStream.range(0, {bound})"));
+    let stages: Vec<_> = filters.into_iter().rev().map(|c| ("filter", c)).chain([(jname, closure)]).collect();
+    // Every stage names the index alike, after the last stage that names it at all.
+    let rust_index = stages
+        .iter()
+        .rev()
+        .find_map(|(_, c)| index_name(&closure_fields(c)?, &ix.items));
+    let saved = std::mem::replace(&mut cx.indexed_index, (rust_index, None));
+    for (name, c) in stages {
+        cx.indexed_params = Some(ix.items.clone());
+        let f = expr::lower_expr(cx, &ast::Expr::ClosureExpr(c), out);
+        cx.indexed_params = None;
+        // `.map(|(i, _)| i)` keeps the indices themselves.
+        let text = render(&f);
+        if name == "mapToObj" && text.split_once(" -> ").is_some_and(|(p, b)| p == b) {
+            stream = Expr::call(stream, "boxed", vec![]);
+            continue;
+        }
+        stream = Expr::call(stream, name, vec![f]);
+    }
+    cx.indexed_index = saved;
+    Some(stream)
 }
 
 // The fields of a closure's one `(a, b)` parameter, each a plain binding or `_`.
@@ -309,6 +335,15 @@ fn closure_fields(c: &ast::ClosureExpr) -> Option<Vec<Option<ast::IdentPat>>> {
         .collect()
 }
 
+// The Rust name a closure gives the index field, if any.
+fn index_name(fields: &[Option<ast::IdentPat>], items: &[Item]) -> Option<String> {
+    fields
+        .iter()
+        .zip(items)
+        .find(|(_, i)| matches!(i, Item::Index))
+        .and_then(|(f, _)| Some(f.as_ref()?.name()?.text().to_string()))
+}
+
 fn strip_ref(p: ast::Pat) -> ast::Pat {
     match &p {
         ast::Pat::RefPat(r) => r.pat().map(strip_ref).unwrap_or(p),
@@ -323,18 +358,24 @@ pub(super) fn closure_params(cx: &mut Cx, c: &ast::ClosureExpr, items: &[Item]) 
     if fields.len() != items.len() {
         return None;
     }
-    let index_name = fields
-        .iter()
-        .zip(items)
-        .find(|(_, i)| matches!(i, Item::Index))
-        .and_then(|(f, _)| f.as_ref()?.name());
-    let idx = match index_name {
-        Some(n) => cx.declare_param(&n.text().to_string()),
-        // The lambda's names are released after it, so `i` stays free for later Rust locals.
-        None if crate::mode::simple() => cx
-            .claim_first(&["i", "j", "k"])
-            .unwrap_or_else(|| cx.fresh_param("i")),
-        None => cx.fresh_param("i"),
+    let index_name = index_name(&fields, items);
+    let idx = if let Some(java) = cx.indexed_index.1.clone() {
+        // A later stage of the chain: the same name as the first.
+        if let Some(n) = &index_name {
+            cx.declare_as(n, &java);
+        }
+        java
+    } else {
+        let idx = match index_name.or_else(|| cx.indexed_index.0.clone()) {
+            Some(n) => cx.declare_param(&n),
+            // The lambda's names are released after it, so `i` stays free for later Rust locals.
+            None if crate::mode::simple() => cx
+                .claim_first(&["i", "j", "k"])
+                .unwrap_or_else(|| cx.fresh_param("i")),
+            None => cx.fresh_param("i"),
+        };
+        cx.indexed_index.1 = Some(idx.clone());
+        idx
     };
     for (f, item) in fields.iter().zip(items) {
         let (Some(ip), Item::Elem { seq, text, .. }) = (f, item) else {

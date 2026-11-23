@@ -7,6 +7,9 @@ fn main() {
     let tagged: Vec<String> = w.iter().enumerate().map(|(i, x)| format!("{i}:{x}")).collect();
     let sorted = v.iter().zip(v.iter().skip(1)).all(|(a, b)| a <= b);
     println!("{:?} {} {:?} {}", diffs, dot, tagged, sorted);
+    let big_at: Vec<usize> = v.iter().enumerate().filter(|(_, x)| **x > 4).map(|(i, _)| i).collect();
+    let rises = v.iter().zip(v.iter().skip(1)).filter(|(a, b)| a < b).map(|(a, b)| b - a).count();
+    println!("{:?} {}", big_at, rises);
 
     let s = "hello";
     for (i, c) in s.chars().enumerate() {
