@@ -191,8 +191,8 @@ struct Hints {
     aliases: HashMap<String, String>,
     // Tuple key -> binding name -> count.
     holders: HashMap<String, HashMap<String, usize>>,
-    // Tuple key -> per position: field name -> count.
-    fields: HashMap<String, Vec<HashMap<String, usize>>>,
+    // Tuple key -> the patterns that unpack it, as per-position names (None for `_`), in source order.
+    fields: HashMap<String, Vec<Vec<Option<String>>>>,
 }
 
 impl Hints {
@@ -207,15 +207,18 @@ impl Hints {
             }
         }
         for n in nodes {
+            // Macro expansions name their own temporaries (`assert_eq!`'s `left_val`).
+            if !ast::SourceFile::can_cast(n.ancestors().last().map_or(n.kind(), |r| r.kind())) {
+                continue;
+            }
             if let Some(tp) = ast::TuplePat::cast(n.clone()) {
                 let Ty::Tuple(ts) = cx.pat_ty(&ast::Pat::TuplePat(tp.clone())).strip_refs().clone() else {
                     continue;
                 };
-                let slots = h.fields.entry(key(&ts)).or_insert_with(|| vec![HashMap::new(); ts.len()]);
-                for (i, f) in tp.fields().enumerate().take(slots.len()) {
-                    if let Some(name) = ident_name(f) {
-                        *slots[i].entry(name).or_default() += 1;
-                    }
+                let names: Vec<Option<String>> = tp.fields().map(ident_name).collect();
+                if names.len() == ts.len() {
+                    let ts: Vec<Ty> = ts.iter().map(|t| t.strip_refs().clone()).collect();
+                    h.fields.entry(key(&ts)).or_default().push(names);
                 }
                 continue;
             }
@@ -269,18 +272,42 @@ impl Hints {
                 _ => (0..arity).map(|i| format!("_{i}")).collect(),
             }
         };
-        let Some(slots) = self.fields.get(k) else { return fallback() };
-        let picked: Option<Vec<String>> = slots
-            .iter()
-            .map(|s| most_common(s).map(|n| super::escape_keyword(&n)))
+        let usable = |names: &[String]| {
+            names.iter().collect::<HashSet<_>>().len() == arity
+                && !names.iter().any(|n| RESERVED_FIELDS.contains(&n.as_str()))
+        };
+        let Some(pats) = self.fields.get(k) else { return fallback() };
+        // One pattern's names as a set (mixing `(dr, dc)` with `(r, c)` reads as neither).
+        let mut complete: Vec<(Vec<String>, usize)> = Vec::new();
+        for p in pats {
+            let Some(names) = p.iter().cloned().collect::<Option<Vec<String>>>() else { continue };
+            let names: Vec<String> = names.iter().map(|n| super::escape_keyword(n)).collect();
+            if !usable(&names) {
+                continue;
+            }
+            match complete.iter_mut().find(|(n, _)| *n == names) {
+                Some((_, c)) => *c += 1,
+                None => complete.push((names, 1)),
+            }
+        }
+        // Most used wins; ties go to the first in the source (`max_by_key` keeps the last max).
+        if let Some((names, _)) = complete.iter().rev().max_by_key(|(_, c)| *c) {
+            return names.clone();
+        }
+        // Only partial patterns (`|&(_, _, w)|`): fill each position from them.
+        let picked: Option<Vec<String>> = (0..arity)
+            .map(|i| {
+                let mut counts: HashMap<String, usize> = HashMap::new();
+                for p in pats {
+                    if let Some(n) = &p[i] {
+                        *counts.entry(n.clone()).or_default() += 1;
+                    }
+                }
+                most_common(&counts).map(|n| super::escape_keyword(&n))
+            })
             .collect();
         match picked {
-            Some(names)
-                if names.iter().collect::<HashSet<_>>().len() == arity
-                    && !names.iter().any(|n| RESERVED_FIELDS.contains(&n.as_str())) =>
-            {
-                names
-            }
+            Some(names) if usable(&names) => names,
             _ => fallback(),
         }
     }
@@ -292,7 +319,8 @@ fn ident_name(p: ast::Pat) -> Option<String> {
         ast::Pat::RefPat(r) => ident_name(r.pat()?),
         ast::Pat::IdentPat(ip) if ip.pat().is_none() => {
             let n = ip.name()?.text().to_string();
-            (n != "_" && !n.starts_with('_')).then_some(n)
+            // `None` / `MAX` in a pattern parse as idents but are constants.
+            n.starts_with(|c: char| c.is_lowercase()).then_some(n)
         }
         _ => None,
     }

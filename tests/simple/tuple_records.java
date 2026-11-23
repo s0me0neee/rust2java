@@ -51,22 +51,22 @@ class Main {
 
         var edges = new ArrayList<Edge>(List.of(new Edge(0, 1, 5L), new Edge(1, 2, 3L), new Edge(0, 2, 9L)));
         edges.sort(Comparator.comparingLong((Edge tuple) -> {
-            long w = tuple.w();
+            long w = tuple.weight();
             return w;
         }));
         for (Edge item : edges) {
             int from = item.from();
             int to = item.to();
-            long weight = item.w();
+            long weight = item.weight();
             System.out.println(from + "->" + to + " " + weight);
         }
-        long total = edges.stream().map(e -> e.w()).mapToLong(x -> x).sum();
+        long total = edges.stream().map(e -> e.weight()).mapToLong(x -> x).sum();
         int heavy = (int) edges.stream().filter(tuple -> {
-            long w = tuple.w();
+            long w = tuple.weight();
             return w > 4L;
         }).count();
         Edge edge = edges.get(0);
-        System.out.println(total + " " + heavy + " " + ("(" + edge.from() + ", " + edge.to() + ", " + edge.w() + ")"));
+        System.out.println(total + " " + heavy + " " + ("(" + edge.from() + ", " + edge.to() + ", " + edge.weight() + ")"));
 
         var seen = new HashSet<Pair>();
         seen.add(new Pair(1, 2));
@@ -90,7 +90,7 @@ class Main {
 
     record Pair(int first, int second) {}
 
-    record Edge(int from, int to, long w) {}
+    record Edge(int from, int to, long weight) {}
 
     record Pos(int r, int c) {}
 }
