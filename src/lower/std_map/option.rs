@@ -87,6 +87,25 @@ pub(super) fn lower_option_method(
     {
         return Some(recv);
     }
+    // Simple mode: a nullable value (`m.get(k)`, `q.poll()`) is used as is; `null` is "None".
+    if crate::mode::simple()
+        && let Expr::Call {
+            recv: Some(r),
+            name: wrap,
+            args: wrapped,
+        } = &recv
+        && matches!(r.as_ref(), Expr::Raw(c) if c == "Optional")
+        && wrap == "ofNullable"
+        && wrapped.len() == 1
+    {
+        let v = wrapped[0].clone();
+        match name {
+            "unwrap" | "expect" => return Some(v),
+            "is_some" => return Some(Expr::bin(v, "!=", Expr::raw("null"))),
+            "is_none" => return Some(Expr::bin(v, "==", Expr::raw("null"))),
+            _ => {}
+        }
+    }
     match name {
         "is_some" => Some(Expr::call(recv, "isPresent", vec![])),
         "is_none" => Some(Expr::call(recv, "isEmpty", vec![])),

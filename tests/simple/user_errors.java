@@ -15,26 +15,16 @@ class Main {
         }
 
         record Negative(int _0) implements AppError {
-            public String debug() {
-                return "Negative(" + this._0 + ")";
-            }
-
             public String toString() {
                 return display();
             }
         }
 
         record Empty() implements AppError {
-            public String debug() {
-                return "Empty";
-            }
-
             public String toString() {
                 return display();
             }
         }
-
-        String debug();
     }
 
     static int parse(String s) {

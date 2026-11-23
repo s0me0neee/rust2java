@@ -183,6 +183,9 @@ fn transpile(args: &Args, target: &Target, project: &frontend::Project) -> Resul
         }
         if args.simple {
             let blank = |l: usize| lowered.blank_lines.contains(&(l as u32));
+            if lowered.diags.is_empty() {
+                java = javafmt::drop_unused(&java);
+            }
             match javafmt::relayout(&java, &blank) {
                 Some(j) => java = javafmt::explicit_imports(&j),
                 None if lowered.diags.is_empty() => {

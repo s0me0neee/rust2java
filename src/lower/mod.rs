@@ -113,6 +113,8 @@ pub struct Cx<'a, 'db> {
     pub try_let_declared: Option<String>,
     // A name chosen by the caller for the next parse result (see `result_name`).
     pub pending_name: Option<String>,
+    // Simple mode: Java names of types whose derived Debug is their `toString()` (no Display).
+    pub debug_to_string: HashSet<String>,
     // Every identifier in the Rust file: generated names never take one of these.
     file_idents: HashSet<String>,
 }
@@ -257,6 +259,7 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         try_let: None,
         try_let_declared: None,
         pending_name: None,
+        debug_to_string: HashSet::new(),
         // Names a later Rust binding (or an unqualified const/static) will claim; function, type
         // and field names live in other Java namespaces.
         file_idents: file
@@ -305,6 +308,9 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         }
     }
     cx.wide = wide::analyze(&cx, file.syntax());
+    if crate::mode::simple() {
+        cx.debug_to_string = items::debug_to_string_types(file.syntax());
+    }
     let comments = collect_comments(&cx, file.syntax());
     let last_line = text.trim_end().lines().count().max(1) as u32;
     let class = items::lower_source_file(&mut cx, &file, unit.is_root);

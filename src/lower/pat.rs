@@ -78,8 +78,19 @@ pub fn lower_condition(
         }
         let first = i == 0;
         let value = if first {
-            mut_element_condition(cx, &p, &init, out)
-                .unwrap_or_else(|| chain_value(cx, &init, first, out, &mut tests))
+            match mut_element_condition(cx, &p, &init, out) {
+                Some(v) => v,
+                None if crate::mode::simple() && parts.len() == 1 => {
+                    match nullable_some(cx, &p, &init, out, binds) {
+                        Ok(test) => {
+                            tests.push(test);
+                            continue;
+                        }
+                        Err(v) => v,
+                    }
+                }
+                None => chain_value(cx, &init, first, out, &mut tests),
+            }
         } else {
             chain_value(cx, &init, first, out, &mut tests)
         };
@@ -266,6 +277,192 @@ fn chain_value(
     let assign = Expr::Assign(Box::new(Expr::name(tmp.clone())), "=", Box::new(v));
     tests.push(assign_test(assign, &ty));
     Expr::name(tmp)
+}
+
+// Simple mode: `match opt { Some(x) => a, None => b }` as an if/else, with `x` a nullable local
+// when the option is `Optional.ofNullable(e)` (a map lookup, a poll).
+fn option_match(cx: &mut Cx, m: &ast::MatchExpr, dest: &Dest, out: &mut Vec<Stmt>) -> bool {
+    let (Some(scrut), Some(list)) = (m.expr(), m.match_arm_list()) else {
+        return false;
+    };
+    if !matches!(cx.ty(&scrut).strip_refs(), Ty::Option(t) if t.is_nameable()) {
+        return false;
+    }
+    let arms: Vec<ast::MatchArm> = list.arms().collect();
+    if arms.len() != 2 || arms.iter().any(|a| a.guard().is_some()) {
+        return false;
+    }
+    let is_some = |a: &ast::MatchArm| match a.pat() {
+        Some(ast::Pat::TupleStructPat(tp)) => {
+            tp.path().is_some_and(|q| q.syntax().text() == "Some")
+                && tp.fields().count() == 1
+                && tp.fields().all(|f| match f {
+                    ast::Pat::IdentPat(ip) => ip.pat().is_none() && !cx.binding_captured(&ip),
+                    ast::Pat::WildcardPat(_) => true,
+                    _ => false,
+                })
+        }
+        _ => false,
+    };
+    let is_none = |a: &ast::MatchArm| match a.pat() {
+        Some(ast::Pat::WildcardPat(_)) => true,
+        Some(ast::Pat::IdentPat(ip)) => ip.syntax().text() == "None",
+        Some(ast::Pat::PathPat(pp)) => pp.syntax().text() == "None",
+        _ => false,
+    };
+    let (some, none) = if is_some(&arms[0]) && is_none(&arms[1]) {
+        (&arms[0], &arms[1])
+    } else if is_some(&arms[1]) && is_none(&arms[0]) {
+        (&arms[1], &arms[0])
+    } else {
+        return false;
+    };
+    let line = cx.line(m.syntax());
+    let close = cx.end_line(m.syntax());
+    let Some(some_pat) = some.pat() else {
+        return false;
+    };
+    cx.push_scope();
+    let mut pre_binds = Vec::new();
+    let test = match nullable_some(cx, &some_pat, &scrut, out, &mut pre_binds) {
+        Ok(test) => (test, pre_binds),
+        Err(opt) => {
+            let mut binds = Vec::new();
+            if let ast::Pat::TupleStructPat(tp) = &some_pat
+                && let Some(ast::Pat::IdentPat(ip)) = tp.fields().next()
+            {
+                bind_pattern(
+                    cx,
+                    &ast::Pat::IdentPat(ip),
+                    Expr::call(opt.clone(), "get", vec![]),
+                    &mut binds,
+                );
+            }
+            (Expr::call(opt, "isPresent", vec![]), binds)
+        }
+    };
+    let (cond, mut then) = test;
+    if let Some(e) = some.expr() {
+        stmt::lower_to_dest(cx, &e, dest, &mut then);
+    }
+    cx.pop_scope();
+    let mut els = Vec::new();
+    if let Some(e) = none.expr() {
+        stmt::lower_to_dest(cx, &e, dest, &mut els);
+    }
+    out.push(Stmt::new(
+        line,
+        StmtKind::If {
+            cond,
+            then: Block {
+                stmts: then,
+                close_line: close,
+            },
+            els: (!els.is_empty()).then(|| {
+                Box::new(Stmt::new(
+                    line,
+                    StmtKind::Block(Block {
+                        stmts: els,
+                        close_line: close,
+                    }),
+                ))
+            }),
+        },
+    ));
+    true
+}
+
+// Simple mode: `if let Some(x) = m.get(k)` as `Item x = m.get(k); if (x != null)` when the
+// value lowers to `Optional.ofNullable(e)`. `Err` hands back the value for the generic path.
+fn nullable_some(
+    cx: &mut Cx,
+    p: &ast::Pat,
+    init: &ast::Expr,
+    out: &mut Vec<Stmt>,
+    binds: &mut Vec<Stmt>,
+) -> Result<Expr, Expr> {
+    let line = cx.line(init.syntax());
+    let v = expr::lower_expr(cx, init, out);
+    let bind = match p {
+        ast::Pat::TupleStructPat(tp)
+            if tp.path().is_some_and(|q| q.syntax().text() == "Some") =>
+        {
+            let mut fields = tp.fields();
+            match (fields.next(), fields.next()) {
+                (Some(ast::Pat::IdentPat(ip)), None) if ip.pat().is_none() && !cx.binding_captured(&ip) => {
+                    ip.name()
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    let inner = match &v {
+        Expr::Call {
+            recv: Some(r),
+            name,
+            args,
+        } if matches!(r.as_ref(), Expr::Raw(c) if c == "Optional")
+            && name == "ofNullable"
+            && args.len() == 1 =>
+        {
+            Some(args[0].clone())
+        }
+        _ => None,
+    };
+    let elem = match cx.ty(init).strip_refs() {
+        Ty::Option(t) if t.is_nameable() => Some((**t).clone()),
+        _ => None,
+    };
+    // `Some(Job { prio, .. })`: the value in a nullable temp, destructured in the body.
+    if bind.is_none()
+        && let (Some(inner), Some(elem)) = (&inner, &elem)
+        && let ast::Pat::TupleStructPat(tp) = p
+        && tp.path().is_some_and(|q| q.syntax().text() == "Some")
+        && tp.fields().count() == 1
+        && let Some(sub) = tp.fields().next()
+        && !matches!(sub, ast::Pat::IdentPat(_) | ast::Pat::WildcardPat(_))
+        && is_total(cx, &sub)
+    {
+        let tmp = cx.fresh(&super::name_hint(init).unwrap_or_else(|| "val".into()));
+        out.push(Stmt::new(
+            line,
+            StmtKind::Local {
+                ty: elem.strip_refs().boxed(),
+                name: tmp.clone(),
+                init: Some(inner.clone()),
+            },
+        ));
+        bind_pattern(cx, &sub, Expr::name(&tmp), binds);
+        return Ok(Expr::bin(Expr::name(tmp), "!=", Expr::raw("null")));
+    }
+    let (Some(name), Some(inner), Some(elem)) = (bind, inner, elem) else {
+        // Same as `chain_value` for the first component.
+        if is_place(&v) {
+            return Err(v);
+        }
+        let ty = cx.ty(init);
+        let tmp = cx.fresh(&super::name_hint(init).unwrap_or_else(|| "val".into()));
+        out.push(Stmt::new(
+            line,
+            StmtKind::Local {
+                ty: stmt::decl_type(&ty),
+                name: tmp.clone(),
+                init: Some(v),
+            },
+        ));
+        return Err(Expr::name(tmp));
+    };
+    let java = cx.declare(name.text().as_ref());
+    out.push(Stmt::new(
+        line,
+        StmtKind::Local {
+            ty: elem.strip_refs().boxed(),
+            name: java.clone(),
+            init: Some(inner),
+        },
+    ));
+    Ok(Expr::bin(Expr::name(java), "!=", Expr::raw("null")))
 }
 
 // A boolean whose evaluation assigns `assign`: `(n = e) == n` / `(o = e) != null`.
@@ -611,6 +808,18 @@ pub fn lower_match_stmt(cx: &mut Cx, m: &ast::MatchExpr, dest: &Dest, out: &mut 
         Dest::Return if cx.ret_ty.as_ref().is_none_or(Ty::is_unit) => Dest::Discard,
         d => d.clone(),
     };
+    if crate::mode::simple() && option_match(cx, m, &arm_dest, out) {
+        return;
+    }
+    // Simple mode: `return switch (x) { case A -> 1; ... };` rather than a return per arm.
+    if crate::mode::simple()
+        && matches!(arm_dest, Dest::Return)
+        && cx.lambda_depth == 0
+        && let Some(e) = try_match_expr(cx, m, out)
+    {
+        out.push(Stmt::new(line, StmtKind::Return(Some(e))));
+        return;
+    }
     // A single irrefutable arm is just a binding followed by the body.
     if arms.len() == 1
         && arms[0].guard().is_none()
@@ -903,6 +1112,16 @@ fn arm_body_expr(cx: &mut Cx, body: &ast::Expr, line: u32, binds: &PatLowering) 
     emit_binds(&binds.binds, &mut stmts);
     let close_line = cx.end_line(body.syntax());
     let block = |stmts: Vec<Stmt>| ArmBody::Block(Block { stmts, close_line });
+    // Simple mode: an `Err(e)` arm of a returned match throws.
+    if crate::mode::throws()
+        && let Some(payload) = super::throws::err_payload(cx, body)
+    {
+        super::throws::push_throw(cx, &payload, line, &mut stmts);
+        return match (stmts.len(), stmts.last().map(|s| &s.kind)) {
+            (1, Some(StmtKind::Throw(e))) => ArmBody::Throw(e.clone()),
+            _ => block(stmts),
+        };
+    }
     if let ast::Expr::MacroExpr(m) = body
         && super::macros::is_diverging(m)
     {

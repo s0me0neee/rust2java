@@ -513,7 +513,11 @@ fn for_each_source(
             Box::new(Expr::raw(format!("() -> {}", render(&it)))),
         );
     }
+    // Simple mode: `for x in [a, b]` only reads the literal, so `List.of(a, b)` will do.
+    cx.read_only_literal =
+        crate::mode::simple() && matches!(iterable, ast::Expr::ArrayExpr(a) if a.semicolon_token().is_none());
     let src = expr::lower_expr(cx, iterable, out);
+    cx.read_only_literal = false;
     // A user type with `impl Iterator` iterates through its generated `stream()`.
     if let Some(item) = traits::iter_item(cx, it_ty) {
         let stream = Expr::call(src, "stream", vec![]);

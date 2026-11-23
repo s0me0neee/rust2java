@@ -354,13 +354,36 @@ fn lower_struct(cx: &mut Cx, s: &ast::Struct, adt: Option<Adt>, impls: Vec<&ast:
     let generic_decls = generic_param_decls(cx, s.generic_param_list(), s.where_clause());
     let generics = wrap_generics(&generic_decls);
     let derives = derives_of(s);
-    let mut members: Vec<Member> = fields
-        .iter()
-        .map(|f| Member::Field {
-            line: f.line,
-            text: format!("{}{} {};", f.vis, field_java(&f.ty), f.name),
-        })
-        .collect();
+    // Simple mode: a struct nothing changes in place is a record (`Main` may read its private
+    // component fields directly, so `p.x` stays as it is).
+    let record = crate::mode::simple()
+        && kind != StructKind::Unit
+        && !fields.is_empty()
+        // `Cell`/`RefCell` fields are written through `&self`, as plain field assignments.
+        && !s
+            .syntax()
+            .descendants()
+            .filter_map(ast::RecordField::cast)
+            .any(|f| f.ty().is_some_and(|t| t.syntax().text().to_string().contains("Cell")))
+        && !s
+            .syntax()
+            .descendants()
+            .filter_map(ast::TupleField::cast)
+            .any(|f| f.ty().is_some_and(|t| t.syntax().text().to_string().contains("Cell")))
+        && adt
+            .and_then(|a| a.as_struct())
+            .is_some_and(|st| super::values::record_ok(cx, st));
+    let mut members: Vec<Member> = if record {
+        Vec::new()
+    } else {
+        fields
+            .iter()
+            .map(|f| Member::Field {
+                line: f.line,
+                text: format!("{}{} {};", f.vis, field_java(&f.ty), f.name),
+            })
+            .collect()
+    };
     let mut implements = Vec::new();
     let target = Target {
         java: adt_java_name_opt(cx, adt, &name),
@@ -379,7 +402,7 @@ fn lower_struct(cx: &mut Cx, s: &ast::Struct, adt: Option<Adt>, impls: Vec<&ast:
     if kind == StructKind::Unit {
         trailer.push(format!("{vis}static final {name} INSTANCE = new {name}();"));
         trailer.push(format!("private {name}() {{}}"));
-    } else {
+    } else if !record {
         trailer.push(canonical_ctor(&name, &fields));
     }
     trailer.extend(derive_methods(
@@ -390,16 +413,29 @@ fn lower_struct(cx: &mut Cx, s: &ast::Struct, adt: Option<Adt>, impls: Vec<&ast:
         kind,
         &fields,
         &derives,
-        true,
+        !record,
+        &name,
     ));
     let impl_clause = if implements.is_empty() {
         String::new()
     } else {
         format!(" implements {}", implements.join(", "))
     };
+    let header = if record {
+        let components: Vec<String> = fields
+            .iter()
+            .map(|f| format!("{} {}", field_java(&f.ty), f.name))
+            .collect();
+        format!(
+            "{vis}record {name}{generics}({}){impl_clause}",
+            components.join(", ")
+        )
+    } else {
+        format!("{vis}static final class {name}{generics}{impl_clause}")
+    };
     Class {
         line,
-        header: format!("{vis}static final class {name}{generics}{impl_clause}"),
+        header,
         members,
         close_line,
         trailer,
@@ -634,7 +670,8 @@ fn lower_enum(cx: &mut Cx, e: &ast::Enum, adt: Option<Adt>, impls: Vec<&ast::Imp
             });
         }
         members.extend(impl_members);
-        if derives.iter().any(|d| d == "Debug") {
+        // A Java enum's own `toString()` is the constant name, which is Rust's Debug text.
+        if derives.iter().any(|d| d == "Debug") && !cx.debug_to_string.contains(&name) {
             trailer.push("public String debug() { return name(); }".to_string());
         }
         trailer.push("public final int value;".to_string());
@@ -646,7 +683,7 @@ fn lower_enum(cx: &mut Cx, e: &ast::Enum, adt: Option<Adt>, impls: Vec<&ast::Imp
         let has_display = impls
             .iter()
             .any(|imp| std_trait_name(cx, imp).as_deref() == Some("Display"));
-        if has_debug {
+        if has_debug && !cx.debug_to_string.contains(&name) {
             trailer.push("String debug();".to_string());
         }
         if derives.iter().any(|d| d == "Clone") {
@@ -778,6 +815,7 @@ fn lower_variant_record(
             &fields,
             &derives_record,
             false,
+            enum_name,
         ),
         None => Vec::new(),
     };
@@ -2450,6 +2488,50 @@ fn is_test_only(item: &ast::Item) -> bool {
 
 // --- derives -----------------------------------------------------------------------------
 
+// Simple mode: types with `#[derive(Debug)]` and neither a Display nor a manual Debug impl print
+// their Debug text from `toString()`, so `{:?}` (and a list of them) needs no `debug()`.
+pub fn debug_to_string_types(root: &SyntaxNode) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for n in root.descendants() {
+        let (name, derives) = if let Some(s) = ast::Struct::cast(n.clone()) {
+            (s.name(), derives_of(&s))
+        } else if let Some(e) = ast::Enum::cast(n.clone()) {
+            (e.name(), derives_of(&e))
+        } else {
+            continue;
+        };
+        if let Some(name) = name
+            && derives.iter().any(|d| d == "Debug")
+        {
+            out.insert(escape_keyword(name.text().as_ref()));
+        }
+    }
+    for imp in root.descendants().filter_map(ast::Impl::cast) {
+        let fmt_trait = imp
+            .trait_()
+            .map(|t| t.syntax().text().to_string())
+            .is_some_and(|t| t.ends_with("Display") || t.ends_with("Debug"));
+        let self_name = imp.self_ty().and_then(|t| match t {
+            ast::Type::PathType(p) => p.path()?.segment()?.name_ref().map(|n| n.text().to_string()),
+            _ => None,
+        });
+        if fmt_trait && let Some(n) = self_name {
+            out.remove(&escape_keyword(&n));
+        }
+    }
+    out
+}
+
+// Whether `ty` is such a type (see `debug_to_string_types`).
+pub fn debug_via_to_string(cx: &Cx, ty: &Ty) -> bool {
+    match ty.strip_refs() {
+        Ty::Adt { java, .. } => cx
+            .debug_to_string
+            .contains(java.rsplit('.').next().unwrap_or(java)),
+        _ => false,
+    }
+}
+
 fn derives_of(item: &impl HasAttrs) -> Vec<String> {
     let mut out = Vec::new();
     for attr in item.attrs() {
@@ -2480,15 +2562,22 @@ fn derive_methods(
     fields: &[FieldInfo],
     derives: &[String],
     is_struct: bool,
+    // The type whose Debug this is (the enum, for a variant record).
+    debug_owner: &str,
 ) -> Vec<String> {
     let mut out = Vec::new();
     let has = |d: &str| derives.iter().any(|x| x == d);
+    let debug_name = if cx.debug_to_string.contains(debug_owner) {
+        "toString"
+    } else {
+        "debug"
+    };
     // Data-enum variants are Java records: their implicit equals/hashCode is component-wise,
     // which matches Rust's derive unless a component is a float (records compare bits).
     let record = !is_struct;
     let record_safe = record && fields.iter().all(|f| !f.ty.is_float());
     if has("Debug") {
-        out.push(debug_method(cx, name, kind, fields));
+        out.push(debug_method(cx, name, kind, fields, debug_name));
     }
     if has("Clone") {
         let generics = wrap_generics(generic_decls);
@@ -2541,7 +2630,13 @@ enum DebugSeg {
     Val(Expr),
 }
 
-fn debug_method(cx: &mut Cx, name: &str, kind: StructKind, fields: &[FieldInfo]) -> String {
+fn debug_method(
+    cx: &mut Cx,
+    name: &str,
+    kind: StructKind,
+    fields: &[FieldInfo],
+    method: &str,
+) -> String {
     // Debug prints the Rust name, not the escaped class name (`List_`).
     let name = match name.strip_suffix('_') {
         Some(rust) if escape_keyword(rust) == name => rust,
@@ -2607,7 +2702,7 @@ fn debug_method(cx: &mut Cx, name: &str, kind: StructKind, fields: &[FieldInfo])
         }
     }
     format!(
-        "public String debug() {{ return {}; }}",
+        "public String {method}() {{ return {}; }}",
         crate::emit::render_expr(&expr)
     )
 }
@@ -2643,6 +2738,9 @@ pub fn debug_value(cx: &mut Cx, ty: &Ty, v: Expr, depth: usize) -> Expr {
     }
     match ty.strip_refs() {
         Ty::Str | Ty::Char => crate::lower::fmt::debug(cx, v, ty),
+        Ty::Adt { .. } if crate::lower::items::debug_via_to_string(cx, ty) => {
+            Expr::call(Expr::raw("String"), "valueOf", vec![v])
+        }
         Ty::Adt { .. } => Expr::call(v, "debug", vec![]),
         Ty::Option(inner) => {
             let x = format!("x{depth}");

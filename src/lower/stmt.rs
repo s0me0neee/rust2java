@@ -760,8 +760,8 @@ pub fn is_control_flow(e: &ast::Expr) -> bool {
 // Lowers `e` in statement context, sending its value to `dest`.
 pub fn lower_to_dest(cx: &mut Cx, e: &ast::Expr, dest: &Dest, out: &mut Vec<Stmt>) {
     let line = cx.line(e.syntax());
+    // Simple mode: eligibility only lets an `Err` value reach a dest on its way to the return.
     if crate::mode::throws()
-        && matches!(dest, Dest::Return)
         && let Some(payload) = super::throws::err_payload(cx, e)
     {
         super::throws::push_throw(cx, &payload, line, out);
@@ -1093,6 +1093,42 @@ fn lower_while(cx: &mut Cx, w: &ast::WhileExpr, out: &mut Vec<Stmt>) {
         .unwrap_or_default();
     cx.pop_scope();
     let frame = cx.loops.pop().unwrap();
+    // Simple mode: `T x = q.poll(); x != null` becomes `T x; while ((x = q.poll()) != null)`.
+    if crate::mode::simple()
+        && let [Stmt {
+            kind:
+                StmtKind::Local {
+                    ty,
+                    name,
+                    init: Some(next),
+                },
+            ..
+        }] = pre.as_slice()
+        && matches!(&cond, Expr::Binary(l, "!=", r)
+            if matches!(l.as_ref(), Expr::Name(n) if n == name)
+                && matches!(r.as_ref(), Expr::Raw(z) if z == "null"))
+    {
+        out.push(Stmt::new(
+            line,
+            StmtKind::Local {
+                ty: ty.clone(),
+                name: name.clone(),
+                init: None,
+            },
+        ));
+        let assign = Expr::Assign(Box::new(Expr::name(name)), "=", Box::new(next.clone()));
+        binds.append(&mut body.stmts);
+        body.stmts = binds;
+        out.push(Stmt::new(
+            line,
+            StmtKind::While {
+                label: frame.java_label,
+                cond: Expr::bin(assign, "!=", Expr::raw("null")),
+                body,
+            },
+        ));
+        return;
+    }
     if pre.is_empty() {
         binds.append(&mut body.stmts);
         body.stmts = binds;

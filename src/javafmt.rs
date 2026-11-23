@@ -77,7 +77,12 @@ fn relayout_masked(src: &str, blank: &dyn Fn(usize) -> bool) -> Option<String> {
     if root.has_error() {
         return None;
     }
-    let f = Fmt { src, blank };
+    let f = Fmt {
+        src,
+        blank,
+        decl_types: declared_types(root, src),
+        enum_values_read: reads_value_field(root, src),
+    };
     let mut out = String::new();
     let mut prev: Option<Node> = None;
     for c in children(root) {
@@ -128,6 +133,79 @@ const ATOMS: [&str; 5] = [
 struct Fmt<'a> {
     src: &'a str,
     blank: &'a dyn Fn(usize) -> bool,
+    // Local and parameter names declared with one type throughout the file -> that type.
+    decl_types: std::collections::HashMap<String, String>,
+    // Some code reads `x.value`, so enums keep their discriminant field.
+    enum_values_read: bool,
+}
+
+fn reads_value_field(root: Node, src: &str) -> bool {
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        // `this.value = value` in the enum's constructor is a write.
+        let written = n.parent().is_some_and(|p| {
+            p.kind() == "assignment_expression" && p.child_by_field_name("left") == Some(n)
+        });
+        if n.kind() == "field_access"
+            && !written
+            && n.child_by_field_name("field").is_some_and(|f| &src[f.byte_range()] == "value")
+        {
+            return true;
+        }
+        stack.extend(children(n));
+    }
+    false
+}
+
+// An expression Java types as String: a literal, a concatenation with one, `String.valueOf(..)`.
+fn is_string_expr(n: Node, src: &str) -> bool {
+    match n.kind() {
+        "string_literal" => true,
+        "binary_expression" => {
+            n.child_by_field_name("operator").is_some_and(|o| &src[o.byte_range()] == "+")
+                && [n.child_by_field_name("left"), n.child_by_field_name("right")]
+                    .into_iter()
+                    .flatten()
+                    .any(|c| is_string_expr(c, src))
+        }
+        "parenthesized_expression" => n.named_child(0).is_some_and(|c| is_string_expr(c, src)),
+        "method_invocation" => is_value_of(n, src),
+        _ => false,
+    }
+}
+
+// `String.valueOf(x)` with one argument.
+fn is_value_of(n: Node, src: &str) -> bool {
+    n.kind() == "method_invocation"
+        && n.child_by_field_name("object").is_some_and(|o| &src[o.byte_range()] == "String")
+        && n.child_by_field_name("name").is_some_and(|o| &src[o.byte_range()] == "valueOf")
+        && n.child_by_field_name("arguments").is_some_and(|a| a.named_child_count() == 1)
+}
+
+// Names whose every declaration (local, parameter, for-each variable) has the same type text.
+fn declared_types(root: Node, src: &str) -> std::collections::HashMap<String, String> {
+    let mut seen: std::collections::HashMap<String, Option<String>> = Default::default();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        let decl = match n.kind() {
+            "local_variable_declaration" => n
+                .child_by_field_name("type")
+                .zip(n.child_by_field_name("declarator").and_then(|d| d.child_by_field_name("name"))),
+            "formal_parameter" | "enhanced_for_statement" | "catch_formal_parameter" => {
+                n.child_by_field_name("type").zip(n.child_by_field_name("name"))
+            }
+            _ => None,
+        };
+        if let Some((t, name)) = decl {
+            let t = src[t.byte_range()].to_string();
+            let entry = seen.entry(src[name.byte_range()].to_string()).or_insert(Some(t.clone()));
+            if entry.as_deref() != Some(t.as_str()) {
+                *entry = None;
+            }
+        }
+        stack.extend(children(n));
+    }
+    seen.into_iter().filter_map(|(k, v)| Some((k, v?))).collect()
 }
 
 fn indent(n: usize) -> String {
@@ -152,6 +230,10 @@ impl Fmt<'_> {
         if n.child_count() == 0 || ATOMS.contains(&n.kind()) {
             return self.text(n).trim_end().to_string();
         }
+        let plain = self.plain(n);
+        if plain != n {
+            return self.render(plain, ind);
+        }
         let mut out = String::new();
         let mut prev: Option<Node> = None;
         for c in children(n) {
@@ -162,6 +244,92 @@ impl Fmt<'_> {
             prev = Some(c);
         }
         out
+    }
+
+    // `n` without redundant wrapping: a cast of a local to its declared type, or parentheses
+    // around a primary expression or in a slot that takes any expression.
+    fn plain<'t>(&self, n: Node<'t>) -> Node<'t> {
+        match n.kind() {
+            // `"a" + String.valueOf(x)`: the concatenation already converts `x`.
+            "method_invocation" if is_value_of(n, self.src) => {
+                let Some(arg) = n.child_by_field_name("arguments").and_then(|a| a.named_child(0))
+                else {
+                    return n;
+                };
+                let Some(parent) = n.parent().filter(|p| {
+                    p.kind() == "binary_expression"
+                        && p.child_by_field_name("operator")
+                            .is_some_and(|o| self.text(o) == "+")
+                }) else {
+                    return n;
+                };
+                let right = parent.child_by_field_name("right") == Some(n);
+                let other = if right {
+                    parent.child_by_field_name("left")
+                } else {
+                    // `String.valueOf(a) + String.valueOf(b)` must keep one of the two.
+                    parent
+                        .child_by_field_name("right")
+                        .filter(|o| !is_value_of(*o, self.src))
+                };
+                let tight = matches!(
+                    arg.kind(),
+                    "identifier" | "field_access" | "method_invocation" | "array_access"
+                        | "parenthesized_expression" | "decimal_integer_literal"
+                        | "character_literal" | "object_creation_expression"
+                );
+                if tight && other.is_some_and(|o| is_string_expr(o, self.src)) {
+                    arg
+                } else {
+                    n
+                }
+            }
+            "cast_expression" => {
+                let (Some(t), Some(v)) = (n.child_by_field_name("type"), n.child_by_field_name("value"))
+                else {
+                    return n;
+                };
+                let v = self.plain(v);
+                let same = v.kind() == "identifier"
+                    && self.decl_types.get(self.text(v)).map(String::as_str) == Some(self.text(t));
+                if same { v } else { n }
+            }
+            "parenthesized_expression" => {
+                let Some(parent) = n.parent() else {
+                    return n;
+                };
+                // `if (c)`, `while (c)`, `switch (x)`: these parentheses are syntax.
+                if matches!(
+                    parent.kind(),
+                    "if_statement" | "while_statement" | "do_statement" | "switch_expression"
+                        | "switch_statement" | "synchronized_statement"
+                ) {
+                    return n;
+                }
+                let Some(inner) = n.named_child(0) else {
+                    return n;
+                };
+                if n.named_child_count() != 1 {
+                    return n;
+                }
+                let inner = self.plain(inner);
+                let primary = matches!(
+                    inner.kind(),
+                    "identifier" | "decimal_integer_literal" | "decimal_floating_point_literal"
+                        | "string_literal" | "character_literal" | "true" | "false"
+                        | "null_literal" | "this" | "method_invocation" | "field_access"
+                        | "array_access" | "parenthesized_expression"
+                );
+                let any_slot = matches!(
+                    parent.kind(),
+                    "argument_list" | "variable_declarator" | "return_statement"
+                        | "parenthesized_expression" | "expression_statement"
+                ) || (parent.kind() == "assignment_expression"
+                    && parent.child_by_field_name("right") == Some(n));
+                if primary || any_slot { inner } else { n }
+            }
+            _ => n,
+        }
     }
 
     // Whitespace between two siblings inside one statement or expression.
@@ -238,16 +406,30 @@ impl Fmt<'_> {
 
     fn enum_body(&self, n: Node, ind: usize) -> String {
         let all = children(n);
+        // The generated discriminant (`Small(0)`, `final int value`, its constructor) goes when
+        // nothing reads `.value`.
+        let drop_values = !self.enum_values_read;
         let consts: Vec<String> = all
             .iter()
             .filter(|c| c.kind() == "enum_constant")
-            .map(|c| self.render(*c, ind + 1))
+            .map(|c| match c.child_by_field_name("name") {
+                Some(name) if drop_values && c.child_by_field_name("body").is_none() => {
+                    self.text(name).to_string()
+                }
+                _ => self.render(*c, ind + 1),
+            })
             .collect();
         let decls: Vec<Node> = all
             .iter()
             .filter(|c| c.kind() == "enum_body_declarations")
             .flat_map(|d| children(*d))
             .filter(|c| c.is_named())
+            .filter(|c| {
+                let text = self.text(*c);
+                !(drop_values
+                    && (text == "public final int value;"
+                        || c.kind() == "constructor_declaration" && text.contains("(int value)")))
+            })
             .collect();
         let mut out = format!("{{\n{}{}", indent(ind + 1), consts.join(", "));
         if !decls.is_empty() {
@@ -278,6 +460,131 @@ fn is_field(n: Node) -> bool {
         n.kind(),
         "field_declaration" | "static_initializer" | "constant_declaration"
     )
+}
+
+// Generated methods a person wouldn't write unless something calls them.
+const GENERATED: [&str; 8] = [
+    "debug",
+    "clone",
+    "partial_cmp",
+    "debug_str",
+    "debug_float",
+    "debug_any",
+    "debug_pretty",
+    "display_any",
+];
+
+// Drops generated methods (and the embedded `Result` type's methods) that nothing calls. Removed
+// text is blanked to spaces so line numbers, which `relayout` maps to Rust lines, stay put.
+pub fn drop_unused(src: &str) -> String {
+    let mut text = src.to_string();
+    loop {
+        let Some(masked) = mask_qualified_calls(&text) else {
+            return text;
+        };
+        let Some(tree) = parse(&masked) else {
+            return text;
+        };
+        if tree.root_node().has_error() {
+            return text;
+        }
+        let mut calls = Vec::new();
+        let mut decls = Vec::new();
+        collect_calls(tree.root_node(), &masked, None, &mut calls, &mut decls);
+        let called = live_names(&calls);
+        let dead: Vec<(usize, usize)> = decls
+            .into_iter()
+            .filter(|(name, _, _)| !called.contains(name))
+            .map(|(_, s, e)| (s, e))
+            .collect();
+        if dead.is_empty() {
+            return text;
+        }
+        // The ranges are in masked text: blank there, then unmask.
+        let mut bytes = masked.into_bytes();
+        for (s, e) in dead {
+            for b in &mut bytes[s..e] {
+                if *b != b'\n' {
+                    *b = b' ';
+                }
+            }
+        }
+        text = String::from_utf8(bytes).unwrap_or_default().replace(MASK, ".");
+    }
+}
+
+// Calls as (callee, the candidate method containing the call), and the candidate declarations.
+fn collect_calls(
+    n: Node,
+    src: &str,
+    inside: Option<&str>,
+    calls: &mut Vec<(String, Option<String>)>,
+    decls: &mut Vec<(String, usize, usize)>,
+) {
+    let text = |n: Node| src[n.byte_range()].to_string();
+    let mut here = inside.map(str::to_string);
+    match n.kind() {
+        "method_invocation" => {
+            if let Some(name) = n.child_by_field_name("name") {
+                calls.push((text(name), here.clone()));
+            }
+        }
+        "method_reference" => {
+            if let Some(last) = n.named_child((n.named_child_count() as u32).saturating_sub(1)) {
+                calls.push((text(last), here.clone()));
+            }
+        }
+        "method_declaration" => {
+            if let Some(name) = n.child_by_field_name("name") {
+                let name = text(name);
+                let in_result = n.ancestors_named().any(|a| {
+                    matches!(a.kind(), "interface_declaration" | "record_declaration")
+                        && a.child_by_field_name("name")
+                            .is_some_and(|x| matches!(&src[x.byte_range()], "Result" | "Ok" | "Err"))
+                });
+                if GENERATED.contains(&name.as_str()) || in_result {
+                    decls.push((name.clone(), n.start_byte(), n.end_byte()));
+                    here = Some(name);
+                }
+            }
+        }
+        _ => {}
+    }
+    for c in children(n) {
+        collect_calls(c, src, here.as_deref(), calls, decls);
+    }
+}
+
+// Names called from live code: calls outside candidates, then calls inside live candidates.
+fn live_names(calls: &[(String, Option<String>)]) -> HashSet<String> {
+    let mut live: HashSet<String> = calls
+        .iter()
+        .filter(|(_, inside)| inside.is_none())
+        .map(|(name, _)| name.clone())
+        .collect();
+    loop {
+        let more: Vec<String> = calls
+            .iter()
+            .filter(|(name, inside)| {
+                !live.contains(name) && inside.as_ref().is_some_and(|i| live.contains(i))
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        if more.is_empty() {
+            return live;
+        }
+        live.extend(more);
+    }
+}
+
+trait Ancestors<'t> {
+    fn ancestors_named(&self) -> impl Iterator<Item = Node<'t>>;
+}
+
+impl<'t> Ancestors<'t> for Node<'t> {
+    fn ancestors_named(&self) -> impl Iterator<Item = Node<'t>> {
+        std::iter::successors(self.parent(), |p| p.parent())
+    }
 }
 
 // Replaces wildcard imports with the used classes, and drops unused single imports.

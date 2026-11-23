@@ -672,15 +672,16 @@ pub fn is_target_typed(e: &Expr) -> bool {
     matches!(e, Expr::Call { name, .. } if name == "collect")
 }
 
-// Simple mode: types whose `toString` stands in for Debug. User types keep their `debug()`, and
-// tuples (`Map.Entry` prints `a=1`) and `Ordering` (an int) keep the exact text.
-fn debug_via_to_string(ty: &Ty) -> bool {
+// Simple mode: types whose `toString` stands in for Debug. User types with a Display keep their
+// `debug()`, and tuples (`Map.Entry` prints `a=1`) and `Ordering` (an int) keep the exact text.
+fn debug_via_to_string(cx: &Cx, ty: &Ty) -> bool {
     match ty.strip_refs() {
         Ty::Bool | Ty::Char | Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Str => true,
         Ty::Vec(t) | Ty::Deque(t) | Ty::Set { t, .. } | Ty::Heap(t) | Ty::Option(t) => {
-            debug_via_to_string(t)
+            debug_via_to_string(cx, t)
         }
-        Ty::Map { k, v, .. } => debug_via_to_string(k) && debug_via_to_string(v),
+        Ty::Map { k, v, .. } => debug_via_to_string(cx, k) && debug_via_to_string(cx, v),
+        t @ Ty::Adt { .. } => super::items::debug_via_to_string(cx, t),
         _ => false,
     }
 }
@@ -908,9 +909,13 @@ fn format_one(
         && precision.is_none()
         && !spec.plus
         && !spec.zero
-        && debug_via_to_string(ty)
+        && debug_via_to_string(cx, ty)
         && !is_target_typed(&v)
     {
+        // A user type isn't a String: `"x" + p` needs a string on one side, `String s = p` fails.
+        if matches!(ty.strip_refs(), Ty::Adt { .. }) {
+            return Expr::call(Expr::raw("String"), "valueOf", vec![v]);
+        }
         return v;
     }
     if spec.alternate && spec.kind == "?" {
@@ -1750,6 +1755,9 @@ pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
             concat(parts)
         }
         Ty::Int(i) if unsigned_display(*i) => unsigned_string(*i, v.clone()).unwrap_or(v),
+        Ty::Adt { .. } if crate::lower::items::debug_via_to_string(cx, ty) => {
+            Expr::call(Expr::raw("String"), "valueOf", vec![v])
+        }
         Ty::Adt { .. } => Expr::call(v, "debug", vec![]),
         Ty::Param(_) => debug_any(cx, v),
         // `Ordering` is an int: comparing its sign is shorter than the switch, when repeatable.

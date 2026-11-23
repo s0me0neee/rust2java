@@ -21,6 +21,8 @@ fn struct_of<'db>(t: &ra_ap_hir::Type<'db>) -> Option<ra_ap_hir::Struct> {
 #[derive(Default)]
 pub struct Mutated {
     structs: HashSet<ra_ap_hir::Struct>,
+    // Structs with a field assigned or `&mut`-borrowed anywhere (they can't be Java records).
+    field_written: HashSet<ra_ap_hir::Struct>,
     // Arrays by their `Ty` (arrays and `Vec` share it, but only arrays are `Copy`).
     arrays: HashSet<String>,
 }
@@ -48,6 +50,27 @@ fn mutated_types<'db>(cx: &Cx<'_, 'db>) -> Mutated {
         }
         let root = cx.sema.parse(src.file_id.original_file(cx.db));
         for node in root.syntax().descendants() {
+            // `a.f = x`, `a.f += x`, `&mut a.f`: the struct owning `f` changes.
+            let written = if let Some(b) = ast::BinExpr::cast(node.clone())
+                && matches!(b.op_kind(), Some(ast::BinaryOp::Assignment { .. }))
+            {
+                b.lhs()
+            } else if let Some(r) = ast::RefExpr::cast(node.clone())
+                && r.mut_token().is_some()
+            {
+                r.expr()
+            } else {
+                None
+            };
+            if let Some(ast::Expr::FieldExpr(f)) = written.map(|w| super::strip_parens(&w))
+                && let Some(ra_ap_hir::Variant::Struct(s)) = cx
+                    .sema
+                    .resolve_field(&f)
+                    .and_then(|r| r.left())
+                    .map(|fd| fd.parent_def(cx.db))
+            {
+                found.field_written.insert(s);
+            }
             if let Some(b) = ast::BinExpr::cast(node.clone())
                 && matches!(b.op_kind(), Some(ast::BinaryOp::Assignment { .. }))
             {
@@ -78,6 +101,15 @@ fn mutated_types<'db>(cx: &Cx<'_, 'db>) -> Mutated {
         }
     }
     found
+}
+
+// Simple mode: a struct nothing changes in place becomes a Java record.
+pub fn record_ok(cx: &mut Cx, s: ra_ap_hir::Struct) -> bool {
+    if cx.mutated.is_none() {
+        cx.mutated = Some(mutated_types(cx));
+    }
+    let m = cx.mutated.as_ref().unwrap();
+    !m.structs.contains(&s) && !m.field_written.contains(&s)
 }
 
 // Whether a copy of a value of this type must be a fresh object: a `Copy` struct or array that
