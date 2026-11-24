@@ -863,13 +863,19 @@ pub fn lower_std_path(cx: &mut Cx, path: &ast::Path, def: ModuleDef) -> Expr {
         "Equal" if text.contains("Ordering") => return Expr::raw("0"),
         "Greater" if text.contains("Ordering") => return Expr::raw("1"),
         "MAX" | "MIN" | "BITS" => {
-            // `u32::MAX as f64` scales by the exact value, so a cast keeps it.
-            let cast = path
-                .syntax()
-                .parent()
-                .and_then(|p| p.parent())
-                .is_some_and(|n| ast::CastExpr::can_cast(n.kind()));
-            if let Some(e) = int_const(ty_tok, last, !cast) {
+            // Used for its bits or exact value (`u32::MAX as f64`, `u64::MAX.count_ones()`,
+            // `x & u32::MAX`), MAX keeps the exact value rather than the signed maximum.
+            let parent = path.syntax().parent().and_then(|p| p.parent());
+            let exact = parent.as_ref().is_some_and(|n| {
+                ast::CastExpr::can_cast(n.kind())
+                    || ast::MethodCallExpr::can_cast(n.kind())
+                    || ast::BinExpr::cast(n.clone()).is_some_and(|b| {
+                        matches!(b.op_kind(), Some(ast::BinaryOp::ArithOp(
+                            ast::ArithOp::BitAnd | ast::ArithOp::BitOr | ast::ArithOp::BitXor | ast::ArithOp::Shl | ast::ArithOp::Shr
+                        )))
+                    })
+            });
+            if let Some(e) = int_const(ty_tok, last, !exact) {
                 return Expr::raw(e);
             }
         }
@@ -1380,8 +1386,11 @@ pub fn lower_std_method(
             Expr::call(Expr::raw("String"), "valueOf", vec![recv])
         }
         (Ty::Adt { .. } | Ty::Param(_), "to_string") => Expr::call(recv, "toString", vec![]),
-        (Ty::Adt { .. }, "eq") => Expr::call(recv, "equals", args),
-        (Ty::Adt { .. }, "ne") => Expr::Unary("!", Box::new(Expr::call(recv, "equals", args))),
+        (Ty::Adt { .. } | Ty::Param(_), "eq") => Expr::call(recv, "equals", args),
+        (Ty::Adt { .. } | Ty::Param(_), "ne") => Expr::Unary("!", Box::new(Expr::call(recv, "equals", args))),
+        // `T: Ord` is `T extends Comparable<T>`.
+        (Ty::Param(_), "cmp") => Expr::call(recv, "compareTo", args),
+        (Ty::Param(_), "partial_cmp") => opt_of(Expr::call(recv, "compareTo", args)),
         (Ty::Option(_) | Ty::Result(..), "to_string") => Expr::call(recv, "toString", vec![]),
         _ => cx.unsupported(m.syntax(), &format!("std method `{key}`")),
     }

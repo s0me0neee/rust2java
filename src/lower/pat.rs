@@ -749,7 +749,8 @@ pub fn lower_destructuring_let(cx: &mut Cx, l: &ast::LetStmt, out: &mut Vec<Stmt
     let value = place(cx, &init, out);
     let mut lowered = PatLowering::default();
     let conds = lower_pat(cx, &p, value, Mode::Extract, &mut lowered);
-    if !conds.is_empty() {
+    // A total pattern's tests (an array's length) always pass.
+    if !conds.is_empty() && !is_total(cx, &p) {
         cx.unsupported(l.syntax(), "refutable pattern in `let` without `else`");
     }
     emit_binds(&lowered.binds, out);
@@ -1245,7 +1246,8 @@ fn arm_body_expr(cx: &mut Cx, body: &ast::Expr, line: u32, binds: &PatLowering) 
     if let ast::Expr::MacroExpr(m) = body
         && super::macros::is_diverging(m)
     {
-        let e = expr::lower_expr(cx, body, &mut stmts);
+        // `panic!`/`unreachable!` lower to the exception the arm throws.
+        let e = super::macros::lower_macro_expr(cx, m, &mut stmts);
         return match stmts.len() {
             0 => ArmBody::Throw(e),
             _ => {
@@ -2156,6 +2158,19 @@ fn is_total(cx: &mut Cx, p: &ast::Pat) -> bool {
                 _ => false,
             }),
         ast::Pat::OrPat(op) => op.pats().any(|p| is_total(cx, &p)),
+        // `let [a, b, c] = arr;` on a `[T; 3]` always matches.
+        ast::Pat::SlicePat(sp) => {
+            let pats: Vec<ast::Pat> = sp.pats().collect();
+            let rest = pats.iter().any(|q| matches!(q, ast::Pat::RestPat(_)));
+            let fixed = pats.iter().filter(|q| !matches!(q, ast::Pat::RestPat(_))).count();
+            let len = cx
+                .sema
+                .type_of_pat(p)
+                .and_then(|t| t.original.as_array(cx.db))
+                .map(|(_, n)| n);
+            len.is_some_and(|n| if rest { n >= fixed } else { n == fixed })
+                && pats.iter().all(|q| matches!(q, ast::Pat::RestPat(_)) || is_total(cx, q))
+        }
         _ => false,
     }
 }

@@ -40,8 +40,22 @@ pub fn lower_stmt_list(cx: &mut Cx, list: &ast::StmtList, dest: &Dest, out: &mut
     match list.tail_expr() {
         Some(tail) => lower_to_dest(cx, &tail, dest, out),
         None => {
-            if let Dest::Assign(_) | Dest::Yield = dest {
-                // Block ends in a diverging statement or has unit value; nothing to assign.
+            // `{ ..; process::exit(2); }` where a value is due: javac needs a return or throw.
+            let value_due = match dest {
+                Dest::Assign(_) | Dest::Yield => true,
+                Dest::Return => cx.ret_ty.as_ref().is_some_and(|t| !t.is_unit()),
+                _ => false,
+            };
+            let exits = list.statements().last().is_some_and(|s| {
+                matches!(s, ast::Stmt::ExprStmt(es) if es.expr().is_some_and(|e| {
+                    matches!(e, ast::Expr::CallExpr(_) | ast::Expr::MethodCallExpr(_)) && cx.ty(&e) == Ty::Never
+                }))
+            });
+            if value_due && exits {
+                out.push(Stmt::new(
+                    cx.end_line(list.syntax()),
+                    StmtKind::Throw(Expr::New { ty: "IllegalStateException".into(), args: vec![Expr::str_lit("unreachable")] }),
+                ));
             }
         }
     }
@@ -803,6 +817,19 @@ pub fn lower_to_dest(cx: &mut Cx, e: &ast::Expr, dest: &Dest, out: &mut Vec<Stmt
         && let Some(payload) = super::throws::err_payload(cx, e)
     {
         super::throws::push_throw(cx, &payload, line, out);
+        return;
+    }
+    // `process::exit(2)` where a value is due: javac needs the body to end in a return or throw.
+    if !matches!(dest, Dest::Discard)
+        && matches!(e, ast::Expr::CallExpr(_) | ast::Expr::MethodCallExpr(_))
+        && cx.ty(e) == Ty::Never
+    {
+        let v = expr::lower_expr(cx, e, out);
+        push_discard(out, line, v);
+        out.push(Stmt::new(
+            line,
+            StmtKind::Throw(Expr::New { ty: "IllegalStateException".into(), args: vec![Expr::str_lit("unreachable")] }),
+        ));
         return;
     }
     match e {

@@ -311,6 +311,13 @@ pub(super) fn fused(
             stream = Expr::call(stream, "boxed", vec![]);
             continue;
         }
+        if name == "mapToObj"
+            && let Ty::Iter(item) = cx.ty(&ast::Expr::MethodCallExpr(m.clone())).strip_refs()
+            && let Some(w) = super::iter::map_witness(item, &f)
+        {
+            stream = Expr::call(stream, &format!("<{w}>mapToObj"), vec![f]);
+            continue;
+        }
         stream = Expr::call(stream, name, vec![f]);
     }
     cx.indexed_index = saved;

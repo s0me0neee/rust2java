@@ -643,6 +643,8 @@ New lowering code should only be needed for structural constructs.
 | M3 | traits, generics, streams (§11), collections (§11.1), full fmt, `str`/`char`, modules, `&mut` cells | Phase B; ≥ 70% of a 100-program Exercism/AoC sample pass |
 | M4 | idioms, `--report`, diagnostics polish, drift reduction, `macro_rules!`, fs | ≥ 90% sample pass, ≥ 95% exact lines |
 
+The sample is `tests/corpus/`: 55 AoC / Exercism / Codeforces-style programs written without regard to what the transpiler supports, run one at a time by `tests/corpus/run.sh` (outside `cargo test`). Today: exact mode 51/55; simple mode 51/55 printing the same or only `{:?}` text differently. The rest: arithmetic on a generic `T` (`ex_triangle`), a generic `A: AsRef<[T]>` parameter (`ex_binary_search`), `impl Debug for dyn Trait` (`gen_shapes`), and `u64` values past 2^63 (`gen_fib_iter`, accepted by §1).
+
 ---
 
 ## 20. Risks

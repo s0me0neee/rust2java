@@ -163,8 +163,21 @@ fn lower_for_kind(
         };
         let header = ix.header(&idx);
         let mut binds = Vec::new();
-        for (field, value) in fields.iter().zip(super::indexed::item_exprs(&ix, &idx)) {
+        for ((field, value), item) in fields.iter().zip(super::indexed::item_exprs(&ix, &idx)).zip(&ix.items) {
             if plain_idx.is_some() && matches!(value, Expr::Name(ref n) if *n == idx) {
+                continue;
+            }
+            // `for (a, b) in v.iter_mut().zip(..)`: `a` names the slot `v[i]`, so `*a += b` writes it.
+            if let ast::Pat::IdentPat(ip) = field
+                && ip.pat().is_none()
+                && matches!(cx.pat_ty(field), Ty::Ref { mutable: true, ref inner } if super::is_mut_ref_cell_ty(&Ty::Ref { mutable: true, inner: inner.clone() }))
+                && let super::indexed::Item::Elem { seq, text: false, .. } = item
+                && let Some(local) = cx.sema.to_def(ip)
+            {
+                if let Some(n) = simple_ident(field) {
+                    cx.declare(&n);
+                }
+                cx.elem_aliases.insert(local, (seq.clone(), item.at(&idx), super::ElemAliasKind::List));
                 continue;
             }
             super::pat::bind_pattern(cx, field, value, &mut binds);
@@ -1533,6 +1546,18 @@ fn split_predicate(
     Expr::call(Expr::name(parts), "stream", vec![])
 }
 
+// The explicit type a `map` needs when its closure builds different variants (`new Op.Addx(..)`
+// and `new Op.Noop()`, `new Ok<>(..)` and `new Err<>(..)`): javac would infer their intersection.
+pub(super) fn map_witness(out_item: &Ty, f: &Expr) -> Option<String> {
+    let text = render(f);
+    let needed = match out_item.strip_refs() {
+        Ty::Adt { java, args, .. } if args.is_empty() => text.contains(&format!("new {java}.")),
+        Ty::Result(..) => text.contains("new Ok<") || text.contains("new Err<"),
+        _ => false,
+    };
+    (needed && out_item.is_nameable()).then(|| out_item.strip_refs().boxed())
+}
+
 fn item_of(t: &Ty) -> Ty {
     match t.strip_refs() {
         Ty::Iter(i) => (**i).clone(),
@@ -1781,6 +1806,12 @@ fn lower_adaptor_core(
                 && out_item.is_nameable()
             {
                 return call(&format!("<{}>map", out_item.boxed()), vec![f]);
+            }
+            if name == "map"
+                && let Ty::Iter(out_item) = ret_ty.strip_refs()
+                && let Some(w) = map_witness(out_item, &f)
+            {
+                return call(&format!("<{w}>map"), vec![f]);
             }
             call(jname, vec![f])
         }
@@ -2307,6 +2338,8 @@ fn lower_zip(
     let other_stream = into_stream(other, &other_ty);
     let other_item = match other_ty.strip_refs() {
         Ty::Iter(t) | Ty::Vec(t) => (**t).clone(),
+        // A user type implementing `Iterator`.
+        t if let Some(item) = traits::iter_item(cx, t) => item,
         _ => Ty::Other("?".into()),
     };
     // Pulled in step through iterators, so an endless side (`fib().zip(..)`) stays lazy.
@@ -2419,6 +2452,26 @@ fn lower_collect(
                 "List<{tb}> {list} = new ArrayList<>(); Result<List<{tb}>, {eb}> {res} = new Ok<>({list}); \
                  for (Result<{tb}, {eb}> {it} : (Iterable<Result<{tb}, {eb}>>) {}::iterator) {{ \
                  if ({it} instanceof Err<{tb}, {eb}>(var e)) {{ {res} = new Err<>(e); break; }} {list}.add({it}.unwrap()); }}",
+                render(&src)
+            ))));
+            Expr::name(res)
+        }
+        // `Result<String, E>` from `Result<char | String, E>` items: append until the first Err.
+        Ty::Result(ok, err) if ok.is_str() => {
+            if cx.lambda_depth > 0 {
+                return cx.unsupported(m.syntax(), "collect into Result inside a closure");
+            }
+            cx.needs_result = true;
+            let Ty::Result(piece, _) = item.strip_refs() else {
+                return cx.unsupported(m.syntax(), "collect into Result<String> from non-Result items");
+            };
+            let (tb, eb) = (piece.boxed(), err.boxed());
+            let (text, res, it) = (cx.fresh("text"), cx.fresh("collected"), cx.fresh("r"));
+            out.push(Stmt::new(line, StmtKind::Raw(format!(
+                "StringBuilder {text} = new StringBuilder(); Result<String, {eb}> {res} = null; \
+                 for (Result<{tb}, {eb}> {it} : (Iterable<Result<{tb}, {eb}>>) {}::iterator) {{ \
+                 if ({it} instanceof Err<{tb}, {eb}>(var e)) {{ {res} = new Err<>(e); break; }} {text}.append({it}.unwrap()); }} \
+                 if ({res} == null) {res} = new Ok<>({text}.toString());",
                 render(&src)
             ))));
             Expr::name(res)

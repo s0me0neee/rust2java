@@ -1472,9 +1472,30 @@ fn lower_cast(cx: &mut Cx, c: &ast::CastExpr, out: &mut Vec<Stmt>) -> Expr {
     if from == Ty::Ordering && matches!(to, Ty::Int(_)) {
         return ordering_sign(v, &from);
     }
+    // A boxed `Long` (`it.next()`) can't be narrowed to `int` in one cast (unbox, then widen is
+    // fine): unbox it first.
+    let rank = |t: &str| match t {
+        "byte" => 1,
+        "short" | "char" => 2,
+        "int" => 3,
+        "long" => 4,
+        "float" => 5,
+        "double" => 6,
+        _ => 0,
+    };
+    let (fj, tj) = (from.java(), to.java());
+    let narrowing = rank(&tj) > 0 && rank(&fj) > rank(&tj) || (tj == "char" && fj != "char");
+    let unbox = maybe_boxed(&v) && from.is_primitive() && to.is_primitive() && narrowing;
+    // Only a cast applied to the boxed value itself needs it (`(char) (x & 0xFF)` already unboxes).
+    let fix = |e: Expr| match e {
+        Expr::Cast(t, inner) if unbox && crate::emit::render_expr(&inner) == crate::emit::render_expr(&v) => {
+            Expr::Cast(t, Box::new(Expr::Cast(fj.clone(), inner)))
+        }
+        e => e,
+    };
     // `as` casts need the source type: `300i32 as u8` truncates even though both are Java `int`.
     if let Some(e) = std_map::num_cast(&from, &to, v.clone()) {
-        return e;
+        return fix(e);
     }
     // `Box::new(|x| ..) as Box<dyn Fn(i32)>`: the cast gives javac the lambda's target type
     // (a closure returning this one can't be inferred otherwise).
@@ -1492,7 +1513,7 @@ fn lower_cast(cx: &mut Cx, c: &ast::CastExpr, out: &mut Vec<Stmt>) -> Expr {
         ),
         // Plain enums carry their Rust discriminant in a `value` field.
         (Ty::Adt { .. }, Ty::Int(_)) => Expr::Field(Box::new(v), "value".into()),
-        _ => Expr::Cast(to.java(), Box::new(v)),
+        _ => fix(Expr::Cast(to.java(), Box::new(v.clone()))),
     }
 }
 
@@ -1680,8 +1701,13 @@ fn lower_closure_inner(cx: &mut Cx, c: &ast::ClosureExpr) -> Expr {
             return cx.unsupported(c.syntax(), "closure without body");
         }
     };
-    let ret_unit = cx.ty(&body).is_unit();
-    let saved_ret = cx.ret_ty.replace(cx.ty(&body));
+    // A diverging body (`{ ..; process::exit(2); }`) still returns the closure's declared type.
+    let body_ty = match (cx.ty(&body), cx.ty(&ast::Expr::ClosureExpr(c.clone()))) {
+        (Ty::Never, Ty::Fn { ret, .. }) if !ret.is_unit() => *ret,
+        (t, _) => t,
+    };
+    let ret_unit = body_ty.is_unit();
+    let saved_ret = cx.ret_ty.replace(body_ty);
     let saved_loops = std::mem::take(&mut cx.loops);
     let mut hoisted = Vec::new();
     let result = if prelude.is_empty()
