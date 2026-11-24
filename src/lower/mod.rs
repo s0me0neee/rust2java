@@ -4,6 +4,7 @@ pub mod builders;
 pub mod calls;
 pub mod expr;
 pub mod fmt;
+pub mod generics;
 pub mod indexed;
 pub mod items;
 pub mod iter;
@@ -128,6 +129,9 @@ pub struct Cx<'a, 'db> {
     // Simple mode: `&mut String` parameters and the locals handed to them, as `StringBuilder`s.
     pub builder_params: HashSet<(ra_ap_hir::Function, usize)>,
     pub builder_locals: HashSet<ra_ap_hir::Local<'db>>,
+    // Functions needing a `Supplier<T>` per type parameter (`T::default()`), and this method's.
+    pub supplier_fns: HashMap<ra_ap_hir::Function, Vec<String>>,
+    pub suppliers: HashMap<String, String>,
     // Their parameters, while lowering those functions: `*n` is just `n`.
     pub returned_params: HashSet<ra_ap_hir::Local<'db>>,
     // Every identifier in the Rust file: generated names never take one of these.
@@ -289,6 +293,8 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         debug_to_string: HashSet::new(),
         mut_returns: HashMap::new(),
         builder_params: HashSet::new(),
+        supplier_fns: HashMap::new(),
+        suppliers: HashMap::new(),
         builder_locals: HashSet::new(),
         returned_params: HashSet::new(),
         macro_locals: HashSet::new(),
@@ -342,6 +348,8 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
         }
     }
     cx.wide = wide::analyze(&cx, file.syntax());
+    // Both modes: `T::default()` needs a `Supplier<T>` handed down from the call sites.
+    generics::analyze(&mut cx, file.syntax());
     if crate::mode::simple() {
         cx.debug_to_string = items::debug_to_string_types(file.syntax());
         cx.mut_returns = mutret::analyze(&cx, file.syntax());
@@ -536,6 +544,7 @@ impl<'a, 'db> Cx<'a, 'db> {
         self.cells.clear();
         self.stmt_lambda_names.clear();
         self.builders.clear();
+        self.suppliers.clear();
         self.views.clear();
         self.cell_handles.clear();
         self.pulled_iters.clear();

@@ -1,7 +1,7 @@
 // Function, associated-function, constructor and method calls. Std calls are routed to std_map/iter.
 
 use ra_ap_hir::{AsAssocItem, AssocItemContainer, Function, ModuleDef, PathResolution};
-use ra_ap_syntax::{AstNode, ast};
+use ra_ap_syntax::{AstNode, ast, ast::HasArgList};
 
 use super::{Cx, escape_keyword, expr, items, iter, std_map};
 use crate::frontend::module_class_from;
@@ -106,7 +106,13 @@ fn lower_fn_call(
     }
     let db = cx.db;
     let name = items::method_java_name(cx, f);
+    // Argument types first: a supplier argument depends on what the call instantiates them to.
+    let arg_tys: Vec<Ty> = c
+        .arg_list()
+        .map(|a| a.args().map(|x| cx.ty(&x)).collect())
+        .unwrap_or_default();
     let mut args = expr::call_args(cx, c, out);
+    args.extend(super::generics::supplier_args(cx, f, &arg_tys, c.syntax()));
     if let Some(assoc) = f.as_assoc_item(db) {
         if let AssocItemContainer::Impl(imp) = assoc.container(db)
             && let Some(e) = items::lower_foreign_static_call(cx, imp, &name, args.clone())
@@ -196,8 +202,15 @@ pub fn lower_method_call(cx: &mut Cx, m: &ast::MethodCallExpr, out: &mut Vec<Stm
         if let Some(e) = items::lower_derive_method_call(cx, m, f, out) {
             return e;
         }
+        let recv_ty = cx.ty(&recv_ast);
         let recv = expr::lower_expr(cx, &recv_ast, out);
-        let args = expr::call_args(cx, m, out);
+        let mut args = expr::call_args(cx, m, out);
+        // A `Some`-style method needing a `Supplier<T>`: the receiver comes first, as for `self`.
+        if !cx.supplier_fns.get(&f).is_none_or(|n| n.is_empty()) {
+            let mut tys = vec![recv_ty];
+            tys.extend(m.arg_list().map(|a| a.args().map(|x| cx.ty(&x)).collect::<Vec<_>>()).unwrap_or_default());
+            args.extend(super::generics::supplier_args(cx, f, &tys, m.syntax()));
+        }
         // Derived comparison impls have no Rust-named method in Java: derives emit compareTo/equals.
         if is_derived(cx, f) {
             match name.as_str() {

@@ -190,7 +190,8 @@ fn lower_items(cx: &mut Cx, items: &[ast::Item], members: &mut Vec<Member>) {
                     );
                     continue;
                 }
-                if adt.is_some() {
+                // `impl Debug for dyn Shape` is a default method of the `Shape` interface.
+                if adt.is_some() || dyn_fmt_impl(cx, imp).is_some() {
                     continue;
                 }
                 let Some(class) = lower_foreign_impl(cx, imp) else {
@@ -972,6 +973,24 @@ fn lower_trait(cx: &mut Cx, t: &ast::Trait) -> Option<Member> {
             }
         }
     }
+    // `impl Debug for dyn Shape` / `impl Display for dyn Shape` in the same module.
+    let this = cx.sema.to_def(t);
+    let siblings: Vec<ast::Impl> = t
+        .syntax()
+        .parent()
+        .map(|p| p.children().filter_map(ast::Impl::cast).collect())
+        .unwrap_or_default();
+    for imp in siblings {
+        let Some((tr, fmt_trait)) = dyn_fmt_impl(cx, &imp) else { continue };
+        if Some(tr) != this {
+            continue;
+        }
+        let header = if fmt_trait == "Debug" { "default String debug()" } else { "default String display()" };
+        let target = Target { java: name.clone(), interface: true, generics: Vec::new() };
+        if let Some(m) = write_method(cx, &imp, &target, header) {
+            members.push(Member::Method(m));
+        }
+    }
     cx.self_ty_java = saved_self;
     Some(Member::Class(Class {
         line: cx.line(t.syntax()),
@@ -983,6 +1002,24 @@ fn lower_trait(cx: &mut Cx, t: &ast::Trait) -> Option<Member> {
 }
 
 // --- impls -------------------------------------------------------------------------------
+
+// `impl Debug|Display for dyn Trait` with a local trait: that trait and `"Debug"` / `"Display"`.
+fn dyn_fmt_impl(cx: &Cx, imp: &ast::Impl) -> Option<(Trait, &'static str)> {
+    let ast::Type::DynTraitType(d) = imp.self_ty()? else { return None };
+    let fmt_trait = match impl_trait(cx, imp)?.name(cx.db).as_str() {
+        "Debug" => "Debug",
+        "Display" => "Display",
+        _ => return None,
+    };
+    let tr = d.type_bound_list()?.bounds().find_map(|b| {
+        let ast::Type::PathType(p) = b.ty()? else { return None };
+        match cx.sema.resolve_path(&p.path()?)? {
+            ra_ap_hir::PathResolution::Def(ra_ap_hir::ModuleDef::Trait(tr)) => Some(tr),
+            _ => None,
+        }
+    })?;
+    tr.module(cx.db).krate(cx.db).origin(cx.db).is_local().then_some((tr, fmt_trait))
+}
 
 pub(crate) fn impl_trait(cx: &Cx, imp: &ast::Impl) -> Option<Trait> {
     cx.sema.to_impl_def(imp)?.trait_(cx.db)
@@ -1722,6 +1759,15 @@ fn lower_fn_sig(
                 }
                 None => {}
             }
+        }
+    }
+    // `T::default()`: one `Supplier<T>` per type parameter the body needs a value of.
+    if let Some(names) = def.and_then(|d| cx.supplier_fns.get(&d)).cloned() {
+        for name in names {
+            let jty = format!("Supplier<{}>", escape_keyword(&name));
+            let java = cx.declare(&format!("def_{}", name.to_lowercase()));
+            params.push(format!("{jty} {java}"));
+            cx.suppliers.insert(name, java);
         }
     }
     let mut generics = generic_param_decls(cx, f.generic_param_list(), f.where_clause());
@@ -2483,6 +2529,10 @@ fn generic_param_decls(
             continue;
         };
         let name = tp.name().map(|n| n.text().to_string()).unwrap_or_default();
+        // `A: AsRef<[T]>` is spelled `List<T>` where it's used.
+        if crate::frontend::as_ref_target(&tp).is_some() {
+            continue;
+        }
         let mut bounds: Vec<String> = Vec::new();
         if let Some(bl) = tp.type_bound_list() {
             for b in bl.bounds() {

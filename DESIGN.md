@@ -281,7 +281,8 @@ Rust generics become Java generics, with primitives boxed in type arguments. Std
 | `Ord`/`PartialOrd` | `T extends Comparable<T>` |
 | `Display`, `Debug`, `PartialEq`, `Hash`, `Clone` | no bound needed (methods dispatch through `Object`) |
 | `Fn*` | functional interface |
-| arithmetic (`T: Add`) on generic `T` | unsupported for now |
+| arithmetic (`T: Add`) on generic `T` | `arith(a, '+', b)`: one generated static helper switching on the boxed number. Bit operations on a generic `T` are unsupported. |
+| `T::default()` | a `Supplier<T>` parameter (`def_t`) passed down from the call sites; `() -> 0` / `() -> ""` … where the type is concrete. Instantiations with no default literal (a struct, a list) are unsupported. |
 
 ---
 
@@ -581,7 +582,7 @@ There is **no helper library**. Apart from translations of the user's own types,
 Every unsupported construct gets a specific error. The transpiler collects all errors in a run instead of stopping at the first, and exits with code 1:
 
 ```
-error: src/main.rs:42:17: unsupported: arithmetic on a generic type parameter
+error: src/main.rs:42:17: unsupported: bit operation on a generic type parameter
 ```
 
 - Warnings don't fail the run. They flag Java that is correct but slower than the Rust, such as `dq[i]` on a `VecDeque` (O(i): `ArrayDeque` has no random access; `dq[0]`, `dq[len - 1]`, `front`/`back` stay O(1)).
@@ -643,7 +644,8 @@ New lowering code should only be needed for structural constructs.
 | M3 | traits, generics, streams (§11), collections (§11.1), full fmt, `str`/`char`, modules, `&mut` cells | Phase B; ≥ 70% of a 100-program Exercism/AoC sample pass |
 | M4 | idioms, `--report`, diagnostics polish, drift reduction, `macro_rules!`, fs | ≥ 90% sample pass, ≥ 95% exact lines |
 
-The sample is `tests/corpus/`: 55 AoC / Exercism / Codeforces-style programs written without regard to what the transpiler supports, run one at a time by `tests/corpus/run.sh` (outside `cargo test`). Today: exact mode 51/55; simple mode 51/55 printing the same or only `{:?}` text differently. The rest: arithmetic on a generic `T` (`ex_triangle`), a generic `A: AsRef<[T]>` parameter (`ex_binary_search`), `impl Debug for dyn Trait` (`gen_shapes`), and `u64` values past 2^63 (`gen_fib_iter`, accepted by §1).
+The sample is `tests/corpus/`: 55 AoC / Exercism / Codeforces-style programs written without regard to what the transpiler supports, run one at a time by `tests/corpus/run.sh` (outside `cargo test`). Today: 55/55 in exact mode; 55/55 in simple mode (14 print `{:?}` text differently).
+
 
 ---
 

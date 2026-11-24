@@ -905,6 +905,9 @@ pub(super) fn lower_int_method(
         // Only the variants these helpers implement; anything else is reported, not guessed.
         "checked_add" | "checked_sub" | "checked_mul" | "checked_div" | "checked_rem"
         | "checked_neg" | "checked_abs" => {
+            // Operands appear more than once in the overflow tests.
+            let recv = simple(cx, recv, &Ty::Int(i), line, out);
+            let b0 = simple(cx, b0, &Ty::Int(i), line, out);
             Some(checked_int(cx, recv, b0, b1, i, name, ret, line, out))
         }
         "saturating_add" | "saturating_sub" | "saturating_mul" | "saturating_abs"
@@ -1189,11 +1192,19 @@ pub(super) fn checked_int(
                 yes(Expr::bin(recv, "+", b0)),
                 empty,
             ),
-            Int::U64 | Int::U128 => try_opt(
-                cx,
-                out,
-                Expr::call(Expr::raw("Math"), "addExact", vec![recv, b0]),
-                "ArithmeticException",
+            // Unsigned overflow wraps the sum below either operand.
+            Int::U64 | Int::U128 => conditional(
+                Expr::bin(
+                    Expr::call(
+                        Expr::raw("Long"),
+                        "compareUnsigned",
+                        vec![Expr::bin(recv.clone(), "+", b0.clone()), recv.clone()],
+                    ),
+                    ">=",
+                    Expr::raw("0"),
+                ),
+                yes(Expr::bin(recv, "+", b0)),
+                empty,
             ),
             Int::I8 => range_checked(recv, b0, i, "+", -128, 127, inner.as_ref()),
             Int::I16 => range_checked(recv, b0, i, "+", -32768, 32767, inner.as_ref()),
@@ -1268,6 +1279,16 @@ pub(super) fn checked_int(
                     "int".into(),
                     Box::new(Expr::bin(wide(recv), "*", wide(b0))),
                 )),
+                empty,
+            ),
+            // The unsigned product fits when its high 64 bits are zero.
+            Int::U64 | Int::U128 => conditional(
+                Expr::bin(
+                    Expr::call(Expr::raw("Math"), "unsignedMultiplyHigh", vec![recv.clone(), b0.clone()]),
+                    "==",
+                    Expr::raw("0"),
+                ),
+                yes(Expr::bin(recv, "*", b0)),
                 empty,
             ),
             Int::I8 => range_checked(recv, b0, i, "*", -128, 127, inner.as_ref()),

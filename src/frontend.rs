@@ -286,6 +286,58 @@ pub fn into_iter_item(
     Some(convert(sema, from, &item))
 }
 
+// `A: AsRef<[T]>` / `A: AsRef<str>` (inline or in the `where` clause): the list or String `A`
+// stands for, since all the function does with it is `.as_ref()`.
+pub fn as_ref_target(tp: &ra_ap_syntax::ast::TypeParam) -> Option<Ty> {
+    use ra_ap_syntax::ast::{self, AstNode, HasGenericArgs, HasGenericParams, HasName, HasTypeBounds};
+    let name = tp.name()?.text().to_string();
+    let mut bounds: Vec<ast::TypeBound> = tp.type_bound_list().map(|l| l.bounds().collect()).unwrap_or_default();
+    let owner_where = tp.syntax().ancestors().find_map(|a| {
+        ast::Fn::cast(a.clone())
+            .and_then(|f| f.where_clause())
+            .or_else(|| ast::Impl::cast(a.clone()).and_then(|i| i.where_clause()))
+            .or_else(|| ast::Struct::cast(a).and_then(|s| s.where_clause()))
+    });
+    for pred in owner_where.iter().flat_map(|w| w.predicates()) {
+        if pred.ty().is_some_and(|t| t.syntax().text() == name.as_str()) {
+            bounds.extend(pred.type_bound_list().into_iter().flat_map(|l| l.bounds()));
+        }
+    }
+    let params: Vec<String> = tp
+        .syntax()
+        .parent()
+        .and_then(ast::GenericParamList::cast)
+        .map(|l| l.type_or_const_params().filter_map(|p| Some(p.name()?.text().to_string())).collect())
+        .unwrap_or_default();
+    for b in bounds {
+        let Some(ast::Type::PathType(pt)) = b.ty() else { continue };
+        let Some(seg) = pt.path().and_then(|p| p.segment()) else { continue };
+        if seg.name_ref().is_none_or(|n| n.text() != "AsRef") {
+            continue;
+        }
+        let arg = seg.generic_arg_list()?.generic_args().next()?;
+        let ast::GenericArg::TypeArg(ta) = arg else { return None };
+        return match ta.ty()? {
+            ast::Type::SliceType(s) => {
+                let elem = s.ty()?.syntax().text().to_string();
+                let elem = match elem.as_str() {
+                    e if params.iter().any(|p| p == e) => Ty::Param(e.to_string()),
+                    "String" | "str" | "&str" => Ty::Str,
+                    "bool" => Ty::Bool,
+                    "char" => Ty::Char,
+                    "f64" => Ty::F64,
+                    "f32" => Ty::F32,
+                    e => Ty::Int(Int::from_name(e)?),
+                };
+                Some(Ty::Vec(Box::new(elem)))
+            }
+            ast::Type::PathType(p) if p.syntax().text() == "str" => Some(Ty::Str),
+            _ => None,
+        };
+    }
+    None
+}
+
 // Converts rust-analyzer's type into our simplified model. `from` is the module being emitted,
 // used to qualify user types defined in other modules.
 pub fn convert(sema: &Semantics<'_, RootDatabase>, from: Module, ty: &ra_ap_hir::Type<'_>) -> Ty {
@@ -357,6 +409,15 @@ pub fn convert(sema: &Semantics<'_, RootDatabase>, from: Module, ty: &ra_ap_hir:
             && p.trait_bounds(db).iter().any(|t| t.name(db).as_str() == "Iterator"))
         && into_iter_item(sema, from, ty).is_none()
     {
+        use ra_ap_hir::HasSource;
+        let as_ref = p.trait_bounds(db).iter().any(|t| t.name(db).as_str() == "AsRef");
+        if as_ref
+            && let Some(src) = p.merge().source(db)
+            && let Some(ra_ap_syntax::ast::TypeOrConstParam::Type(tp)) = src.value.left()
+            && let Some(t) = as_ref_target(&tp)
+        {
+            return t;
+        }
         return Ty::Param(p.name(db).as_str().to_string());
     }
     // `I: IntoIterator<Item = T>` too: call sites pass a stream of their collection.

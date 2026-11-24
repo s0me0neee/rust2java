@@ -448,6 +448,18 @@ pub fn lower_path_expr(cx: &mut Cx, p: &ast::PathExpr) -> Expr {
     }
 }
 
+// `a + b` on a generic `T` holding a boxed number.
+const GENERIC_ARITH: &str = "@SuppressWarnings(\"unchecked\") static <T> T arith(T a, char op, T b) { \
+Object r = switch (a) { \
+case Integer x -> { int y = (Integer) b; yield switch (op) { case '+' -> x + y; case '-' -> x - y; case '*' -> x * y; case '/' -> x / y; default -> x % y; }; } \
+case Long x -> { long y = (Long) b; yield switch (op) { case '+' -> x + y; case '-' -> x - y; case '*' -> x * y; case '/' -> x / y; default -> x % y; }; } \
+case Double x -> { double y = (Double) b; yield switch (op) { case '+' -> x + y; case '-' -> x - y; case '*' -> x * y; case '/' -> x / y; default -> x % y; }; } \
+case Float x -> { float y = (Float) b; yield switch (op) { case '+' -> x + y; case '-' -> x - y; case '*' -> x * y; case '/' -> x / y; default -> x % y; }; } \
+case Short x -> { short y = (Short) b; yield (short) switch (op) { case '+' -> x + y; case '-' -> x - y; case '*' -> x * y; case '/' -> x / y; default -> x % y; }; } \
+case Byte x -> { byte y = (Byte) b; yield (byte) switch (op) { case '+' -> x + y; case '-' -> x - y; case '*' -> x * y; case '/' -> x / y; default -> x % y; }; } \
+default -> throw new UnsupportedOperationException(op + \" on \" + a.getClass().getSimpleName()); }; \
+return (T) r; }";
+
 fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
     use ast::{BinaryOp, CmpOp, LogicOp};
     let (Some(lhs), Some(rhs), Some(op)) = (b.lhs(), b.rhs(), b.op_kind()) else {
@@ -458,11 +470,23 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
     }
     let lt = cx.ty(&lhs);
     let rt = cx.ty(&rhs);
-    // `T: Add<Output = T>`: Java has no operators on a type variable.
-    if let BinaryOp::ArithOp(_) = op
+    // `T: Add<Output = T>`: Java has no operators on a type variable, so a helper switches on the
+    // boxed number it holds.
+    if let BinaryOp::ArithOp(a) = op
         && matches!(lt.strip_refs(), Ty::Param(_))
     {
-        return cx.unsupported(b.syntax(), "arithmetic on a generic type parameter");
+        let sym = match a {
+            ast::ArithOp::Add => '+',
+            ast::ArithOp::Sub => '-',
+            ast::ArithOp::Mul => '*',
+            ast::ArithOp::Div => '/',
+            ast::ArithOp::Rem => '%',
+            _ => return cx.unsupported(b.syntax(), "bit operation on a generic type parameter"),
+        };
+        let l = lower_expr(cx, &lhs, out);
+        let r = lower_expr(cx, &rhs, out);
+        super::fmt::file_helper(cx, GENERIC_ARITH.into());
+        return Expr::static_call("arith", vec![l, Expr::raw(format!("'{sym}'")), r]);
     }
     let l = lower_expr(cx, &lhs, out);
     // `a && <rhs needing statements>`: the statements may only run when `a` allows it

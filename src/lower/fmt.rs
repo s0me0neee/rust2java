@@ -1341,7 +1341,7 @@ pub fn std_error_display(cx: &mut Cx, v: Expr, ty: &Ty) -> Option<Expr> {
 }
 
 // Adds a static helper method to this file's trailer line once.
-fn file_helper(cx: &mut Cx, decl: String) {
+pub(crate) fn file_helper(cx: &mut Cx, decl: String) {
     if !cx.file_trailer.contains(&decl) {
         cx.file_trailer.insert(0, decl);
     }

@@ -588,8 +588,13 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
             }
         }
         // Java can't produce a value from a type parameter (no static dispatch on `T`).
+        // The `Supplier<T>` parameter the function was given for this type parameter.
         "Default::default" if matches!(ret.strip_refs(), Ty::Param(_)) => {
-            cx.unsupported(c.syntax(), "`T::default()` for a generic type parameter")
+            let Ty::Param(p) = ret.strip_refs() else { unreachable!() };
+            match cx.suppliers.get(p).cloned() {
+                Some(java) => Expr::call(Expr::name(java), "get", vec![]),
+                None => cx.unsupported(c.syntax(), "`T::default()` for a generic type parameter"),
+            }
         }
         "Default::default" => default_value_cx(cx, &ret),
         k if k.ends_with("::default")
@@ -1390,6 +1395,8 @@ pub fn lower_std_method(
         (Ty::Adt { .. } | Ty::Param(_), "ne") => Expr::Unary("!", Box::new(Expr::call(recv, "equals", args))),
         // `T: Ord` is `T extends Comparable<T>`.
         (Ty::Param(_), "cmp") => Expr::call(recv, "compareTo", args),
+        // `a.as_ref()` on an `A: AsRef<[T]>` parameter, already the list itself.
+        (Ty::Vec(_) | Ty::Str, "as_ref") => recv,
         (Ty::Param(_), "partial_cmp") => opt_of(Expr::call(recv, "compareTo", args)),
         (Ty::Option(_) | Ty::Result(..), "to_string") => Expr::call(recv, "toString", vec![]),
         _ => cx.unsupported(m.syntax(), &format!("std method `{key}`")),
