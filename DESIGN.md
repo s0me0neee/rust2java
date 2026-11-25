@@ -646,7 +646,6 @@ New lowering code should only be needed for structural constructs.
 
 The sample is `tests/corpus/`: 55 AoC / Exercism / Codeforces-style programs written without regard to what the transpiler supports, run one at a time by `tests/corpus/run.sh` (outside `cargo test`). Today: 55/55 in exact mode; 55/55 in simple mode (14 print `{:?}` text differently).
 
-
 ---
 
 ## 20. Risks

@@ -5,9 +5,10 @@
 use std::collections::HashMap;
 
 use ra_ap_hir::{Function, ModuleDef, PathResolution};
-use ra_ap_syntax::{AstNode, SyntaxNode, ast, ast::HasArgList, ast::HasGenericParams, ast::HasName};
+use ra_ap_syntax::{AstNode, SyntaxNode, ast, ast::HasArgList, ast::HasGenericParams};
 
 use super::Cx;
+use crate::jir::Expr;
 use crate::ty::Ty;
 
 pub fn analyze(cx: &mut Cx, root: &SyntaxNode) {
@@ -89,12 +90,12 @@ fn default_params(params: &[String], f: &ast::Fn) -> Vec<String> {
     for p in body.syntax().descendants().filter_map(ast::PathExpr::cast) {
         let Some(path) = p.path() else { continue };
         let text = path.syntax().text().to_string();
-        let mut parts = text.rsplit("::");
-        let _default = parts.next();
-        if parts.next().is_some_and(|q| params.iter().any(|p| p == q)) && text.ends_with("::default")
-            && !out.contains(&parts.next().unwrap_or_default().to_string())
-        {
-            out.push(text.rsplit("::").nth(1).unwrap_or_default().to_string());
+        let Some(q) = text.strip_suffix("::default").map(|q| q.rsplit("::").next().unwrap_or(q))
+        else {
+            continue;
+        };
+        if params.iter().any(|p| p == q) && !out.iter().any(|o| o == q) {
+            out.push(q.to_string());
         }
     }
     out
@@ -194,5 +195,3 @@ pub(super) fn supplier_args(cx: &mut Cx, f: Function, arg_tys: &[Ty], node: &Syn
     }
     out
 }
-
-use crate::jir::Expr;
