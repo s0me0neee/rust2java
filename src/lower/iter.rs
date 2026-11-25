@@ -530,6 +530,46 @@ fn iter_mut_for_each(
     Some(Expr::raw("null"))
 }
 
+// The bounds of a range written as `a..b` / `a..=b` / `RangeInclusive::new(a, b)`, or of an
+// immutable local initialised with one (a Java range is a one-shot stream, not a value to query).
+fn range_parts(cx: &Cx, e: &ast::Expr) -> Option<(Option<ast::Expr>, Option<ast::Expr>, bool)> {
+    use ast::RangeItem;
+    match strip_parens(e) {
+        ast::Expr::RangeExpr(r) => Some((r.start(), r.end(), r.op_kind() == Some(ast::RangeOp::Inclusive))),
+        ast::Expr::CallExpr(c)
+            if c.expr().is_some_and(|f| f.syntax().text().to_string().ends_with("RangeInclusive::new")) =>
+        {
+            let mut args = c.arg_list()?.args();
+            Some((args.next(), args.next(), true))
+        }
+        p @ ast::Expr::PathExpr(_) => {
+            let ip = cx.local_of_path(&p)?.primary_source(cx.db).into_ident_pat()?;
+            if ip.mut_token().is_some() {
+                return None;
+            }
+            let init = ip.syntax().parent().and_then(ast::LetStmt::cast)?.initializer()?;
+            let parts = range_parts(cx, &init)?;
+            // Read again at the use: the bounds must not have changed since.
+            let fixed = |b: &Option<ast::Expr>| b.as_ref().is_none_or(|b| fixed_value(cx, b));
+            (fixed(&parts.0) && fixed(&parts.1)).then_some(parts)
+        }
+        _ => None,
+    }
+}
+
+// A literal, or an immutable local.
+fn fixed_value(cx: &Cx, e: &ast::Expr) -> bool {
+    match strip_parens(e) {
+        ast::Expr::Literal(_) => true,
+        ast::Expr::PrefixExpr(p) => p.expr().is_some_and(|e| fixed_value(cx, &e)),
+        p @ ast::Expr::PathExpr(_) => cx
+            .local_of_path(&p)
+            .and_then(|l| l.primary_source(cx.db).into_ident_pat())
+            .is_some_and(|ip| ip.mut_token().is_none()),
+        _ => false,
+    }
+}
+
 // `v.iter()` / `v.iter_mut()` / `v.into_iter()` / `&v` where v is a list: returns `v`.
 pub(super) fn list_receiver_of_iter(cx: &Cx, e: &ast::Expr) -> Option<ast::Expr> {
     let target = match strip_parens(e) {
@@ -992,12 +1032,32 @@ pub fn lower_iter_method(
         for_each_loop(cx, m, &recv_ast, &c, out);
         return Some(Expr::raw("null"));
     }
+    // A range's own methods read its bounds: `(a..=b).end()` is `b`.
+    if matches!(name.as_str(), "is_empty" | "start" | "end" | "into_inner")
+        && let Some((start, end, inclusive)) = range_parts(cx, &recv_ast)
+    {
+        let line = cx.line(m.syntax());
+        let ty = cx.ty(&ast::Expr::MethodCallExpr(m.clone()));
+        let bound = |cx: &mut Cx, b: &Option<ast::Expr>, out: &mut Vec<Stmt>| b.as_ref().map(|b| lower_arg(cx, b, out));
+        let (s, e) = (bound(cx, &start, out), bound(cx, &end, out));
+        return match (name.as_str(), s, e) {
+            ("start", Some(s), _) => Some(s),
+            ("end", _, Some(e)) => Some(e),
+            ("into_inner", Some(s), Some(e)) => Some(expr::tuple_expr(cx, &ty, vec![s, e])),
+            ("is_empty", Some(s), Some(e)) => {
+                let elem = start.as_ref().map(|a| cx.ty(a)).unwrap_or(Ty::Int(crate::ty::Int::I32));
+                let s = ensure_simple(cx, s, &elem, line, out);
+                let e = ensure_simple(cx, e, &elem, line, out);
+                Some(Expr::Unary("!", Box::new(Expr::bin(s, if inclusive { "<=" } else { "<" }, e))))
+            }
+            _ => None,
+        };
+    }
     // `(a..b).contains(&x)`: two comparisons.
     if name == "contains"
-        && let ast::Expr::RangeExpr(r) = strip_parens(&recv_ast)
+        && let Some((r_start, r_end, inclusive)) = range_parts(cx, &recv_ast)
         && let Some(x) = arg_exprs(m).first()
     {
-        use ast::RangeItem;
         let line = cx.line(m.syntax());
         let ty = cx.ty(x).strip_refs().clone();
         let xv = lower_arg(cx, x, out);
@@ -1011,18 +1071,13 @@ pub fn lower_iter_method(
             None => Expr::bin(a, op, b),
         };
         let mut conds = Vec::new();
-        if let Some(start) = r.start() {
+        if let Some(start) = r_start {
             let s = lower_arg(cx, &start, out);
             conds.push(cmp(xv.clone(), ">=", s));
         }
-        if let Some(end) = r.end() {
+        if let Some(end) = r_end {
             let e = lower_arg(cx, &end, out);
-            let op = if r.op_kind() == Some(ast::RangeOp::Inclusive) {
-                "<="
-            } else {
-                "<"
-            };
-            conds.push(cmp(xv.clone(), op, e));
+            conds.push(cmp(xv.clone(), if inclusive { "<=" } else { "<" }, e));
         }
         return Some(
             conds
@@ -1771,6 +1826,131 @@ fn lower_adaptor(
     lower_adaptor_core(cx, m, name, src, item, ret_ty, line, out)
 }
 
+// Lexicographic comparison of two iterators; a `null` element comparison (NaN) makes the whole
+// comparison undefined, like Rust's `partial_cmp`.
+const LEX_CMP: &str = "static <T> Integer lex_cmp(List<T> a, List<T> b, BiFunction<T, T, Integer> c) { \
+int n = Math.min(a.size(), b.size()); \
+for (int i = 0; i < n; i++) { Integer r = c.apply(a.get(i), b.get(i)); if (r == null || r != 0) return r; } \
+return Integer.compare(a.size(), b.size()); }";
+
+const IS_SORTED: &str = "static <T> boolean is_sorted(List<T> v, BiPredicate<T, T> le) { \
+for (int i = 1; i < v.size(); i++) if (!le.test(v.get(i - 1), v.get(i))) return false; \
+return true; }";
+
+// `try_fold` stops at the first `None` / `Err` the closure returns.
+const TRY_FOLD_OPT: &str = "static <T, B> Optional<B> try_fold_some(Stream<T> s, B init, BiFunction<B, T, Optional<B>> f) { \
+B acc = init; \
+for (Iterator<T> it = s.iterator(); it.hasNext();) { Optional<B> r = f.apply(acc, it.next()); if (r.isEmpty()) return r; acc = r.get(); } \
+return Optional.of(acc); }";
+
+const TRY_FOLD_RES: &str = "static <T, B, E> Result<B, E> try_fold_ok(Stream<T> s, B init, BiFunction<B, T, Result<B, E>> f) { \
+B acc = init; \
+for (Iterator<T> it = s.iterator(); it.hasNext();) { Result<B, E> r = f.apply(acc, it.next()); if (r instanceof Err) return r; acc = r.unwrap(); } \
+return new Ok<>(acc); }";
+
+const TRY_FOR_EACH: &str = "static <T, E> Result<Void, E> try_for_each(Stream<T> s, Function<T, Result<Void, E>> f) { \
+for (Iterator<T> it = s.iterator(); it.hasNext();) { Result<Void, E> r = f.apply(it.next()); if (r instanceof Err) return r; } \
+return new Ok<>(null); }";
+
+// `(x, y) -> ..` comparing two items as `partial_cmp` would: an Integer, or null for NaN.
+fn partial_cmp_fn(cx: &mut Cx, item: &Ty) -> String {
+    let (x, y) = (cx.fresh_param("x"), cx.fresh_param("y"));
+    cx.release_param(&x);
+    cx.release_param(&y);
+    let body = match item.strip_refs() {
+        Ty::F64 => format!("{x}.isNaN() || {y}.isNaN() ? null : Double.compare({x}, {y})"),
+        Ty::F32 => format!("{x}.isNaN() || {y}.isNaN() ? null : Float.compare({x}, {y})"),
+        t => super::std_map::coll::compare_call(cx, t, &x, &y),
+    };
+    format!("({x}, {y}) -> {body}")
+}
+
+// Rust's `size_hint()` of an iterator chain, from its source size and each adapter's rule, as Java
+// int expressions; `None` for chains whose hint depends on the items (`flat_map`).
+fn size_hint(cx: &mut Cx, e: &ast::Expr, out: &mut Vec<Stmt>) -> Option<(String, Option<String>)> {
+    let e = strip_parens(e);
+    // A collection passed to `zip` / `chain` iterates all its items.
+    if matches!(cx.ty(&e).strip_refs(), Ty::Vec(_) | Ty::Deque(_) | Ty::Map { .. } | Ty::Set { .. }) {
+        let n = format!("{}.size()", render(&expr::lower_expr(cx, &e, out)));
+        return Some((n.clone(), Some(n)));
+    }
+    if let ast::Expr::RangeExpr(r) = &e {
+        let (a, b, inclusive) = range_bounds(cx, r, out);
+        let (a, b) = (render(&a), render(&b));
+        let n = if inclusive { format!("Math.max(0, {b} - {a} + 1)") } else { format!("Math.max(0, {b} - {a})") };
+        return Some((n.clone(), Some(n)));
+    }
+    let ast::Expr::MethodCallExpr(m) = &e else { return None };
+    let name = method_name(m);
+    let recv = m.receiver()?;
+    let arg = |cx: &mut Cx, out: &mut Vec<Stmt>| -> Option<String> {
+        let a = m.arg_list()?.args().next()?;
+        Some(render(&expr::lower_expr(cx, &a, out)))
+    };
+    let rty = cx.ty(&recv);
+    let collection = matches!(
+        rty.strip_refs(),
+        Ty::Vec(_) | Ty::Deque(_) | Ty::Map { .. } | Ty::Set { .. } | Ty::Heap(_)
+    );
+    match name.as_str() {
+        "iter" | "iter_mut" | "into_iter" | "keys" | "values" | "values_mut" if collection => {
+            let n = format!("{}.size()", render(&expr::lower_expr(cx, &recv, out)));
+            Some((n.clone(), Some(n)))
+        }
+        "chars" | "char_indices" | "bytes" if rty.is_str() => {
+            cx.import("java.nio.charset.StandardCharsets");
+            let b = format!("{}.getBytes(StandardCharsets.UTF_8).length", render(&expr::lower_expr(cx, &recv, out)));
+            if name == "bytes" {
+                Some((b.clone(), Some(b)))
+            } else {
+                Some((format!("({b} + 3) / 4"), Some(b)))
+            }
+        }
+        "map" | "inspect" | "rev" | "copied" | "cloned" | "enumerate" | "fuse" | "by_ref" | "peekable" => {
+            size_hint(cx, &recv, out)
+        }
+        "filter" | "filter_map" | "take_while" | "skip_while" | "map_while" | "scan" => {
+            let (_, hi) = size_hint(cx, &recv, out)?;
+            Some(("0".into(), hi))
+        }
+        "skip" => {
+            let (lo, hi) = size_hint(cx, &recv, out)?;
+            let k = arg(cx, out)?;
+            Some((format!("Math.max(0, {lo} - {k})"), hi.map(|h| format!("Math.max(0, {h} - {k})"))))
+        }
+        "take" => {
+            let (lo, hi) = size_hint(cx, &recv, out)?;
+            let k = arg(cx, out)?;
+            let hi = match hi {
+                Some(h) => format!("Math.min({h}, {k})"),
+                None => k.clone(),
+            };
+            Some((format!("Math.min({lo}, {k})"), Some(hi)))
+        }
+        "step_by" => {
+            let (lo, hi) = size_hint(cx, &recv, out)?;
+            let s = arg(cx, out)?;
+            let step = |n: String| format!("({n} == 0 ? 0 : 1 + ({n} - 1) / {s})");
+            Some((step(lo), hi.map(step)))
+        }
+        "chain" | "zip" => {
+            let (lo1, hi1) = size_hint(cx, &recv, out)?;
+            let other = m.arg_list()?.args().next()?;
+            let (lo2, hi2) = size_hint(cx, &other, out)?;
+            if name == "chain" {
+                let hi = hi1.zip(hi2).map(|(a, b)| format!("{a} + {b}"));
+                return Some((format!("{lo1} + {lo2}"), hi));
+            }
+            let hi = match (hi1, hi2) {
+                (Some(a), Some(b)) => Some(format!("Math.min({a}, {b})")),
+                (a, b) => a.or(b),
+            };
+            Some((format!("Math.min({lo1}, {lo2})"), hi))
+        }
+        _ => None,
+    }
+}
+
 fn lower_adaptor_core(
     cx: &mut Cx,
     m: &ast::MethodCallExpr,
@@ -2055,9 +2235,115 @@ fn lower_adaptor_core(
                 vec![src, into_stream(other, &other_ty)],
             )
         }
+        // Lexicographic order against another iterator.
+        "cmp" | "partial_cmp" | "lt" | "le" | "gt" | "ge" => {
+            let other_ty = cx.ty(&args[0]);
+            let other = into_stream(lower_arg(cx, &args[0], out), &other_ty);
+            super::fmt::file_helper(cx, LEX_CMP.into());
+            let c = partial_cmp_fn(cx, &item);
+            let r = Expr::static_call(
+                "lex_cmp",
+                vec![call("toList", vec![]), Expr::call(other, "toList", vec![]), Expr::raw(c)],
+            );
+            match name {
+                "cmp" => r,
+                "partial_cmp" => Expr::call(Expr::raw("Optional"), "ofNullable", vec![r]),
+                _ => {
+                    let sym = match name { "lt" => "<", "le" => "<=", "gt" => ">", _ => ">=" };
+                    let v = cx.fresh("order");
+                    Expr::raw(format!("({} instanceof Integer {v} && {v} {sym} 0)", render(&r)))
+                }
+            }
+        }
+        // The items again and again; none at all if there are none.
+        "cycle" => {
+            if cx.lambda_depth > 0 {
+                return cx.unsupported(m.syntax(), "cycle() inside a closure");
+            }
+            let t = item.boxed();
+            let items = super::std_map::push_local(cx, line, format!("List<{t}>"), Some(call("toList", vec![])), out, "items");
+            Expr::raw(format!(
+                "({items}.isEmpty() ? Stream.<{t}>empty() : Stream.generate(() -> {items}).flatMap(List::stream))"
+            ))
+        }
+        "size_hint" => match m.receiver().and_then(|r| size_hint(cx, &r, out)) {
+            Some((lo, hi)) => {
+                let hi = match hi {
+                    Some(h) => format!("Optional.of({h})"),
+                    None => "Optional.<Integer>empty()".into(),
+                };
+                expr::tuple_expr(cx, ret_ty, vec![Expr::raw(lo), Expr::raw(hi)])
+            }
+            None => cx.unsupported(m.syntax(), "size_hint() of this iterator"),
+        },
+        "is_sorted" | "is_sorted_by" | "is_sorted_by_key" => {
+            super::fmt::file_helper(cx, IS_SORTED.into());
+            let (x, y) = (cx.fresh_param("x"), cx.fresh_param("y"));
+            cx.release_param(&x);
+            cx.release_param(&y);
+            // Typed parameters: an empty `Vec::new()` source is a `List<Object>`.
+            let le = |cx: &mut Cx, t: &Ty| {
+                let b = t.boxed();
+                match t.strip_refs() {
+                    t if t.is_primitive() => format!("({b} {x}, {b} {y}) -> {x} <= {y}"),
+                    t => format!("({b} {x}, {b} {y}) -> {} <= 0", super::std_map::coll::compare_call(cx, t, &x, &y)),
+                }
+            };
+            let (items, test) = match name {
+                "is_sorted" => (call("toList", vec![]), Expr::raw(le(cx, &item))),
+                "is_sorted_by" => (call("toList", vec![]), lower_arg(cx, &args[0], out)),
+                _ => {
+                    let key = match strip_parens(&args[0]) {
+                        ast::Expr::ClosureExpr(c) => c.body().map(|b| cx.ty(&b)),
+                        _ => None,
+                    };
+                    let Some(key) = key else {
+                        return cx.unsupported(m.syntax(), "is_sorted_by_key without a closure");
+                    };
+                    let f = lower_arg(cx, &args[0], out);
+                    let keys = Expr::call(call(&format!("<{}>map", key.boxed()), vec![f]), "toList", vec![]);
+                    (keys, Expr::raw(le(cx, &key)))
+                }
+            };
+            Expr::static_call("is_sorted", vec![items, test])
+        }
+        "try_fold" => {
+            let init = lower_arg(cx, &args[0], out);
+            let f = lower_arg(cx, &args[1], out);
+            let (helper, java) = match ret_ty.strip_refs() {
+                Ty::Option(_) => (TRY_FOLD_OPT, "try_fold_some"),
+                Ty::Result(..) => {
+                    cx.needs_result = true;
+                    (TRY_FOLD_RES, "try_fold_ok")
+                }
+                _ => return cx.unsupported(m.syntax(), "try_fold() returning this type"),
+            };
+            super::fmt::file_helper(cx, helper.into());
+            Expr::static_call(java, vec![src.clone(), init, f])
+        }
+        "try_for_each" => {
+            if !matches!(ret_ty.strip_refs(), Ty::Result(..)) {
+                return cx.unsupported(m.syntax(), "try_for_each() returning this type");
+            }
+            cx.needs_result = true;
+            super::fmt::file_helper(cx, TRY_FOR_EACH.into());
+            let f = lower_arg(cx, &args[0], out);
+            Expr::static_call("try_for_each", vec![src.clone(), f])
+        }
+        // From the back: the forward method on the reversed items.
+        "nth_back" | "rfind" | "rfold" | "try_rfold" => {
+            let rev = Expr::call(Expr::call(call("toList", vec![]), "reversed", vec![]), "stream", vec![]);
+            let fwd = match name {
+                "nth_back" => "nth",
+                "rfind" => "find",
+                "rfold" => "fold",
+                _ => "try_fold",
+            };
+            lower_adaptor_core(cx, m, fwd, rev, item, ret_ty, line, out)
+        }
         "copied" | "cloned" | "into_iter" | "iter" | "by_ref" | "peekable" | "fuse" => src,
-        "count" => Expr::Cast("int".into(), Box::new(call("count", vec![]))),
-        "sum" | "product" => lower_sum_product(cx, m, name == "product", src, ret_ty),
+        "count" | "len" => Expr::Cast("int".into(), Box::new(call("count", vec![]))),
+        "sum" | "product" => lower_sum_product(cx, m.syntax(), name == "product", src, ret_ty),
         "min" | "max" => {
             if item.is_primitive() || item.is_str() || name == "min" {
                 let cmp = super::std_map::coll::ord_comparator(cx, &item)
@@ -2190,16 +2476,17 @@ fn lower_adaptor_core(
     }
 }
 
-fn lower_sum_product(
+// `node` is the `sum()` call, or `Sum::sum(it)`.
+pub(super) fn lower_sum_product(
     cx: &mut Cx,
-    m: &ast::MethodCallExpr,
+    node: &ra_ap_syntax::SyntaxNode,
     product: bool,
     src: Expr,
     ret_ty: &Ty,
 ) -> Expr {
     let call = |name: &str, args: Vec<Expr>| Expr::call(src.clone(), name, args);
     let widened = Ty::Int(crate::ty::Int::I64);
-    let ret_ty = if cx.wide.ops.contains(m.syntax()) {
+    let ret_ty = if cx.wide.ops.contains(node) {
         &widened
     } else {
         ret_ty
@@ -2245,7 +2532,7 @@ fn lower_sum_product(
             if product { "product" } else { "sum" },
             vec![src.clone()],
         ),
-        _ => cx.unsupported(m.syntax(), "sum/product of this type"),
+        _ => cx.unsupported(node, "sum/product of this type"),
     }
 }
 
@@ -2268,7 +2555,7 @@ fn to_stream_fn(cx: &mut Cx, ty: &Ty) -> Option<Expr> {
     })
 }
 
-fn into_stream(v: Expr, ty: &Ty) -> Expr {
+pub(crate) fn into_stream(v: Expr, ty: &Ty) -> Expr {
     match ty.strip_refs() {
         Ty::Iter(_) => v,
         Ty::Map { .. } => Expr::call(Expr::call(v, "entrySet", vec![]), "stream", vec![]),

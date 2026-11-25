@@ -496,7 +496,8 @@ pub fn convert(sema: &Semantics<'_, RootDatabase>, from: Module, ty: &ra_ap_hir:
                 }
                 "VecDeque" => return Ty::Deque(arg(0)),
                 "BinaryHeap" => return Ty::Heap(arg(0)),
-                "Option" => return Ty::Option(arg(0)),
+                // A `OnceCell` is an `Optional` written at most once.
+                "Option" | "OnceCell" => return Ty::Option(arg(0)),
                 "Result" => return Ty::Result(arg(0), arg(1)),
                 "Box" | "Rc" | "Arc" | "Weak" | "RefCell" | "Cell" | "Reverse" | "Wrapping"
                 | "Ref" | "RefMut" | "Pin" | "ManuallyDrop" => {

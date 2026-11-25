@@ -12,35 +12,65 @@ pub(super) fn fn_call(
     ret: &Ty,
     out: &mut Vec<Stmt>,
 ) -> Option<Expr> {
-    let _ = (ret, out);
-    if key != "mem::size_of" {
-        return None;
+    let _ = ret;
+    match key {
+        "mem::size_of" | "mem::align_of" => {
+            let Some(ty) = sizeof_type(cx, c) else {
+                return Some(cx.unsupported(c.syntax(), &format!("{key} without a type argument")));
+            };
+            Some(match prim_size(&ty) {
+                Some(n) => Expr::raw(n.to_string()),
+                None => cx.unsupported(c.syntax(), &format!("{key} for this type")),
+            })
+        }
+        // `size_of_val(&v)`: an array is its items, a `str` its UTF-8 bytes.
+        "mem::size_of_val" | "mem::align_of_val" => {
+            let arg = ref_inner(arg_asts(c).first()?);
+            let t = cx.sema.type_of_expr(&arg)?.original.strip_references();
+            let (elem, len) = match t.as_array(cx.db) {
+                Some((e, n)) => (cx.convert(&e), n as u64),
+                None => (cx.convert(&t), 1),
+            };
+            if key == "mem::size_of_val" && elem.is_str() {
+                cx.import("java.nio.charset.StandardCharsets");
+                let s = expr::lower_expr(cx, &arg, out);
+                return Some(Expr::raw(format!("{}.getBytes(StandardCharsets.UTF_8).length", render(&s))));
+            }
+            let n = prim_size(&elem)?;
+            Some(Expr::raw(if key == "mem::size_of_val" { n * len } else { n }.to_string()))
+        }
+        // Equal for the same variant: a fieldless enum's constant, else the variant's record class.
+        "mem::discriminant" => {
+            let arg = ref_inner(arg_asts(c).first()?);
+            let unit_only = cx
+                .sema
+                .type_of_expr(&arg)
+                .and_then(|t| t.original.strip_references().as_adt())
+                .and_then(|a| match a {
+                    ra_ap_hir::Adt::Enum(e) => Some(e),
+                    _ => None,
+                })
+                .is_some_and(|e| e.variants(cx.db).iter().all(|v| v.kind(cx.db) == ra_ap_hir::StructKind::Unit));
+            let v = expr::lower_expr(cx, &arg, out);
+            Some(if unit_only { v } else { Expr::call(v, "getClass", vec![]) })
+        }
+        _ => None,
     }
-    let ty = sizeof_type(cx, c)?;
-    Some(size_of(cx, c, &ty))
 }
 
-// The primitive sizes Rust guarantees; everything else depends on the ABI.
-fn size_of(cx: &mut Cx, c: &ast::CallExpr, ty: &Ty) -> Expr {
-    let size = match ty.strip_refs() {
-        Ty::Unit => Some(0),
-        Ty::Bool | Ty::Int(Int::I8) | Ty::Int(Int::U8) => Some(1),
-        Ty::Int(Int::I16) | Ty::Int(Int::U16) => Some(2),
-        Ty::Char | Ty::F32 | Ty::Int(Int::I32) | Ty::Int(Int::U32) => Some(4),
-        Ty::F64
-        | Ty::Int(Int::I64)
-        | Ty::Int(Int::U64)
-        | Ty::Int(Int::Isize)
-        | Ty::Int(Int::Usize) => Some(8),
-        Ty::Int(Int::I128) | Ty::Int(Int::U128) => Some(16),
+// The primitive sizes (and alignments, the same for these) Rust guarantees on 64-bit targets.
+fn prim_size(ty: &Ty) -> Option<u64> {
+    Some(match ty {
         // A reference is a plain 64-bit pointer on the supported targets.
-        Ty::Ref { .. } => Some(8),
-        _ => None,
-    };
-    match size {
-        Some(n) => Expr::raw(n.to_string()),
-        None => cx.unsupported(c.syntax(), "mem::size_of for this type"),
-    }
+        Ty::Ref { .. } => 8,
+        Ty::Unit | Ty::Never => 0,
+        Ty::Bool | Ty::Int(Int::I8) | Ty::Int(Int::U8) => 1,
+        Ty::Int(Int::I16) | Ty::Int(Int::U16) => 2,
+        Ty::Char | Ty::F32 | Ty::Int(Int::I32) | Ty::Int(Int::U32) => 4,
+        Ty::F64 | Ty::Int(Int::I64) | Ty::Int(Int::U64) | Ty::Int(Int::Isize) | Ty::Int(Int::Usize) => 8,
+        Ty::Int(Int::I128) | Ty::Int(Int::U128) => 16,
+        _ => return None,
+    })
 }
 
 fn sizeof_type(cx: &Cx, c: &ast::CallExpr) -> Option<Ty> {
@@ -136,49 +166,3 @@ pub(super) fn mem_replace(
     Expr::name(tmp)
 }
 
-// `mem::size_of::<T>()`: Rust's sizes for the primitive (and pointer) types.
-pub(super) fn mem_size_of(cx: &mut Cx, c: &ast::CallExpr) -> Expr {
-    let ty = c
-        .expr()
-        .and_then(|e| match e {
-            ast::Expr::PathExpr(p) => p.path(),
-            _ => None,
-        })
-        .and_then(|p| p.segment())
-        .and_then(|s| s.generic_arg_list())
-        .and_then(|list| {
-            list.generic_args().find_map(|a| match a {
-                ast::GenericArg::TypeArg(t) => t.ty(),
-                _ => None,
-            })
-        })
-        .map(|t| cx.type_ref(&t));
-    let Some(ty) = ty else {
-        return cx.unsupported(c.syntax(), "mem::size_of without a type argument");
-    };
-    match rust_size(&ty) {
-        Some(n) => Expr::raw(format!("{n}")),
-        None => cx.unsupported(c.syntax(), "mem::size_of for this type"),
-    }
-}
-
-fn rust_size(ty: &Ty) -> Option<u64> {
-    Some(match ty {
-        Ty::Unit => 0,
-        Ty::Never => 0,
-        Ty::Bool => 1,
-        Ty::Char => 4,
-        Ty::Int(i) => match i {
-            Int::I8 | Int::U8 => 1,
-            Int::I16 | Int::U16 => 2,
-            Int::I32 | Int::U32 => 4,
-            Int::I64 | Int::U64 => 8,
-            Int::I128 | Int::U128 => 16,
-            Int::Isize | Int::Usize => 8,
-        },
-        Ty::F32 => 4,
-        Ty::F64 => 8,
-        Ty::Ref { .. } => 8,
-        _ => return None,
-    })
-}

@@ -932,6 +932,15 @@ pub fn lower_slot_assign(
     let ast::Expr::MethodCallExpr(outer) = strip_parens(inner) else {
         return None;
     };
+    // `*cell.get_mut() += 1` on a one-element-array cell writes its element.
+    if method_name(&outer) == "get_mut"
+        && let Some(recv) = outer.receiver()
+        && super::ptr::is_array(cx, &recv).is_some()
+    {
+        let v = expr::lower_expr(cx, &recv, out);
+        let place = super::ptr::contents(cx, &recv, v);
+        return Some(Expr::Assign(Box::new(place), sym, Box::new(r)));
+    }
     if !matches!(method_name(&outer).as_str(), "unwrap" | "expect") {
         return None;
     }
@@ -1592,7 +1601,16 @@ pub(super) fn lower_vec_method(
             Some(Expr::raw("null"))
         }
         "clone" => Some(clone_elems(cx, m, recv, elem)),
-        "as_slice" | "as_mut" | "as_mut_slice" | "into_boxed_slice" => Some(recv),
+        "as_slice" | "as_mut" | "as_mut_slice" | "into_boxed_slice" | "each_ref" | "each_mut" => Some(recv),
+        // `[T; N]::map`: a new array of the results.
+        "map" => {
+            let f = args.first().cloned()?;
+            Some(Expr::call(
+                Expr::call(Expr::call(recv, "stream", vec![]), "map", vec![f]),
+                "collect",
+                vec![Expr::raw("Collectors.toCollection(ArrayList::new)")],
+            ))
+        }
         "reserve" | "shrink_to_fit" => Some(Expr::raw("null")),
         _ => {
             let _ = m;

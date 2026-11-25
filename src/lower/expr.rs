@@ -567,7 +567,12 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
                 l
             };
             let v = Expr::bin(l, sym, r);
-            narrow_if_needed(v, &cx.ty(&ast::Expr::BinExpr(b.clone())))
+            let ty = cx.ty(&ast::Expr::BinExpr(b.clone()));
+            // `Wrapping<u8>` wraps at 256; a Java int would not.
+            if ty == Ty::Int(crate::ty::Int::U8) && erased_wrapper(cx, &lhs) == Some("Wrapping") {
+                return Expr::bin(v, "&", Expr::raw("0xFF"));
+            }
+            narrow_if_needed(v, &ty)
         }
         BinaryOp::Assignment { .. } => unreachable!(),
     }
@@ -782,7 +787,8 @@ fn option_ref_place(cx: &mut Cx, inner: &ast::Expr, out: &mut Vec<Stmt>) -> Opti
     })?;
     let target_ast = match &init {
         ast::Expr::MethodCallExpr(mc) => match mc.name_ref()?.text().to_string().as_str() {
-            "as_mut" | "get_or_insert" | "get_or_insert_with" | "insert" => mc.receiver()?,
+            "as_mut" | "get_or_insert" | "get_or_insert_with" | "get_or_insert_default" | "insert" | "get_mut"
+            | "get_or_init" => mc.receiver()?,
             _ => return None,
         },
         e if ip.ref_token().is_some() && ip.mut_token().is_some() => e.clone(),
@@ -1106,9 +1112,36 @@ pub fn place_assign(
             )
         }
         _ => {
+            // `if let Some(s) = o.as_mut() { s.push('!') }`: `s` holds a copy of an immutable
+            // value, so the new value goes back into the Optional too.
+            if matches!(lhs, ast::Expr::PathExpr(_))
+                && let Some((target, elem_ty)) = option_ref_place(cx, lhs, out)
+                && super::is_mut_ref_cell_ty(&elem_ty)
+            {
+                let place = lower_expr(cx, lhs, out);
+                let updated = Expr::Assign(Box::new(place), sym, Box::new(r));
+                return Expr::Assign(
+                    Box::new(target),
+                    "=",
+                    Box::new(Expr::call(Expr::raw("Optional"), "of", vec![updated])),
+                );
+            }
             let place = lower_expr(cx, lhs, out);
             Expr::Assign(Box::new(place), sym, Box::new(r))
         }
+    }
+}
+
+// `Wrapping` / `Reverse` from std, which Java erases to the value they hold.
+pub(super) fn erased_wrapper(cx: &Cx, e: &ast::Expr) -> Option<&'static str> {
+    let adt = cx.sema.type_of_expr(e)?.original.strip_references().as_adt()?;
+    if adt.module(cx.db).krate(cx.db).origin(cx.db).is_local() {
+        return None;
+    }
+    match adt.name(cx.db).as_str() {
+        "Wrapping" => Some("Wrapping"),
+        "Reverse" => Some("Reverse"),
+        _ => None,
     }
 }
 
@@ -1235,6 +1268,10 @@ fn lower_field(cx: &mut Cx, f: &ast::FieldExpr, out: &mut Vec<Stmt>) -> Expr {
         // rust-analyzer reports `t.1` as a name_ref; tuples are Map.Entry/TupleN, not records.
         if let Ty::Tuple(ts) = bt.strip_refs() {
             return tuple_field(b, name.parse().unwrap_or(0), ts);
+        }
+        // `Wrapping(x).0` / `Reverse(x).0`: the wrapper is erased to `x`.
+        if erased_wrapper(cx, &base).is_some() {
+            return b;
         }
         format!("_{name}")
     } else {

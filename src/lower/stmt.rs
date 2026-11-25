@@ -496,7 +496,8 @@ fn option_ref_init(cx: &Cx, init: &ast::Expr) -> bool {
     let named = mc.name_ref().is_some_and(|n| {
         matches!(
             &*n.text(),
-            "as_mut" | "get_or_insert" | "get_or_insert_with" | "insert"
+            "as_mut" | "get_or_insert" | "get_or_insert_with" | "get_or_insert_default" | "insert" | "get_mut"
+                | "get_or_init"
         )
     });
     named

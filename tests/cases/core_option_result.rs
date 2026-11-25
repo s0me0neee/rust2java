@@ -24,6 +24,12 @@ fn main() {
         s.sort();
     }
     println!("{:?}", nums);
+    let mut name: Option<String> = Some("ada".to_string());
+    if let Some(s) = name.as_mut() {
+        s.push_str("!");
+        s.push('?');
+    }
+    println!("{:?}", name);
     let one = Some(7);
     println!("{:?} {:?}", one.as_slice(), None::<i32>.as_slice());
     let mut two = Some(vec![8]);

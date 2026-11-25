@@ -295,7 +295,33 @@ pub(super) fn lower_option_method(
                 }],
             ))
         }
-        "as_ref" | "as_mut" | "as_deref" | "as_deref_mut" | "cloned" | "copied" => Some(recv),
+        // `OnceCell::get` / `get_mut` / `into_inner` (a `OnceCell` is an `Optional`).
+        "as_ref" | "as_mut" | "as_deref" | "as_deref_mut" | "cloned" | "copied" | "get" | "get_mut"
+        | "into_inner" => Some(recv),
+        // `OnceCell::set`: `Err(v)` when already set.
+        "set" => {
+            cx.needs_result = true;
+            let t = inner.clone().unwrap_or(Ty::Other("?".into()));
+            let v = Expr::name(push_local(cx, line, stmt::decl_type(&t), Some(b0), out, "value"));
+            let res_ty = format!("Result<Void, {}>", t.boxed());
+            let res = push_local(
+                cx,
+                line,
+                res_ty.clone(),
+                Some(Expr::Ternary(
+                    Box::new(Expr::call(recv.clone(), "isPresent", vec![])),
+                    Box::new(Expr::New { ty: "Err<>".into(), args: vec![v.clone()] }),
+                    Box::new(Expr::raw("new Ok<>(null)")),
+                )),
+                out,
+                "set",
+            );
+            let mut fill = Vec::new();
+            let assign = expr::place_assign(cx, recv_ast, "=", opt_of(v), &mut fill);
+            out.extend(fill);
+            out.push(Stmt::new(line, StmtKind::Raw(format!("if ({}.isEmpty()) {};", render(&recv), render(&assign)))));
+            Some(Expr::name(res))
+        }
         "as_slice" | "as_mut_slice" => Some(Expr::call(Expr::call(recv, "stream", vec![]), "toList", vec![])),
         "map_or_default" => {
             let mapped = Expr::call(recv, "map", vec![b0]);
@@ -304,12 +330,16 @@ pub(super) fn lower_option_method(
         // `Some((a, b))` -> `(Some(a), Some(b))`.
         "unzip" => {
             let Ty::Tuple(parts) = ret.strip_refs() else { return None };
-            let pair = Ty::Tuple(
-                parts.iter().map(|p| match p { Ty::Option(t) => (**t).clone(), t => t.clone() }).collect(),
-            );
+            let inner: Vec<Ty> = parts.iter().map(|p| match p { Ty::Option(t) => (**t).clone(), t => t.clone() }).collect();
+            let pair = Ty::Tuple(inner.clone());
             let o = simple(cx, recv, &Ty::Option(Box::new(pair)), line, out);
-            let half = |get: &str| Expr::call(o.clone(), "map", vec![Expr::raw(format!("Map.Entry::{get}"))]);
-            Some(Expr::call(Expr::raw("Map"), "entry", vec![half("getKey"), half("getValue")]))
+            let class = crate::tuples::named(&inner).map_or("Map.Entry".to_string(), |n| n.name);
+            let half = |i: usize| {
+                let get = crate::tuples::accessor(&inner, i);
+                Expr::call(o.clone(), "map", vec![Expr::raw(format!("{class}::{get}"))])
+            };
+            let (a, b) = (half(0), half(1));
+            Some(expr::tuple_expr(cx, ret, vec![a, b]))
         }
         // `Optional<T> taken = o.filter(p); if (taken.isPresent()) o = Optional.empty();`
         "take_if" => {
@@ -392,7 +422,7 @@ pub(super) fn lower_option_method(
             out.push(Stmt::new(line, StmtKind::Expr(assign)));
             Some(Expr::call(recv, "get", vec![]))
         }
-        "get_or_insert" | "get_or_insert_with" | "get_or_insert_default" => {
+        "get_or_insert" | "get_or_insert_with" | "get_or_insert_default" | "get_or_init" => {
             let ty = inner.clone().unwrap_or(Ty::Other("?".into()));
             let value = match (name, arg_asts(m).first()) {
                 ("get_or_insert", _) => b0,
