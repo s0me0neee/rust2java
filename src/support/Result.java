@@ -56,6 +56,18 @@ public sealed interface Result<T, E> permits Ok, Err {
         }
         return this;
     }
+    default Result<T, E> inspect(Consumer<T> f) {
+        if (this instanceof Ok<T, E>(var v)) {
+            f.accept(v);
+        }
+        return this;
+    }
+    default <U> Result<U, E> and(Result<U, E> other) {
+        return this instanceof Err<T, E>(var e) ? new Err<>(e) : other;
+    }
+    default <F> Result<T, F> or(Result<T, F> other) {
+        return this instanceof Ok<T, E>(var v) ? new Ok<>(v) : other;
+    }
     default T unwrap_or(T other) { return this instanceof Ok<T, E>(var v) ? v : other; }
     default T unwrap_or_else(Function<E, T> f) {
         return switch (this) {

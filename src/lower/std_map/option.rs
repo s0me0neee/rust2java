@@ -3,6 +3,7 @@
 use super::*;
 use crate::jir::{Arm, ArmBody};
 use crate::lower::stmt;
+use ra_ap_syntax::SyntaxNode;
 
 // Hook for std free functions (`key` as built by `calls::std_fn_key`, e.g. `Rc::new`).
 pub(super) fn fn_call(
@@ -12,7 +13,16 @@ pub(super) fn fn_call(
     ret: &Ty,
     out: &mut Vec<Stmt>,
 ) -> Option<Expr> {
-    let _ = (cx, c, key, ret, out);
+    // `i32::from_str(s)` is `s.parse::<i32>()`.
+    if key.ends_with("::from_str")
+        && let Ty::Result(target, _) = ret.strip_refs()
+        && matches!(target.strip_refs(), Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Bool | Ty::Char)
+    {
+        let target = (**target).clone();
+        let line = cx.line(c.syntax());
+        let input = expr::call_args(cx, c, out).into_iter().next()?;
+        return Some(parse_result(cx, c.syntax(), input, ret, &target, line, out));
+    }
     None
 }
 
@@ -63,7 +73,7 @@ fn result_types(cx: &Cx, e: &ast::Expr) -> Option<(Ty, Ty)> {
 
 fn is_parse_error(ty: &Ty) -> bool {
     matches!(ty.strip_refs(), Ty::Other(n)
-        if n.contains("ParseIntError") || n.contains("ParseFloatError"))
+        if crate::ty::is_parse_error_name(n))
 }
 
 // ---- Option ----------------------------------------------------------------------------------
@@ -285,7 +295,35 @@ pub(super) fn lower_option_method(
                 }],
             ))
         }
-        "as_ref" | "as_mut" | "as_deref" | "cloned" | "copied" => Some(recv),
+        "as_ref" | "as_mut" | "as_deref" | "as_deref_mut" | "cloned" | "copied" => Some(recv),
+        "as_slice" | "as_mut_slice" => Some(Expr::call(Expr::call(recv, "stream", vec![]), "toList", vec![])),
+        "map_or_default" => {
+            let mapped = Expr::call(recv, "map", vec![b0]);
+            Some(Expr::call(mapped, "orElse", vec![default_value_cx(cx, ret)]))
+        }
+        // `Some((a, b))` -> `(Some(a), Some(b))`.
+        "unzip" => {
+            let Ty::Tuple(parts) = ret.strip_refs() else { return None };
+            let pair = Ty::Tuple(
+                parts.iter().map(|p| match p { Ty::Option(t) => (**t).clone(), t => t.clone() }).collect(),
+            );
+            let o = simple(cx, recv, &Ty::Option(Box::new(pair)), line, out);
+            let half = |get: &str| Expr::call(o.clone(), "map", vec![Expr::raw(format!("Map.Entry::{get}"))]);
+            Some(Expr::call(Expr::raw("Map"), "entry", vec![half("getKey"), half("getValue")]))
+        }
+        // `Optional<T> taken = o.filter(p); if (taken.isPresent()) o = Optional.empty();`
+        "take_if" => {
+            let ty = match opt_inner_of(cx, recv_ast) {
+                Some(t) => format!("Optional<{}>", t.boxed()),
+                None => "Optional<Object>".into(),
+            };
+            let n = push_local(cx, line, ty, Some(Expr::call(recv, "filter", vec![b0])), out, "taken");
+            let mut clear = Vec::new();
+            let assign = expr::place_assign(cx, recv_ast, "=", Expr::raw("Optional.empty()"), &mut clear);
+            out.extend(clear);
+            out.push(Stmt::new(line, StmtKind::Raw(format!("if ({n}.isPresent()) {};", render(&assign)))));
+            Some(Expr::name(n))
+        }
         // `Option<Result<T, E>>` -> `Result<Option<T>, E>`.
         "transpose" => {
             let Ty::Result(ok, err) = ret.strip_refs() else {
@@ -354,10 +392,11 @@ pub(super) fn lower_option_method(
             out.push(Stmt::new(line, StmtKind::Expr(assign)));
             Some(Expr::call(recv, "get", vec![]))
         }
-        "get_or_insert" | "get_or_insert_with" => {
+        "get_or_insert" | "get_or_insert_with" | "get_or_insert_default" => {
             let ty = inner.clone().unwrap_or(Ty::Other("?".into()));
             let value = match (name, arg_asts(m).first()) {
                 ("get_or_insert", _) => b0,
+                ("get_or_insert_default", _) => default_value_cx(cx, &ty),
                 (_, Some(a)) => {
                     super::coll::ctor_value(cx, a, &ty, out).unwrap_or_else(|| lambda_call(b0, &ty))
                 }
@@ -468,7 +507,7 @@ pub(super) fn lower_option_method(
             ));
             Some(r)
         }
-        "iter" => Some(Expr::call(recv, "stream", vec![])),
+        "iter" | "iter_mut" => Some(Expr::call(recv, "stream", vec![])),
         _ => None,
     }
 }
@@ -572,8 +611,21 @@ pub(super) fn lower_result_method(
             let mapped = Expr::call(err, "map", vec![b0]);
             Some(Expr::call(mapped, "orElse", vec![Expr::raw("false")]))
         }
-        "inspect_err" => Some(Expr::call(recv, "inspect_err", vec![b0])),
-        "iter" => Some(Expr::call(Expr::call(recv, "ok", vec![]), "stream", vec![])),
+        "inspect_err" | "inspect" => Some(Expr::call(recv, name, vec![b0])),
+        // The new type parameter as a witness: `new Ok<>(0)` alone would make it `Object`.
+        "and" | "or" => {
+            let witness = match (name, ret.strip_refs()) {
+                ("and", Ty::Result(u, _)) if u.is_nameable() => format!("<{}>", u.boxed()),
+                ("or", Ty::Result(_, f)) if f.is_nameable() => format!("<{}>", f.boxed()),
+                _ => String::new(),
+            };
+            Some(Expr::call(recv, format!("{witness}{name}"), vec![b0]))
+        }
+        "map_or_default" => {
+            let mapped = Expr::call(recv, "map", vec![b0]);
+            Some(Expr::call(mapped, "unwrap_or", vec![default_value_cx(cx, ret)]))
+        }
+        "iter" | "iter_mut" => Some(Expr::call(Expr::call(recv, "ok", vec![]), "stream", vec![])),
         "flatten" => {
             let x = cx.fresh("inner");
             Some(Expr::call(
@@ -586,7 +638,7 @@ pub(super) fn lower_result_method(
             ))
         }
         "transpose" => transpose(cx, recv, ret, line, out),
-        "clone" | "as_ref" | "as_mut" | "cloned" | "copied" => Some(recv),
+        "clone" | "as_ref" | "as_mut" | "as_deref" | "as_deref_mut" | "cloned" | "copied" => Some(recv),
         _ => None,
     }
 }
@@ -687,12 +739,12 @@ pub(super) fn is_unwrapped_source(cx: &Cx, recv_ast: &ast::Expr) -> bool {
 
 // Parses into the Rust error text, so `{}` matches rustc; `{:?}` maps it back to the kind.
 // `.ok()`, `.unwrap_or(..)`, `if let Ok(x)`, `Err(_)` arms and `|_|` closures never read the error.
-fn error_discarded(m: &ast::MethodCallExpr) -> bool {
-    let Some(parent) = m.syntax().parent() else {
+fn error_discarded(node: &SyntaxNode) -> bool {
+    let Some(parent) = node.parent() else {
         return false;
     };
     if let Some(p) = ast::MethodCallExpr::cast(parent.clone()) {
-        return p.receiver().is_some_and(|r| r.syntax() == m.syntax())
+        return p.receiver().is_some_and(|r| r.syntax() == node)
             && match method_name(&p).as_str() {
                 "ok" | "is_ok" | "is_err" | "unwrap_or" | "unwrap_or_default" => true,
                 "map_err" | "unwrap_or_else" => closure_ignores_arg(&p),
@@ -758,24 +810,25 @@ fn closure_ignores_arg(m: &ast::MethodCallExpr) -> bool {
         .is_some_and(|p| matches!(p, ast::Pat::WildcardPat(_)))
 }
 
+// `node` is the `s.parse()` / `T::from_str(s)` call.
 pub(super) fn parse_result(
     cx: &mut Cx,
-    m: &ast::MethodCallExpr,
+    node: &SyntaxNode,
     input: Expr,
     ret: &Ty,
     target: &Ty,
     line: u32,
     out: &mut Vec<Stmt>,
 ) -> Expr {
-    cx.pending_name = cx.take_let_target(m.syntax());
-    let e = parse_result_inner(cx, m, input, ret, target, line, out);
+    cx.pending_name = cx.take_let_target(node);
+    let e = parse_result_inner(cx, node, input, ret, target, line, out);
     cx.pending_name = None;
     e
 }
 
 fn parse_result_inner(
     cx: &mut Cx,
-    m: &ast::MethodCallExpr,
+    node: &SyntaxNode,
     input: Expr,
     ret: &Ty,
     target: &Ty,
@@ -784,7 +837,7 @@ fn parse_result_inner(
 ) -> Expr {
     match target.strip_refs() {
         Ty::Int(i) => {
-            let exact = !error_discarded(m);
+            let exact = !error_discarded(node);
             parse_int(cx, input, ret, *i, None, exact, line, out)
         }
         Ty::F32 | Ty::F64 => parse_float(
@@ -792,36 +845,43 @@ fn parse_result_inner(
             input,
             ret,
             target.strip_refs() == &Ty::F32,
-            !error_discarded(m),
+            !error_discarded(node),
             line,
             out,
         ),
+        // Exactly `true` or `false`, case included.
         Ty::Bool => {
             cx.needs_result = true;
             let ty = result_java(ret);
             let name = cx.result_name();
+            let s = cx.fresh("s");
             push_raw(
                 out,
                 line,
                 format!(
-                    "{ty} {name} = new Ok<>(Boolean.parseBoolean({}));",
+                    "String {s} = {}; {ty} {name} = {s}.equals(\"true\") || {s}.equals(\"false\") ? new Ok<>({s}.equals(\"true\")) : new Err<>(new NumberFormatException(\"provided string was not `true` or `false`\"));",
                     render(&input)
                 ),
             );
             Expr::name(name)
         }
+        // Exactly one char (a code point; one outside the BMP is unsupported).
         Ty::Char => {
             cx.needs_result = true;
             let ty = result_java(ret);
             let name = cx.result_name();
+            let s = cx.fresh("s");
             push_raw(
                 out,
                 line,
-                format!("{ty} {name} = new Ok<>({}.charAt(0));", render(&input)),
+                format!(
+                    "String {s} = {}; {ty} {name} = {s}.length() == 1 ? new Ok<>({s}.charAt(0)) : new Err<>(new NumberFormatException({s}.isEmpty() ? \"cannot parse char from empty string\" : \"too many characters in string\"));",
+                    render(&input)
+                ),
             );
             Expr::name(name)
         }
-        _ => cx.unsupported(m.syntax(), "`parse` to this type"),
+        _ => cx.unsupported(node, "`parse` to this type"),
     }
 }
 

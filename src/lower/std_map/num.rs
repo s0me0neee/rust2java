@@ -1740,6 +1740,7 @@ pub(super) fn lower_ordering_method(
         "is_gt" => Expr::bin(recv, ">", Expr::raw("0")),
         "is_ge" => Expr::bin(recv, ">=", Expr::raw("0")),
         "is_eq" => Expr::bin(recv, "==", Expr::raw("0")),
+        "is_ne" => Expr::bin(recv, "!=", Expr::raw("0")),
         "reverse" => Expr::Unary("-", Box::new(recv)),
         "to_string" => Expr::call(Expr::raw("String"), "valueOf", vec![recv]),
         "clone" => recv,

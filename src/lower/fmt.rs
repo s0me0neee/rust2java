@@ -1188,8 +1188,7 @@ fn std_error_name(ty: &Ty) -> Option<&str> {
     let Ty::Other(name) = ty.strip_refs() else {
         return None;
     };
-    if name.contains("ParseIntError")
-        || name.contains("ParseFloatError")
+    if crate::ty::is_parse_error_name(name)
         || name.contains("dyn Error")
         || name.contains("Box<dyn Error")
     {
@@ -1211,8 +1210,9 @@ fn parse_error_text(v: Expr) -> Expr {
     )
 }
 
-// One switch over the Display text; the messages of the int and float errors are disjoint.
-fn parse_debug_switch(msg: Expr) -> Expr {
+// One switch over the Display text; the messages of the parse errors are disjoint. `error` (the
+// type name) picks the arms: int and float share theirs, a `dyn Error` may be any of them.
+fn parse_debug_switch(msg: Expr, error: &str) -> Expr {
     let messages = [
         (
             "cannot parse integer from empty string",
@@ -1235,9 +1235,22 @@ fn parse_debug_switch(msg: Expr) -> Expr {
             "ParseFloatError { kind: Empty }",
         ),
         ("invalid float literal", "ParseFloatError { kind: Invalid }"),
+        ("provided string was not `true` or `false`", "ParseBoolError"),
+        ("cannot parse char from empty string", "ParseCharError { kind: EmptyString }"),
+        ("too many characters in string", "ParseCharError { kind: TooManyChars }"),
     ];
+    let kinds: &[&str] = if error.contains("ParseBoolError") {
+        &["ParseBool"]
+    } else if error.contains("ParseCharError") {
+        &["ParseChar"]
+    } else if error.contains("ParseIntError") || error.contains("ParseFloatError") {
+        &["ParseInt", "ParseFloat"]
+    } else {
+        &["Parse"]
+    };
     let mut arms: Vec<Arm> = messages
         .iter()
+        .filter(|(_, debug)| kinds.iter().any(|k| debug.starts_with(k)))
         .map(|(msg, debug)| Arm {
             line: 1,
             label: crate::emit::render_expr(&Expr::str_lit(msg)),
@@ -1261,8 +1274,8 @@ fn parse_debug_switch(msg: Expr) -> Expr {
 
 pub fn std_error_debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Option<Expr> {
     let name = std_error_name(ty)?;
-    if name.contains("ParseIntError") || name.contains("ParseFloatError") {
-        return Some(parse_debug_switch(parse_error_text(v)));
+    if crate::ty::is_parse_error_name(name) {
+        return Some(parse_debug_switch(parse_error_text(v), name));
     }
     let nf = cx.fresh("error");
     let s = cx.fresh("error");
@@ -1277,7 +1290,7 @@ pub fn std_error_debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Option<Expr> {
             Box::new(object.clone()),
             format!("NumberFormatException {nf}"),
         )),
-        Box::new(parse_debug_switch(parse_error_text(Expr::name(nf)))),
+        Box::new(parse_debug_switch(parse_error_text(Expr::name(nf)), name)),
         Box::new(Expr::Ternary(
             Box::new(Expr::InstanceOf(Box::new(object), format!("String {s}"))),
             Box::new(quoted),
@@ -1322,7 +1335,7 @@ pub fn std_error_display(cx: &mut Cx, v: Expr, ty: &Ty) -> Option<Expr> {
         return Some(io_error_text(cx, v));
     }
     let name = std_error_name(ty)?;
-    if name.contains("ParseIntError") || name.contains("ParseFloatError") {
+    if crate::ty::is_parse_error_name(name) {
         return Some(parse_error_text(v));
     }
     // Throws mode: a `dyn Error` is a caught exception whose message is the Display text.

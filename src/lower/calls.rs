@@ -194,6 +194,12 @@ pub fn lower_method_call(cx: &mut Cx, m: &ast::MethodCallExpr, out: &mut Vec<Stm
     }
     let target = cx.sema.resolve_method_call(m);
     if let Some(f) = target
+        && (!is_local_fn(cx, f) || is_derived(cx, f))
+        && let Some(e) = expr::lower_cmp_method(cx, m, f, out)
+    {
+        return e;
+    }
+    if let Some(f) = target
         && is_local_fn(cx, f)
     {
         if let Some(e) = items::lower_foreign_impl_call(cx, m, f, out) {
@@ -245,6 +251,61 @@ pub fn lower_method_call(cx: &mut Cx, m: &ast::MethodCallExpr, out: &mut Vec<Stm
         return e;
     }
     std_map::lower_std_method(cx, m, &recv_ty, &key, out)
+}
+
+// `R2J_STD_CALLS=<file>` appends the key of every std function a file names, for coverage reports.
+pub fn dump_std_calls(cx: &Cx, root: &ra_ap_syntax::SyntaxNode) {
+    let Some(path) = std::env::var_os("R2J_STD_CALLS") else { return };
+    let mut keys = Vec::new();
+    // Macro arguments count (`println!("{}", x.abs())`), the macro's own body doesn't (`vec!`'s `into_vec`).
+    let mut nodes = Vec::new();
+    let mut roots = vec![(root.clone(), false)];
+    while let Some((r, expanded)) = roots.pop() {
+        for n in r.descendants() {
+            if let Some(mc) = ast::MacroCall::cast(n.clone())
+                && let Some(exp) = cx.sema.expand_macro_call(&mc)
+            {
+                roots.push((exp.value, true));
+            } else if !expanded || cx.sema.original_range_opt(&n).is_some() {
+                nodes.push(n);
+            }
+        }
+    }
+    for n in nodes {
+        let f = if let Some(m) = ast::MethodCallExpr::cast(n.clone()) {
+            cx.sema.resolve_method_call(&m)
+        } else if let Some(p) = ast::PathExpr::cast(n) {
+            match p.path().and_then(|p| cx.sema.resolve_path(&p)) {
+                Some(PathResolution::Def(ModuleDef::Function(f))) => Some(f),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let Some(f) = f.filter(|&f| !is_local_fn(cx, f)) else { continue };
+        let mut key = std_fn_key(cx, f);
+        let name = f.name(cx.db).as_str().to_string();
+        if let Some(AssocItemContainer::Impl(imp)) = f.as_assoc_item(cx.db).map(|a| a.container(cx.db)) {
+            // A trait impl counts for the trait: `Chars::next` is `Iterator::next`.
+            if let Some(tr) = imp.trait_(cx.db) {
+                key = format!("{}::{name}", tr.name(cx.db).as_str());
+            } else if key.starts_with("?::") && imp.self_ty(cx.db).as_array(cx.db).is_some() {
+                key = format!("array::{name}");
+            }
+        }
+        // Free functions by their public top module: `iter::once`, not `sources::once::once`.
+        if f.as_assoc_item(cx.db).is_none()
+            && let Some(top) = f.module(cx.db).path_to_root(cx.db).iter().rev().nth(1)
+            && let Some(m) = top.name(cx.db)
+        {
+            key = format!("{}::{}", m.as_str(), f.name(cx.db).as_str());
+        }
+        keys.push(key + "\n");
+    }
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = file.write_all(keys.concat().as_bytes());
+    }
 }
 
 // The dependency a non-std function comes from (std, core and alloc are `Lang` crates).

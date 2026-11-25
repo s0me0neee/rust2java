@@ -350,6 +350,7 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
     cx.wide = wide::analyze(&cx, file.syntax());
     // Both modes: `T::default()` needs a `Supplier<T>` handed down from the call sites.
     generics::analyze(&mut cx, file.syntax());
+    calls::dump_std_calls(&cx, file.syntax());
     if crate::mode::simple() {
         cx.debug_to_string = items::debug_to_string_types(file.syntax());
         cx.mut_returns = mutret::analyze(&cx, file.syntax());

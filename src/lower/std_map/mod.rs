@@ -410,6 +410,9 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
         "mem::size_of" => return mem::mem_size_of(cx, c),
         "mem::replace" => return mem_replace(cx, c, &ret, false, out),
         "mem::take" => return mem_replace(cx, c, &ret, true, out),
+        "identity" | "convert::identity" => {
+            return expr::call_args(cx, c, out).pop().unwrap_or_else(|| Expr::raw("null"));
+        }
         "mem::drop" | "mem::forget" => {
             let mut args = expr::call_args(cx, c, out);
             if let Some(v) = args.pop()
@@ -863,7 +866,21 @@ pub fn lower_std_path(cx: &mut Cx, path: &ast::Path, def: ModuleDef) -> Expr {
         })
         .copied();
     match last {
-        "None" => return Expr::raw("Optional.empty()"),
+        // A receiver (`None::<i32>.map(..)`) has no target type to infer the witness from.
+        "None" => {
+            let pe = path.syntax().parent().and_then(ast::PathExpr::cast);
+            let receiver = pe.as_ref().is_some_and(|pe| {
+                pe.syntax().parent().and_then(ast::MethodCallExpr::cast).and_then(|m| m.receiver())
+                    .is_some_and(|r| r.syntax() == pe.syntax())
+            });
+            if receiver
+                && let Some(Ty::Option(t)) = pe.map(|pe| cx.ty(&ast::Expr::PathExpr(pe)))
+                && t.is_nameable()
+            {
+                return Expr::raw(format!("Optional.<{}>empty()", t.boxed()));
+            }
+            return Expr::raw("Optional.empty()");
+        }
         "Less" if text.contains("Ordering") => return Expr::raw("-1"),
         "Equal" if text.contains("Ordering") => return Expr::raw("0"),
         "Greater" if text.contains("Ordering") => return Expr::raw("1"),
@@ -974,8 +991,10 @@ pub fn lower_std_path(cx: &mut Cx, path: &ast::Path, def: ModuleDef) -> Expr {
             _ => {}
         }
     }
-    // `Reverse` and `Wrapping` are erased, so `.map(Reverse)` keeps the value.
-    if matches!(last, "Reverse" | "Wrapping") && matches!(def, ModuleDef::Adt(_)) {
+    // `Reverse` and `Wrapping` are erased, so `.map(Reverse)` keeps the value; so does `identity`.
+    if (matches!(last, "Reverse" | "Wrapping") && matches!(def, ModuleDef::Adt(_)))
+        || (last == "identity" && matches!(def, ModuleDef::Function(_)))
+    {
         let x = cx.fresh_param("x");
         cx.release_param(&x);
         return Expr::Lambda {
@@ -1208,6 +1227,33 @@ pub fn lower_std_method(
         Some(target) if deref_forward => (Expr::call(recv.clone(), "deref", vec![]), target),
         _ => (recv.clone(), t),
     };
+    // In-place updates of a primitive write the new value back: `b.toggle()` is `b = !b`.
+    let updated = match (&t, name.as_str()) {
+        (Ty::Bool, "toggle") => Some(Expr::Unary("!", Box::new(recv.clone()))),
+        (Ty::Char | Ty::Int(Int::U8), "make_ascii_uppercase" | "make_ascii_lowercase") => {
+            let to = name.replace("make_", "to_");
+            lower_small_method(cx, recv.clone(), &args, &t, &to, &t, line, out)
+        }
+        // `a.clone_from(&b)` is `a = b.clone()`.
+        (_, "clone_from") => args.first().cloned().map(|b| match &t {
+            Ty::Vec(elem) => coll::clone_list(cx, b, elem),
+            Ty::Adt { .. } => Expr::call(b, "clone", vec![]),
+            Ty::Map { ordered, .. } | Ty::Set { ordered, .. } => {
+                let class = match (&t, ordered) {
+                    (Ty::Map { .. }, true) => "TreeMap<>",
+                    (Ty::Map { .. }, false) => "HashMap<>",
+                    (_, true) => "TreeSet<>",
+                    _ => "HashSet<>",
+                };
+                Expr::New { ty: class.into(), args: vec![b] }
+            }
+            _ => b,
+        }),
+        _ => None,
+    };
+    if let Some(v) = updated {
+        return expr::place_assign(cx, &recv_ast, "=", v, out);
+    }
     let found = match &t {
         // `u8` ASCII tests and case maps share the char forms (a Java char is an int).
         Ty::Int(Int::U8)

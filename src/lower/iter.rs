@@ -787,6 +787,7 @@ fn collection_iterable(v: Expr, ty: &Ty) -> Expr {
             };
             Expr::call(Expr::call(v, "stream", vec![]), "toList", vec![])
         }
+        Ty::Result(..) => Expr::call(Expr::call(Expr::call(v, "ok", vec![]), "stream", vec![]), "toList", vec![]),
         _ => v,
     }
 }

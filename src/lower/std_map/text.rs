@@ -341,16 +341,28 @@ pub(super) fn lower_small_method(
             "clone" | "to_owned" => recv,
             // `c.then_some(v)` / `c.then(|| v)`: Some only when the condition holds.
             "then_some" | "then" => {
+                let inner = match ret.strip_refs() {
+                    Ty::Option(t) => Some(&**t),
+                    _ => None,
+                };
                 let value = if name == "then" {
-                    supplied(b0, ret)
+                    supplied(b0, inner.unwrap_or(&Ty::Other("Object".into())))
                 } else {
                     b0
                 };
-                let empty = match ret.strip_refs() {
-                    Ty::Option(t) => opt_empty(Some(t)),
-                    _ => opt_empty(None),
-                };
-                Expr::Ternary(Box::new(recv), Box::new(opt_of(value)), Box::new(empty))
+                Expr::Ternary(Box::new(recv), Box::new(opt_of(value)), Box::new(opt_empty(inner)))
+            }
+            // `c.ok_or(e)`: `Ok(())` when the condition holds.
+            "ok_or" | "ok_or_else" => {
+                let Ty::Result(ok, err) = ret.strip_refs() else { return None };
+                cx.needs_result = true;
+                let e = if name == "ok_or_else" { supplied(b0, err) } else { b0 };
+                let targs = format!("<{}, {}>", ok.boxed(), err.boxed());
+                Expr::Ternary(
+                    Box::new(recv),
+                    Box::new(Expr::raw(format!("new Ok{targs}(null)"))),
+                    Box::new(Expr::New { ty: format!("Err{targs}"), args: vec![e] }),
+                )
             }
             _ => return None,
         });
@@ -1176,11 +1188,11 @@ pub(super) fn parse_expr(
     if let Some(d) = direct_parse(cx, &ast::Expr::MethodCallExpr(m.clone())) {
         return lower_direct_parse(cx, d, vec![recv], line, out);
     }
-    super::option::parse_result(cx, m, recv, ret, &target, line, out)
+    super::option::parse_result(cx, m.syntax(), recv, ret, &target, line, out)
 }
 
 // The value a `FnOnce() -> T` argument produces: `|| expr` inlines to `expr`.
-fn supplied(f: Expr, ret: &Ty) -> Expr {
+fn supplied(f: Expr, value: &Ty) -> Expr {
     if let Expr::Lambda {
         params,
         body: crate::jir::LambdaBody::Expr(body),
@@ -1189,12 +1201,8 @@ fn supplied(f: Expr, ret: &Ty) -> Expr {
     {
         return (**body).clone();
     }
-    let t = match ret.strip_refs() {
-        Ty::Option(t) => t.boxed(),
-        _ => "Object".into(),
-    };
     Expr::call(
-        Expr::Cast(format!("Supplier<{t}>"), Box::new(f)),
+        Expr::Cast(format!("Supplier<{}>", value.boxed()), Box::new(f)),
         "get",
         vec![],
     )

@@ -281,7 +281,7 @@ fn fn_error(cx: &Cx, node: &SyntaxNode) -> Option<Ty> {
 // `from` is a std error with its own exception class, and the file has `impl From<from> for to`.
 fn from_conversion(cx: &Cx, node: &SyntaxNode, from: &Ty, to: &Ty) -> bool {
     let std_exception = match from.strip_refs() {
-        Ty::Other(n) => n.contains("ParseIntError") || n.contains("ParseFloatError") || is_io_error(from),
+        Ty::Other(n) => crate::ty::is_parse_error_name(n) || is_io_error(from),
         _ => false,
     };
     let Some(to_name) = user_error(to) else { return false };
@@ -556,7 +556,7 @@ fn ok_pat_inner(p: &ast::Pat) -> Option<ast::Pat> {
 // The Java exception an `Err` of this type travels as.
 pub fn exception_class(cx: &mut Cx, err: &Ty) -> String {
     match err.strip_refs() {
-        Ty::Other(n) if n.contains("ParseIntError") || n.contains("ParseFloatError") => {
+        Ty::Other(n) if crate::ty::is_parse_error_name(n) => {
             "NumberFormatException".into()
         }
         t if is_io_error(t) => {

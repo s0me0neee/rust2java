@@ -538,52 +538,7 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
     match op {
         BinaryOp::LogicOp(LogicOp::And) => Expr::bin(l, "&&", r),
         BinaryOp::LogicOp(LogicOp::Or) => Expr::bin(l, "||", r),
-        BinaryOp::CmpOp(CmpOp::Eq { negated }) => {
-            if is_ordering(&lt) || is_ordering(&rt) {
-                // `compareTo` may return any difference; only its sign is the Ordering.
-                let (l, r) = ordering_operands(l, &lt, r, &rt);
-                Expr::bin(l, if negated { "!=" } else { "==" }, r)
-            } else if lt.is_primitive() && rt.is_primitive() {
-                // Two boxed operands (`list.get(i) == list.get(j)`) would compare references.
-                let l = if maybe_boxed(&l) && maybe_boxed(&r) {
-                    Expr::Cast(lt.strip_refs().java(), Box::new(l))
-                } else {
-                    l
-                };
-                Expr::bin(l, if negated { "!=" } else { "==" }, r)
-            } else {
-                // Simple mode: `v.get(i) == Some(c)` is `i < v.size() && v.get(i) == c`.
-                let of = |e: &Expr| match e {
-                    Expr::Call { recv: Some(o), name, args }
-                        if matches!(&**o, Expr::Raw(s) if s == "Optional") && name.ends_with("of") && args.len() == 1 =>
-                    {
-                        Some(args[0].clone())
-                    }
-                    _ => None,
-                };
-                let eq = match (crate::mode::simple(), std_map::guarded_some(&l), of(&r), lt.strip_refs()) {
-                    (true, Some((cond, v)), Some(c), Ty::Option(inner)) => {
-                        let same = if inner.is_primitive() {
-                            let v = if maybe_boxed(&v) && maybe_boxed(&c) {
-                                Expr::Cast(inner.strip_refs().java(), Box::new(v))
-                            } else {
-                                v
-                            };
-                            Expr::bin(v, "==", c)
-                        } else {
-                            Expr::call(v, "equals", vec![c])
-                        };
-                        Expr::bin(cond, "&&", same)
-                    }
-                    _ => Expr::call(l, "equals", vec![r]),
-                };
-                if negated {
-                    Expr::Unary("!", Box::new(eq))
-                } else {
-                    eq
-                }
-            }
-        }
+        BinaryOp::CmpOp(CmpOp::Eq { negated }) => equality(&lt, l, &rt, r, negated),
         BinaryOp::CmpOp(CmpOp::Ord { ordering, strict }) => {
             let sym = match (ordering, strict) {
                 (ast::Ordering::Less, true) => "<",
@@ -591,24 +546,7 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
                 (ast::Ordering::Greater, true) => ">",
                 (ast::Ordering::Greater, false) => ">=",
             };
-            if is_ordering(&lt) || is_ordering(&rt) {
-                let (l, r) = ordering_operands(l, &lt, r, &rt);
-                Expr::bin(l, sym, r)
-            } else if let Some(cmp) = std_map::compare_expr(&lt, l.clone(), r.clone()) {
-                Expr::bin(cmp, sym, Expr::raw("0"))
-            } else if lt.is_primitive() {
-                Expr::bin(l, sym, r)
-            } else {
-                // `impl<T: Ord> Bag<T>`: the bound isn't on the Java class's `T`, so cast for compareTo.
-                let l = match lt.strip_refs() {
-                    Ty::Param(t) if impl_declared_param(cx, &lhs) => {
-                        Expr::Cast(format!("Comparable<{t}>"), Box::new(l))
-                    }
-                    _ => l,
-                };
-                let cmp = std_map::coll::ord_compare(cx, lt.strip_refs(), l, r);
-                Expr::bin(cmp, sym, Expr::raw("0"))
-            }
+            ordered(cx, &lhs, &lt, l, &rt, r, sym)
         }
         BinaryOp::ArithOp(a) => {
             if let Ty::Adt { .. } = lt.strip_refs() {
@@ -633,6 +571,103 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
         }
         BinaryOp::Assignment { .. } => unreachable!(),
     }
+}
+
+// `l == r` / `l != r` (also `a.eq(&b)`).
+pub(super) fn equality(lt: &Ty, l: Expr, rt: &Ty, r: Expr, negated: bool) -> Expr {
+    if is_ordering(lt) || is_ordering(rt) {
+        // `compareTo` may return any difference; only its sign is the Ordering.
+        let (l, r) = ordering_operands(l, lt, r, rt);
+        return Expr::bin(l, if negated { "!=" } else { "==" }, r);
+    }
+    if lt.is_primitive() && rt.is_primitive() {
+        // Two boxed operands (`list.get(i) == list.get(j)`) would compare references.
+        let l = if maybe_boxed(&l) && maybe_boxed(&r) {
+            Expr::Cast(lt.strip_refs().java(), Box::new(l))
+        } else {
+            l
+        };
+        return Expr::bin(l, if negated { "!=" } else { "==" }, r);
+    }
+    // Simple mode: `v.get(i) == Some(c)` is `i < v.size() && v.get(i) == c`.
+    let of = |e: &Expr| match e {
+        Expr::Call { recv: Some(o), name, args }
+            if matches!(&**o, Expr::Raw(s) if s == "Optional") && name.ends_with("of") && args.len() == 1 =>
+        {
+            Some(args[0].clone())
+        }
+        _ => None,
+    };
+    let eq = match (crate::mode::simple(), std_map::guarded_some(&l), of(&r), lt.strip_refs()) {
+        (true, Some((cond, v)), Some(c), Ty::Option(inner)) => {
+            let same = if inner.is_primitive() {
+                let v = if maybe_boxed(&v) && maybe_boxed(&c) {
+                    Expr::Cast(inner.strip_refs().java(), Box::new(v))
+                } else {
+                    v
+                };
+                Expr::bin(v, "==", c)
+            } else {
+                Expr::call(v, "equals", vec![c])
+            };
+            Expr::bin(cond, "&&", same)
+        }
+        _ => Expr::call(l, "equals", vec![r]),
+    };
+    if negated { Expr::Unary("!", Box::new(eq)) } else { eq }
+}
+
+// `l < r` and the other orderings (also `a.lt(&b)`).
+pub(super) fn ordered(cx: &mut Cx, lhs: &ast::Expr, lt: &Ty, l: Expr, rt: &Ty, r: Expr, sym: &'static str) -> Expr {
+    if is_ordering(lt) || is_ordering(rt) {
+        let (l, r) = ordering_operands(l, lt, r, rt);
+        return Expr::bin(l, sym, r);
+    }
+    if let Some(cmp) = std_map::compare_expr(lt, l.clone(), r.clone()) {
+        return Expr::bin(cmp, sym, Expr::raw("0"));
+    }
+    if lt.is_primitive() {
+        return Expr::bin(l, sym, r);
+    }
+    // `impl<T: Ord> Bag<T>`: the bound isn't on the Java class's `T`, so cast for compareTo.
+    let l = match lt.strip_refs() {
+        Ty::Param(t) if impl_declared_param(cx, lhs) => Expr::Cast(format!("Comparable<{t}>"), Box::new(l)),
+        _ => l,
+    };
+    let cmp = std_map::coll::ord_compare(cx, lt.strip_refs(), l, r);
+    Expr::bin(cmp, sym, Expr::raw("0"))
+}
+
+// `a.lt(&b)`, `a.eq(&b)`, …: the comparison traits' methods are their operators.
+pub fn lower_cmp_method(cx: &mut Cx, m: &ast::MethodCallExpr, f: ra_ap_hir::Function, out: &mut Vec<Stmt>) -> Option<Expr> {
+    let name = f.name(cx.db).as_str().to_string();
+    let sym = match name.as_str() {
+        "lt" => "<",
+        "le" => "<=",
+        "gt" => ">",
+        "ge" => ">=",
+        "eq" | "ne" => "",
+        _ => return None,
+    };
+    let assoc = ra_ap_hir::AsAssocItem::as_assoc_item(f, cx.db)?;
+    let tr = match assoc.container(cx.db) {
+        ra_ap_hir::AssocItemContainer::Trait(t) => t,
+        ra_ap_hir::AssocItemContainer::Impl(i) => i.trait_(cx.db)?,
+    };
+    if !matches!(tr.name(cx.db).as_str(), "PartialOrd" | "PartialEq") {
+        return None;
+    }
+    let lhs = m.receiver()?;
+    let rhs = m.arg_list()?.args().next()?;
+    let (lt, rt) = (cx.ty(&lhs), cx.ty(&rhs));
+    let l = lower_expr(cx, &lhs, out);
+    let r = lower_expr(cx, &rhs, out);
+    let l = std_map::ptr::content_value(cx, &lhs, l);
+    let r = std_map::ptr::content_value(cx, &rhs, r);
+    Some(match name.as_str() {
+        "eq" | "ne" => equality(&lt, l, &rt, r, name == "ne"),
+        _ => ordered(cx, &lhs, &lt, l, &rt, r, sym),
+    })
 }
 
 // Calls that hand back a collection element or other boxed value.
@@ -1077,6 +1112,18 @@ pub fn place_assign(
     }
 }
 
+// A closure's own parameter (`take_if(|x| *x > 10)`): the lambda receives the value, so reads are fine.
+fn closure_param(cx: &Cx, e: &ast::Expr) -> bool {
+    let Some(ip) = cx.local_of_path(e).and_then(|l| l.primary_source(cx.db).into_ident_pat()) else {
+        return false;
+    };
+    ip.syntax()
+        .ancestors()
+        .find_map(ast::Param::cast)
+        .and_then(|p| p.syntax().parent()?.parent())
+        .is_some_and(|n| ast::ClosureExpr::can_cast(n.kind()))
+}
+
 // A value produced by a call (`f()?`, `m.get_mut(k).unwrap()`), not a place Java could share.
 pub fn is_call_result(e: &ast::Expr) -> bool {
     match super::strip_parens(e) {
@@ -1149,7 +1196,8 @@ fn lower_prefix(cx: &mut Cx, p: &ast::PrefixExpr, out: &mut Vec<Stmt>) -> Expr {
                     .is_some_and(|l| cx.returned_params.contains(&l))
                 || cx
                     .local_of_path(&inner)
-                    .is_some_and(|l| cx.elem_aliases.contains_key(&l));
+                    .is_some_and(|l| cx.elem_aliases.contains_key(&l))
+                || closure_param(cx, &inner);
             if let Ty::Ref {
                 mutable: true,
                 inner: t,

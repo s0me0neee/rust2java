@@ -249,9 +249,16 @@ pub fn fn_call_method(params: usize, ret_unit: bool) -> &'static str {
     }
 }
 
-// `ParseIntError` / `ParseFloatError` in simple mode, spelled as Java's `NumberFormatException`.
+// The std `FromStr` errors: a `NumberFormatException` holding rustc's Display text.
+pub fn is_parse_error_name(name: &str) -> bool {
+    ["ParseIntError", "ParseFloatError", "ParseBoolError", "ParseCharError"]
+        .iter()
+        .any(|e| name.contains(e))
+}
+
+// A parse error in simple mode, spelled as Java's `NumberFormatException`.
 fn simple_parse_error(name: &str) -> bool {
-    crate::mode::simple() && (name.contains("ParseIntError") || name.contains("ParseFloatError"))
+    crate::mode::simple() && is_parse_error_name(name)
 }
 
 fn fn_interface(params: &[Ty], ret: &Ty) -> String {
