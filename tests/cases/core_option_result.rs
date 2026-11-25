@@ -105,6 +105,7 @@ fn main() {
     let t1 = Tag { name: "x".into(), n: 1 };
     let t2 = Tag { name: "x".into(), n: 2 };
     println!("{} {}", t1.eq(&t1.clone()), t1.eq(&t2));
+    println!("{} {} {}", 3.eq(&3), "ab".to_string().eq("ab"), 'x'.ne(&'x'));
     println!("{} {} {} {}", 3.lt(&4), 3.le(&3), 5.gt(&9), "b".ge("a"));
     println!("{} {}", 2.5f64.lt(&1.0), 'a'.gt(&'Z'));
     let mut target = Tag { name: "old".into(), n: 0 };

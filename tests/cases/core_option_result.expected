@@ -25,6 +25,7 @@ Less: ge=false le=true ne=true
 Equal: ge=true le=true ne=false
 Greater: ge=true le=false ne=true
 true false
+true true false
 true true false true
 false true
 Tag { name: "x", n: 2 }

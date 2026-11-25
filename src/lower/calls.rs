@@ -289,8 +289,14 @@ pub fn dump_std_calls(cx: &Cx, root: &ra_ap_syntax::SyntaxNode) {
             // A trait impl counts for the trait: `Chars::next` is `Iterator::next`.
             if let Some(tr) = imp.trait_(cx.db) {
                 key = format!("{}::{name}", tr.name(cx.db).as_str());
-            } else if key.starts_with("?::") && imp.self_ty(cx.db).as_array(cx.db).is_some() {
-                key = format!("array::{name}");
+            } else if key.starts_with("?::") {
+                // `impl<T, const N: usize> [T; N]` has no known length for `as_array`.
+                use ra_ap_hir::HirDisplay;
+                let target = cx.module.krate(cx.db).to_display_target(cx.db);
+                let shown = imp.self_ty(cx.db).display(cx.db, target).to_string();
+                if shown.starts_with('[') && shown.contains(';') {
+                    key = format!("array::{name}");
+                }
             }
         }
         // Free functions by their public top module: `iter::once`, not `sources::once::once`.
