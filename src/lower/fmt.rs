@@ -892,6 +892,11 @@ fn format_one(
     counts: &Counts,
     out: &mut Vec<Stmt>,
 ) -> Expr {
+    // A `FpCategory` is its variant name, which `{:?}` prints as is.
+    if matches!(ty.strip_refs(), Ty::Other(n) if n.contains("FpCategory")) {
+        let spec = Spec { kind: String::new(), ..spec.clone() };
+        return format_one(cx, node, v, &Ty::Str, &spec, counts, out);
+    }
     let width = counts.width.clone();
     let precision = counts.precision.clone();
     if matches!(ty.strip_refs(), Ty::Other(_))

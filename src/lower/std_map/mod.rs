@@ -451,6 +451,14 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
         "mem::swap" => return mem_swap(cx, c, out),
         "mem::replace" => return mem_replace(cx, c, &ret, false, out),
         "mem::take" => return mem_replace(cx, c, &ret, true, out),
+        "f64::from_bits" | "f32::from_bits" => {
+            let bits = expr::call_args(cx, c, out).pop().unwrap_or_else(|| Expr::raw("0"));
+            return if key == "f64::from_bits" {
+                Expr::call(Expr::raw("Double"), "longBitsToDouble", vec![bits])
+            } else {
+                Expr::call(Expr::raw("Float"), "intBitsToFloat", vec![bits])
+            };
+        }
         "OnceCell::new" => return Expr::raw("Optional.empty()"),
         // Storage for `format_into`, which Java's `String.valueOf` doesn't need.
         "NumBuffer::new" => return Expr::raw("new Object()"),
@@ -978,6 +986,10 @@ pub fn lower_std_path(cx: &mut Cx, path: &ast::Path, def: ModuleDef) -> Expr {
                 return Expr::raw(format!("Optional.<{}>empty()", t.boxed()));
             }
             return Expr::raw("Optional.empty()");
+        }
+        // A `FpCategory` is its variant name (see `f64::classify`).
+        "Nan" | "Infinite" | "Zero" | "Subnormal" | "Normal" if text.contains("FpCategory") => {
+            return Expr::str_lit(last);
         }
         "Less" if text.contains("Ordering") => return Expr::raw("-1"),
         "Equal" if text.contains("Ordering") => return Expr::raw("0"),

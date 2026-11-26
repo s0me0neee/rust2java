@@ -1195,6 +1195,18 @@ fn bit_width(i: Int) -> u32 {
 // `u32::from_be_bytes(b)`: the list folded most significant byte first.
 pub(super) fn from_bytes(key: &str, bytes: Expr) -> Option<Expr> {
     let (owner, name) = key.split_once("::")?;
+    // A float is the integer of its bits.
+    match owner {
+        "f64" => {
+            let bits = from_bytes(&format!("u64::{name}"), bytes)?;
+            return Some(Expr::call(Expr::raw("Double"), "longBitsToDouble", vec![bits]));
+        }
+        "f32" => {
+            let bits = from_bytes(&format!("u32::{name}"), bytes)?;
+            return Some(Expr::call(Expr::raw("Float"), "intBitsToFloat", vec![bits]));
+        }
+        _ => {}
+    }
     let i = Int::from_name(owner)?;
     // The supported targets are little-endian.
     let src = if name == "from_le_bytes" || name == "from_ne_bytes" {
@@ -1863,6 +1875,28 @@ pub(super) fn wrapping_int(recv: Expr, b: Expr, i: Int, name: &str) -> Expr {
 
 // ---- floats ----------------------------------------------------------------------------------
 
+const FLOAT_MIN_MAX: &str = "static double fmin(double a, double b) { return Double.isNaN(a) ? b : Double.isNaN(b) ? a : Math.min(a, b); } \
+static double fmax(double a, double b) { return Double.isNaN(a) ? b : Double.isNaN(b) ? a : Math.max(a, b); } \
+static float fmin(float a, float b) { return Float.isNaN(a) ? b : Float.isNaN(b) ? a : Math.min(a, b); } \
+static float fmax(float a, float b) { return Float.isNaN(a) ? b : Float.isNaN(b) ? a : Math.max(a, b); }";
+
+// Float operations Java's Math lacks, following Rust's definitions (f32 goes through double).
+const FLOAT_HELPERS: &str = "static double float_rem_euclid(double a, double b) { double r = a % b; return r < 0 ? r + Math.abs(b) : r; } \
+static double float_div_euclid(double a, double b) { \
+double q = a / b; q = q < 0 ? Math.ceil(q) : Math.floor(q); if (a % b < 0) return b > 0 ? q - 1 : q + 1; return q; } \
+static double float_asinh(double x) { double a = Math.abs(x), i = 1 / a; return Math.copySign(Math.log1p(a + a / (Math.hypot(1, i) + i)), x); } \
+static double float_acosh(double x) { return x < 1 ? Double.NaN : Math.log(x + Math.sqrt(x - 1) * Math.sqrt(x + 1)); } \
+static double float_atanh(double x) { return 0.5 * Math.log1p(2 * x / (1 - x)); } \
+static double float_log2(double x) { \
+if (x > 0 && x < Double.POSITIVE_INFINITY && (Double.doubleToRawLongBits(x) & 0xFFFFFFFFFFFFFL) == 0 && x >= Double.MIN_NORMAL) return Math.getExponent(x); \
+return Math.log(x) / Math.log(2); } \
+static String float_classify(double x, double minNormal) { \
+return Double.isNaN(x) ? \"Nan\" : Double.isInfinite(x) ? \"Infinite\" : x == 0 ? \"Zero\" : Math.abs(x) < minNormal ? \"Subnormal\" : \"Normal\"; } \
+static double float_midpoint(double a, double b) { \
+double lo = Double.MIN_NORMAL * 2, hi = Double.MAX_VALUE / 2; \
+if (Math.abs(a) <= hi && Math.abs(b) <= hi) return (a + b) / 2; \
+if (Math.abs(a) < lo) return a + b / 2; if (Math.abs(b) < lo) return a / 2 + b; return a / 2 + b / 2; }";
+
 pub(super) fn lower_float_method(
     cx: &mut Cx,
     recv: Expr,
@@ -1886,10 +1920,86 @@ pub(super) fn lower_float_method(
     };
     let b0 = args.first().cloned().unwrap_or_else(|| Expr::raw("0.0"));
     let b1 = args.get(1).cloned().unwrap_or_else(|| Expr::raw("0.0"));
+    let one = if f32 { "1.0f" } else { "1.0" };
+    let helper = |cx: &mut Cx| crate::lower::fmt::file_helper(cx, FLOAT_HELPERS.into());
     Some(match name {
         "abs" => math("abs", vec![recv]),
-        "min" => math("min", vec![recv, b0]),
-        "max" => math("max", vec![recv, b0]),
+        // Rust's min / max ignore a NaN operand; Java's return it. Simple mode and two literals
+        // keep `Math`.
+        "min" | "max" => {
+            let literal = |e: &Expr| matches!(e, Expr::Raw(r) if r.parse::<f64>().is_ok());
+            if crate::mode::simple() || (literal(&recv) && literal(&b0)) {
+                math(name, vec![recv, b0])
+            } else {
+                crate::lower::fmt::file_helper(cx, FLOAT_MIN_MAX.into());
+                Expr::static_call(format!("f{name}"), vec![recv, b0])
+            }
+        }
+        // `0.0.signum()` is 1.0 in Rust (only NaN has no sign).
+        "signum" => {
+            let a = render(&simple(cx, recv, &fty, line, out));
+            Expr::raw(format!("({cls}.isNaN({a}) ? {a} : Math.copySign({one}, {a}))"))
+        }
+        "mul_add" => math("fma", vec![recv, b0, b1]),
+        "rem_euclid" | "div_euclid" => {
+            helper(cx);
+            let call = Expr::static_call(format!("float_{name}"), vec![recv, b0]);
+            cast(call)
+        }
+        "sinh" | "cosh" | "tanh" | "cbrt" => cast(math(name, vec![recv])),
+        "exp_m1" => cast(math("expm1", vec![recv])),
+        "ln_1p" => cast(math("log1p", vec![recv])),
+        "exp2" => cast(math("pow", vec![Expr::raw("2.0"), recv])),
+        "asinh" | "acosh" | "atanh" | "log2" => {
+            helper(cx);
+            cast(Expr::static_call(format!("float_{name}"), vec![recv]))
+        }
+        // Rust's `log(b)` is `ln() / b.ln()`.
+        "log" => cast(Expr::bin(math("log", vec![recv]), "/", math("log", vec![b0]))),
+        "recip" => Expr::bin(Expr::raw(one), "/", recv),
+        "round_ties_even" => cast(math("rint", vec![recv])),
+        "next_up" => math("nextUp", vec![recv]),
+        "next_down" => math("nextDown", vec![recv]),
+        "is_sign_negative" | "is_sign_positive" => {
+            let bits = if f32 { "Float.floatToRawIntBits" } else { "Double.doubleToRawLongBits" };
+            let op = if name == "is_sign_negative" { "<" } else { ">=" };
+            Expr::raw(format!("({bits}({}) {op} 0)", render(&recv)))
+        }
+        "is_normal" | "is_subnormal" => {
+            let a = render(&simple(cx, recv, &fty, line, out));
+            Expr::raw(if name == "is_normal" {
+                format!("({a} != 0 && {cls}.isFinite({a}) && Math.abs({a}) >= {cls}.MIN_NORMAL)")
+            } else {
+                format!("({a} != 0 && Math.abs({a}) < {cls}.MIN_NORMAL)")
+            })
+        }
+        "classify" => {
+            helper(cx);
+            Expr::static_call("float_classify", vec![recv, Expr::raw(format!("{cls}.MIN_NORMAL"))])
+        }
+        "midpoint" if f32 => {
+            Expr::raw(format!("(float) (((double) {} + {}) / 2)", render(&recv), render(&b0)))
+        }
+        "midpoint" => {
+            helper(cx);
+            Expr::static_call("float_midpoint", vec![recv, b0])
+        }
+        "sin_cos" => {
+            let a = simple(cx, recv, &fty, line, out);
+            let (s, c) = (cast(math("sin", vec![a.clone()])), cast(math("cos", vec![a])));
+            super::super::expr::tuple_expr(cx, ret, vec![s, c])
+        }
+        "to_bits" => Expr::call(Expr::raw(cls), if f32 { "floatToRawIntBits" } else { "doubleToRawLongBits" }, vec![recv]),
+        "to_be_bytes" | "to_le_bytes" | "to_ne_bytes" => {
+            let bits = Expr::call(Expr::raw(cls), if f32 { "floatToRawIntBits" } else { "doubleToRawLongBits" }, vec![recv]);
+            let i = if f32 { Int::U32 } else { Int::U64 };
+            return lower_int_method(cx, bits, vec![], i, name, ret, line, out);
+        }
+        "algebraic_add" => Expr::bin(recv, "+", b0),
+        "algebraic_sub" => Expr::bin(recv, "-", b0),
+        "algebraic_mul" => Expr::bin(recv, "*", b0),
+        "algebraic_div" => Expr::bin(recv, "/", b0),
+        "algebraic_rem" => Expr::bin(recv, "%", b0),
         "sqrt" => cast(math("sqrt", vec![recv])),
         "floor" => cast(math("floor", vec![recv])),
         "ceil" => cast(math("ceil", vec![recv])),
@@ -1908,24 +2018,13 @@ pub(super) fn lower_float_method(
             )))
         }
         "powi" | "powf" => cast(math("pow", vec![recv, b0])),
-        "mul_add" => Expr::bin(Expr::bin(recv, "*", b0), "+", b1),
-        "rem_euclid" => {
-            let s = simple(cx, recv, &fty, line, out);
-            let r = render(&s);
-            let b = render(&b0);
-            Expr::raw(format!(
-                "({r} - Math.floor({r} / Math.abs({b})) * Math.abs({b}))"
-            ))
-        }
         "is_nan" => Expr::call(Expr::raw(cls), "isNaN", vec![recv]),
         "is_infinite" => Expr::call(Expr::raw(cls), "isInfinite", vec![recv]),
         "is_finite" => Expr::call(Expr::raw(cls), "isFinite", vec![recv]),
-        "signum" => cast(math("signum", vec![recv])),
         "copysign" => cast(math("copySign", vec![recv, b0])),
         "to_degrees" => cast(math("toDegrees", vec![recv])),
         "to_radians" => cast(math("toRadians", vec![recv])),
         "ln" => cast(math("log", vec![recv])),
-        "log2" => cast(math("log", vec![recv])),
         "log10" => cast(math("log10", vec![recv])),
         "exp" => cast(math("exp", vec![recv])),
         "sin" => cast(math("sin", vec![recv])),

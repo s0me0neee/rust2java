@@ -29,6 +29,9 @@ short_err_parse short_fmtw_width std_num
 # Java's double formatting: 1.0E16, Infinity.
 fmt_debug prog_fmtx
 
+# `f64::min`/`max` are Java's `Math.min`/`max`, which return a NaN operand (also unsigned bits).
+core_float_ops
+
 # Java's parse error text.
 prog_calc prog_stdin_stats err_display
 

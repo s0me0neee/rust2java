@@ -79,6 +79,11 @@ fn main() {
     let mut buf = NumBuffer::new();
     println!("{} {}", 1234i32.format_into(&mut buf), b8.is_negative());
 
+    // the signed / unsigned twins of the above
+    println!("{} {:?} {:?} {:?}", i16::from_le(0x0102), i32::from_le_bytes([1, 2, 0, 0]), (-8i32).highest_one(), 5i64.to_le_bytes());
+    println!("{} {} {:?} {} {}", u16::from_be(0x0102), 0x0102u16.to_be(), 40u8.lowest_one(), 7u32.to_le(), 7u8.trailing_ones());
+    println!("{:?} {}", 258u16.to_ne_bytes(), 99u64.format_into(&mut NumBuffer::new()));
+
     // strict overflow panics
     println!("{}", i8::MAX.strict_add(1));
     println!("unreachable");
