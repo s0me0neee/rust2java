@@ -452,6 +452,8 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
         "mem::replace" => return mem_replace(cx, c, &ret, false, out),
         "mem::take" => return mem_replace(cx, c, &ret, true, out),
         "OnceCell::new" => return Expr::raw("Optional.empty()"),
+        // Storage for `format_into`, which Java's `String.valueOf` doesn't need.
+        "NumBuffer::new" => return Expr::raw("new Object()"),
         "OnceCell::from" => {
             let v = expr::call_args(cx, c, out).pop().unwrap_or_else(|| Expr::raw("null"));
             return Expr::call(Expr::raw("Optional"), "of", vec![v]);
@@ -899,7 +901,10 @@ fn primitive_method_call(
     else {
         return None;
     };
-    f.self_param(cx.db)?;
+    // `i32::from_be(x)` takes the value as its argument, like a method's receiver.
+    if f.self_param(cx.db).is_none() && !matches!(name, "from_be" | "from_le") {
+        return None;
+    }
     let mut args = expr::call_args(cx, c, out);
     if args.is_empty() {
         return None;

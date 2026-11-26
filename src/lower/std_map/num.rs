@@ -904,7 +904,9 @@ pub(super) fn lower_int_method(
         }
         // Only the variants these helpers implement; anything else is reported, not guessed.
         "checked_add" | "checked_sub" | "checked_mul" | "checked_div" | "checked_rem"
-        | "checked_neg" | "checked_abs" => {
+        | "checked_neg" | "checked_abs"
+            if !(unsigned && name == "checked_neg") =>
+        {
             // Operands appear more than once in the overflow tests.
             let recv = simple(cx, recv, &Ty::Int(i), line, out);
             let b0 = simple(cx, b0, &Ty::Int(i), line, out);
@@ -921,8 +923,264 @@ pub(super) fn lower_int_method(
         | "wrapping_neg" | "wrapping_shl" | "wrapping_shr" | "wrapping_abs" => {
             Some(wrapping_int(recv, b0, i, name))
         }
-        _ => None,
+        _ => int_family(cx, recv, args, i, name, ret, line, out),
     }
+}
+
+// Exact integer arithmetic for the rarer methods: the operands' Rust values as BigIntegers, and
+// the result checked against, wrapped into or clamped to the type's range.
+const INT_HELPERS: &str = "static BigInteger int_val(long v, int bits, boolean signed) { \
+BigInteger b = BigInteger.valueOf(v); return signed ? b : b.and(BigInteger.ONE.shiftLeft(bits).subtract(BigInteger.ONE)); } \
+static BigInteger int_min(int bits, boolean signed) { return signed ? BigInteger.ONE.shiftLeft(bits - 1).negate() : BigInteger.ZERO; } \
+static BigInteger int_max(int bits, boolean signed) { return BigInteger.ONE.shiftLeft(signed ? bits - 1 : bits).subtract(BigInteger.ONE); } \
+static boolean int_fits(BigInteger r, int bits, boolean signed) { return r.compareTo(int_min(bits, signed)) >= 0 && r.compareTo(int_max(bits, signed)) <= 0; } \
+static long int_wrap(BigInteger r, int bits, boolean signed) { \
+BigInteger m = r.and(BigInteger.ONE.shiftLeft(bits).subtract(BigInteger.ONE)); \
+if (signed && m.testBit(bits - 1)) m = m.subtract(BigInteger.ONE.shiftLeft(bits)); return m.longValue(); } \
+static long int_sat(BigInteger r, int bits, boolean signed) { return r.max(int_min(bits, signed)).min(int_max(bits, signed)).longValue(); } \
+static long int_strict(BigInteger r, int bits, boolean signed) { \
+if (!int_fits(r, bits, signed)) throw new RuntimeException(\"arithmetic operation overflowed\"); return int_wrap(r, bits, signed); } \
+static <T> T int_panic(String m) { throw new RuntimeException(m); } \
+static BigInteger int_div_euclid(BigInteger x, BigInteger y) { \
+BigInteger q = x.divide(y); if (x.remainder(y).signum() < 0) q = y.signum() > 0 ? q.subtract(BigInteger.ONE) : q.add(BigInteger.ONE); return q; } \
+static int int_ilog(BigInteger v, long base) { \
+if (v.signum() <= 0) throw new RuntimeException(\"argument of integer logarithm must be positive\"); \
+BigInteger b = BigInteger.valueOf(base); int n = 0; while (v.compareTo(b) >= 0) { v = v.divide(b); n++; } return n; } \
+static BigInteger int_isqrt(BigInteger v) { \
+if (v.signum() < 0) throw new RuntimeException(\"argument of integer square root cannot be negative\"); return v.sqrt(); } \
+static BigInteger int_next_multiple(BigInteger x, BigInteger y) { BigInteger r = x.mod(y); return r.signum() == 0 ? x : x.add(y.subtract(r)); } \
+static BigInteger int_next_pow2(BigInteger x) { return x.compareTo(BigInteger.ONE) <= 0 ? BigInteger.ONE : BigInteger.ONE.shiftLeft(x.subtract(BigInteger.ONE).bitLength()); }";
+
+// The width a value of `i` really has here (`usize` lives in a Java int).
+fn storage_bits(i: Int) -> u32 {
+    match i {
+        Int::I8 | Int::U8 => 8,
+        Int::I16 | Int::U16 => 16,
+        Int::I32 | Int::U32 | Int::Isize | Int::Usize => 32,
+        _ => 64,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn int_family(
+    cx: &mut Cx,
+    recv: Expr,
+    args: Vec<Expr>,
+    i: Int,
+    name: &str,
+    ret: &Ty,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) -> Option<Expr> {
+    let bits = storage_bits(i);
+    let signed = !i.is_unsigned();
+    let t = Ty::Int(i);
+    let cast_to = |j: Int, e: String| if j.java() == "long" { e } else { format!("({}) {e}", j.java()) };
+    let cast = |e: String| cast_to(i, e);
+    // Pure helpers that don't need the operands lowered first.
+    match name {
+        "to_le" | "from_le" => return Some(recv),
+        "to_be" | "from_be" => return lower_int_method(cx, recv, args, i, "swap_bytes", ret, line, out),
+        "format_into" => return Some(Expr::call(Expr::raw("String"), "valueOf", vec![recv])),
+        _ => {}
+    }
+    // Nothing is emitted for a name this doesn't handle: the caller tries trait methods next.
+    let single = [
+        "ilog", "ilog2", "ilog10", "checked_ilog", "checked_ilog2", "checked_ilog10", "isqrt", "checked_isqrt",
+        "midpoint", "next_multiple_of", "checked_next_multiple_of", "checked_next_power_of_two", "bit_width",
+        "leading_ones", "trailing_ones", "highest_one", "lowest_one", "isolate_highest_one", "isolate_lowest_one",
+        "cast_signed", "cast_unsigned", "carrying_add", "borrowing_sub", "carrying_mul", "carrying_mul_add",
+        "checked_signed_diff",
+    ];
+    let family_ops = [
+        "add", "sub", "mul", "div", "rem", "div_euclid", "rem_euclid", "neg", "abs", "pow", "shl", "shr",
+        "add_signed", "sub_signed", "add_unsigned", "sub_unsigned",
+    ];
+    let family = ["checked_", "overflowing_", "saturating_", "strict_", "wrapping_", "unbounded_"]
+        .iter()
+        .any(|p| name.strip_prefix(p).is_some_and(|o| family_ops.contains(&o)));
+    if !single.contains(&name) && !family {
+        return None;
+    }
+    cx.import("java.math.BigInteger");
+    super::super::fmt::file_helper(cx, INT_HELPERS.into());
+    let a = render(&simple(cx, recv, &t, line, out));
+    let args: Vec<String> = args
+        .into_iter()
+        .map(|e| render(&simple(cx, e, &Ty::Other("?".into()), line, out)))
+        .collect();
+    let b = args.first().cloned().unwrap_or_else(|| "0".into());
+    let val = |e: &str, s: bool| format!("int_val({e}, {bits}, {s})");
+    let fits = |r: &str, s: bool| format!("int_fits({r}, {bits}, {s})");
+    let wrap = |r: &str, s: bool| format!("int_wrap({r}, {bits}, {s})");
+    let empty = |ty: &Ty| render(&opt_empty(Some(ty)));
+    let opt_u32 = Ty::Int(Int::U32);
+    let ternary = |c: String, y: String, n: String| Expr::raw(format!("({c} ? {y} : {n})"));
+    let some = |e: String| format!("Optional.of({e})");
+    let local = |cx: &mut Cx, out: &mut Vec<Stmt>, e: String| {
+        let r = cx.fresh("r");
+        push_raw(out, line, format!("BigInteger {r} = {e};"));
+        r
+    };
+    match name {
+        "ilog" | "ilog2" | "ilog10" | "checked_ilog" | "checked_ilog2" | "checked_ilog10" => {
+            let base = match name.trim_start_matches("checked_") {
+                "ilog2" => "2".to_string(),
+                "ilog10" => "10".to_string(),
+                _ => b.clone(),
+            };
+            let v = val(&a, signed);
+            let log = format!("int_ilog({v}, {base})");
+            return Some(if name.starts_with("checked_") {
+                ternary(format!("{v}.signum() <= 0"), empty(&opt_u32), some(log))
+            } else {
+                Expr::raw(log)
+            });
+        }
+        "isqrt" | "checked_isqrt" => {
+            let v = val(&a, signed);
+            let root = cast(format!("int_isqrt({v}).longValue()"));
+            return Some(if name == "isqrt" {
+                Expr::raw(root)
+            } else {
+                ternary(format!("{v}.signum() < 0"), empty(&t), some(root))
+            });
+        }
+        "midpoint" => {
+            let sum = format!("{}.add({})", val(&a, signed), val(&b, signed));
+            return Some(Expr::raw(cast(format!("{sum}.divide(BigInteger.TWO).longValue()"))));
+        }
+        "next_multiple_of" | "checked_next_multiple_of" => {
+            let r = format!("int_next_multiple({}, {})", val(&a, signed), val(&b, signed));
+            if name == "next_multiple_of" {
+                return Some(Expr::raw(cast(wrap(&r, signed))));
+            }
+            let r = local(cx, out, format!("{b} == 0 ? null : {r}"));
+            let ok = format!("{r} != null && {}", fits(&r, signed));
+            return Some(ternary(ok, some(cast(wrap(&r, signed))), empty(&t)));
+        }
+        "checked_next_power_of_two" => {
+            let r = local(cx, out, format!("int_next_pow2({})", val(&a, signed)));
+            return Some(ternary(fits(&r, signed), some(cast(wrap(&r, signed))), empty(&t)));
+        }
+        "bit_width" => return Some(Expr::raw(format!("{}.bitLength()", val(&a, false)))),
+        "leading_ones" => return Some(Expr::raw(format!("({bits} - {}.bitLength())", val(&format!("~{a}"), false)))),
+        "trailing_ones" => return Some(Expr::raw(format!("Math.min({bits}, Long.numberOfTrailingZeros(~(long) {a}))"))),
+        "highest_one" | "lowest_one" => {
+            let at = if name == "highest_one" {
+                format!("{}.bitLength() - 1", val(&a, false))
+            } else {
+                format!("Long.numberOfTrailingZeros({a})")
+            };
+            return Some(ternary(format!("{a} == 0"), empty(&opt_u32), some(at)));
+        }
+        "isolate_highest_one" => {
+            let top = format!("BigInteger.ONE.shiftLeft({}.bitLength() - 1)", val(&a, false));
+            return Some(Expr::raw(cast(format!("({a} == 0 ? 0 : {})", wrap(&top, signed)))));
+        }
+        "isolate_lowest_one" => return Some(Expr::raw(cast(format!("({a} & -{a})")))),
+        "cast_signed" | "cast_unsigned" => {
+            let Ty::Int(to) = ret.strip_refs() else { return None };
+            let r = format!("int_wrap({}, {bits}, {})", val(&a, signed), name == "cast_signed");
+            return Some(Expr::raw(cast_to(*to, r)));
+        }
+        // `(low, carry)` / `(low, high)`: the exact sum or product split at the type's width.
+        "carrying_add" | "borrowing_sub" | "carrying_mul" | "carrying_mul_add" => {
+            let c = args.get(1).cloned().unwrap_or_else(|| "false".into());
+            let exact = match name {
+                "carrying_add" => format!("{}.add({}).add(BigInteger.valueOf({c} ? 1 : 0))", val(&a, signed), val(&b, signed)),
+                "borrowing_sub" => format!("{}.subtract({}).subtract(BigInteger.valueOf({c} ? 1 : 0))", val(&a, signed), val(&b, signed)),
+                "carrying_mul" => format!("{}.multiply({}).add({})", val(&a, signed), val(&b, signed), val(&c, signed)),
+                _ => {
+                    let d = args.get(2).cloned().unwrap_or_else(|| "0".into());
+                    format!("{}.multiply({}).add({}).add({})", val(&a, signed), val(&b, signed), val(&c, signed), val(&d, signed))
+                }
+            };
+            let r = local(cx, out, exact);
+            let second = if name.ends_with("mul") || name.ends_with("mul_add") {
+                cast(wrap(&format!("{r}.shiftRight({bits})"), signed))
+            } else {
+                format!("!{}", fits(&r, signed))
+            };
+            return Some(super::super::expr::tuple_expr(cx, ret, vec![Expr::raw(cast(wrap(&r, signed))), Expr::raw(second)]));
+        }
+        "checked_signed_diff" => {
+            let Ty::Option(to) = ret.strip_refs() else { return None };
+            let Ty::Int(to) = to.strip_refs() else { return None };
+            let r = local(cx, out, format!("{}.subtract({})", val(&a, false), val(&b, false)));
+            let v = cast_to(*to, format!("int_wrap({r}, {bits}, true)"));
+            return Some(ternary(format!("int_fits({r}, {bits}, true)"), some(v), empty(&Ty::Int(*to))));
+        }
+        _ => {}
+    }
+    let (mode, op) = ["checked_", "overflowing_", "saturating_", "strict_", "wrapping_", "unbounded_"]
+        .iter()
+        .find_map(|p| name.strip_prefix(p).map(|o| (p.trim_end_matches('_'), o)))?;
+    // Shifts: the amount, not the value, can overflow.
+    if matches!(op, "shl" | "shr") {
+        let wrapped = render(&wrapping_int(Expr::raw(a.clone()), Expr::raw(b.clone()), i, &format!("wrapping_{op}")));
+        let over = format!("{b} >= {bits}");
+        return Some(match mode {
+            "checked" => ternary(over, empty(&t), some(wrapped)),
+            "overflowing" => super::super::expr::tuple_expr(cx, ret, vec![Expr::raw(wrapped), Expr::raw(over)]),
+            "strict" => ternary(over, "int_panic(\"attempt to shift with overflow\")".into(), wrapped),
+            "unbounded" => {
+                let fill = if op == "shr" && signed { format!("({a} < 0 ? -1 : 0)") } else { "0".into() };
+                Expr::raw(cast(format!("({over} ? {fill} : {wrapped})")))
+            }
+            _ => return None,
+        });
+    }
+    let x = val(&a, signed);
+    let y = |s: bool| val(&b, s);
+    let exact = match op {
+        "add" => format!("{x}.add({})", y(signed)),
+        "sub" => format!("{x}.subtract({})", y(signed)),
+        "mul" => format!("{x}.multiply({})", y(signed)),
+        "div" => format!("{x}.divide({})", y(signed)),
+        "rem" => format!("{x}.remainder({})", y(signed)),
+        "div_euclid" => format!("int_div_euclid({x}, {})", y(signed)),
+        "rem_euclid" => format!("{x}.mod({}.abs())", y(signed)),
+        "neg" => format!("{x}.negate()"),
+        "abs" => format!("{x}.abs()"),
+        "pow" => format!("{x}.pow({b})"),
+        "add_signed" | "add_unsigned" => format!("{x}.add({})", y(op == "add_signed")),
+        "sub_signed" | "sub_unsigned" => format!("{x}.subtract({})", y(op == "sub_signed")),
+        _ => return None,
+    };
+    let divides = matches!(op, "div" | "rem" | "div_euclid" | "rem_euclid");
+    let guarded = mode == "checked" && divides;
+    let r = local(cx, out, if guarded { format!("{b} == 0 ? null : {exact}") } else { exact });
+    let value = cast(wrap(&r, signed));
+    // `MIN % -1` is 0, yet Rust reports it as overflowing (the division would).
+    let in_range = if signed && matches!(op, "rem" | "rem_euclid") {
+        let min = match i.java() {
+            "byte" => "-128",
+            "short" => "-32768",
+            "long" => "Long.MIN_VALUE",
+            _ => "Integer.MIN_VALUE",
+        };
+        format!("!({a} == {min} && {b} == -1)")
+    } else {
+        fits(&r, signed)
+    };
+    Some(match mode {
+        "checked" => {
+            let ok = if guarded { format!("{r} != null && {in_range}") } else { in_range };
+            ternary(ok, some(value), empty(&t))
+        }
+        "overflowing" => {
+            let flag = format!("!({in_range})");
+            super::super::expr::tuple_expr(cx, ret, vec![Expr::raw(value), Expr::raw(flag)])
+        }
+        "saturating" => Expr::raw(cast(format!("int_sat({r}, {bits}, {signed})"))),
+        "strict" if signed && matches!(op, "rem" | "rem_euclid") => {
+            ternary(in_range, value, "int_panic(\"attempt to calculate the remainder with overflow\")".into())
+        }
+        "strict" => Expr::raw(cast(format!("int_strict({r}, {bits}, {signed})"))),
+        "wrapping" => Expr::raw(value),
+        _ => return None,
+    })
 }
 
 fn bit_width(i: Int) -> u32 {
@@ -938,7 +1196,8 @@ fn bit_width(i: Int) -> u32 {
 pub(super) fn from_bytes(key: &str, bytes: Expr) -> Option<Expr> {
     let (owner, name) = key.split_once("::")?;
     let i = Int::from_name(owner)?;
-    let src = if name == "from_le_bytes" {
+    // The supported targets are little-endian.
+    let src = if name == "from_le_bytes" || name == "from_ne_bytes" {
         Expr::call(bytes, "reversed", vec![])
     } else {
         bytes
@@ -1580,11 +1839,23 @@ pub(super) fn wrapping_int(recv: Expr, b: Expr, i: Int, name: &str) -> Expr {
         "wrapping_div" => narrow(Expr::bin(recv, "/", b), i),
         "wrapping_rem" => narrow(Expr::bin(recv, "%", b), i),
         "wrapping_neg" => narrow(Expr::Unary("-", Box::new(recv)), i),
-        "wrapping_shl" => narrow(Expr::bin(recv, "<<", b), i),
-        "wrapping_shr" => narrow(
-            Expr::bin(recv, if i.is_unsigned() { ">>>" } else { ">>" }, b),
-            i,
-        ),
+        // Rust masks the amount to the type's width; Java masks to 31 / 63.
+        "wrapping_shl" | "wrapping_shr" => {
+            let width = storage_bits(i);
+            let b = match literal_int(&b) {
+                Some(n) if n >= 0 && n < width as i128 => b,
+                _ => Expr::bin(b, "&", Expr::raw((width - 1).to_string())),
+            };
+            if name == "wrapping_shl" {
+                wrap(Expr::bin(recv, "<<", b))
+            } else if i.is_unsigned() {
+                // A `u16` is a sign-extended Java short: shift its unsigned value.
+                let v = if matches!(i, Int::U16) { Expr::bin(recv, "&", Expr::raw("0xFFFF")) } else { recv };
+                narrow(Expr::bin(v, ">>>", b), i)
+            } else {
+                narrow(Expr::bin(recv, ">>", b), i)
+            }
+        }
         "wrapping_abs" => narrow(Expr::call(Expr::raw("Math"), "abs", vec![recv]), i),
         _ => recv,
     }

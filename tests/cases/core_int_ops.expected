@@ -1,0 +1,47 @@
+None Some(-100) None Some(-305)
+None Some(-43) Some(1)
+Some(32) None Some(-1) None
+Some(3) None Some(2) None
+Some(127) None None
+None Some(255) Some(307)
+None Some(6) Some(6) Some(3)
+Some(0) None None
+Some(250) Some(252) None
+Some(128) None None
+None Some(0) Some(9)
+(-128, true) (127, true) (-56, true)
+(-56, true) (-2147483648, true) (-2147483648, true)
+(0, true) (0, true) (300, false)
+(-13, true) (-56, true) (-500000000000, true)
+(44, true) (-44, true)
+(3, true) (15, true) (244, true)
+(42, false) (42, false) (6, false)
+(6, false) (251, true) (0, true)
+(2, true) (500000, true) (4, true) (255, true)
+127 127 2147483647 32767
+127 -128
+255 0 42 255
+100 127 127 121
+-42 -43 -6 1
+-100 1099511627776 1073741824 -62500000000
+127 -128
+255 241 255 42
+42 6 6 0
+59049 128 1250000000 0 18
+-128 0 -2 -1
+244 0 0
+4 10 4 9
+7 8 70710 1000
+-1 1 0 129
+43 12 8
+8 12 3 5
+Some(6) None Some(3) None
+4 2 -32768 32
+-128 2014458966 13330
+13330 4660 67305985 258
+[1, 2] [2, 1, 0, 0] [2, 1, 0, 0]
+258 16909060 1 258
+(4, true) (65534, true) (0, false)
+(95, 2) (195, 2)
+-56 200 -25536 15
+1234 false
