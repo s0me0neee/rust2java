@@ -599,14 +599,24 @@ pub(super) fn equality(lt: &Ty, l: Expr, rt: &Ty, r: Expr, negated: bool) -> Exp
     }
     // Simple mode: `v.get(i) == Some(c)` is `i < v.size() && v.get(i) == c`.
     let of = |e: &Expr| match e {
-        Expr::Call { recv: Some(o), name, args }
-            if matches!(&**o, Expr::Raw(s) if s == "Optional") && name.ends_with("of") && args.len() == 1 =>
+        Expr::Call {
+            recv: Some(o),
+            name,
+            args,
+        } if matches!(&**o, Expr::Raw(s) if s == "Optional")
+            && name.ends_with("of")
+            && args.len() == 1 =>
         {
             Some(args[0].clone())
         }
         _ => None,
     };
-    let eq = match (crate::mode::simple(), std_map::guarded_some(&l), of(&r), lt.strip_refs()) {
+    let eq = match (
+        crate::mode::simple(),
+        std_map::guarded_some(&l),
+        of(&r),
+        lt.strip_refs(),
+    ) {
         (true, Some((cond, v)), Some(c), Ty::Option(inner)) => {
             let same = if inner.is_primitive() {
                 let v = if maybe_boxed(&v) && maybe_boxed(&c) {
@@ -622,11 +632,23 @@ pub(super) fn equality(lt: &Ty, l: Expr, rt: &Ty, r: Expr, negated: bool) -> Exp
         }
         _ => Expr::call(l, "equals", vec![r]),
     };
-    if negated { Expr::Unary("!", Box::new(eq)) } else { eq }
+    if negated {
+        Expr::Unary("!", Box::new(eq))
+    } else {
+        eq
+    }
 }
 
 // `l < r` and the other orderings (also `a.lt(&b)`).
-pub(super) fn ordered(cx: &mut Cx, lhs: &ast::Expr, lt: &Ty, l: Expr, rt: &Ty, r: Expr, sym: &'static str) -> Expr {
+pub(super) fn ordered(
+    cx: &mut Cx,
+    lhs: &ast::Expr,
+    lt: &Ty,
+    l: Expr,
+    rt: &Ty,
+    r: Expr,
+    sym: &'static str,
+) -> Expr {
     if is_ordering(lt) || is_ordering(rt) {
         let (l, r) = ordering_operands(l, lt, r, rt);
         return Expr::bin(l, sym, r);
@@ -639,7 +661,9 @@ pub(super) fn ordered(cx: &mut Cx, lhs: &ast::Expr, lt: &Ty, l: Expr, rt: &Ty, r
     }
     // `impl<T: Ord> Bag<T>`: the bound isn't on the Java class's `T`, so cast for compareTo.
     let l = match lt.strip_refs() {
-        Ty::Param(t) if impl_declared_param(cx, lhs) => Expr::Cast(format!("Comparable<{t}>"), Box::new(l)),
+        Ty::Param(t) if impl_declared_param(cx, lhs) => {
+            Expr::Cast(format!("Comparable<{t}>"), Box::new(l))
+        }
         _ => l,
     };
     let cmp = std_map::coll::ord_compare(cx, lt.strip_refs(), l, r);
@@ -647,7 +671,12 @@ pub(super) fn ordered(cx: &mut Cx, lhs: &ast::Expr, lt: &Ty, l: Expr, rt: &Ty, r
 }
 
 // `a.lt(&b)`, `a.eq(&b)`, …: the comparison traits' methods are their operators.
-pub fn lower_cmp_method(cx: &mut Cx, m: &ast::MethodCallExpr, f: ra_ap_hir::Function, out: &mut Vec<Stmt>) -> Option<Expr> {
+pub fn lower_cmp_method(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    f: ra_ap_hir::Function,
+    out: &mut Vec<Stmt>,
+) -> Option<Expr> {
     let name = f.name(cx.db).as_str().to_string();
     let sym = match name.as_str() {
         "lt" => "<",
@@ -769,7 +798,13 @@ fn op_trait_method(a: ast::ArithOp) -> &'static str {
 pub(super) fn option_ref_method(name: &str) -> bool {
     matches!(
         name,
-        "as_mut" | "get_or_insert" | "get_or_insert_with" | "get_or_insert_default" | "insert" | "get_mut" | "get_or_init"
+        "as_mut"
+            | "get_or_insert"
+            | "get_or_insert_with"
+            | "get_or_insert_default"
+            | "insert"
+            | "get_mut"
+            | "get_or_init"
     )
 }
 
@@ -797,7 +832,9 @@ fn option_ref_place(cx: &mut Cx, inner: &ast::Expr, out: &mut Vec<Stmt>) -> Opti
         None
     })?;
     let target_ast = match &init {
-        ast::Expr::MethodCallExpr(mc) if option_ref_method(&mc.name_ref()?.text()) => mc.receiver()?,
+        ast::Expr::MethodCallExpr(mc) if option_ref_method(&mc.name_ref()?.text()) => {
+            mc.receiver()?
+        }
         ast::Expr::MethodCallExpr(_) => return None,
         e if ip.ref_token().is_some() && ip.mut_token().is_some() => e.clone(),
         _ => return None,
@@ -935,7 +972,13 @@ pub(super) fn is_duration(t: &Ty) -> bool {
 }
 
 // `Duration` arithmetic: + and - with another Duration, * and / by an integer.
-fn duration_op(cx: &mut Cx, a: ast::ArithOp, l: Expr, r: Expr, node: &ra_ap_syntax::SyntaxNode) -> Expr {
+fn duration_op(
+    cx: &mut Cx,
+    a: ast::ArithOp,
+    l: Expr,
+    r: Expr,
+    node: &ra_ap_syntax::SyntaxNode,
+) -> Expr {
     let m = match a {
         ast::ArithOp::Add => "plus",
         ast::ArithOp::Sub => "minus",
@@ -1016,7 +1059,9 @@ pub fn place_assign(
             super::ElemAliasKind::Entry => Expr::call(list, "setValue", vec![value]),
             super::ElemAliasKind::Map => Expr::call(list, "put", vec![idx, value]),
             super::ElemAliasKind::List => Expr::call(list, "set", vec![idx, value]),
-            super::ElemAliasKind::Char => cx.unsupported(lhs.syntax(), "assignment to a string's char"),
+            super::ElemAliasKind::Char => {
+                cx.unsupported(lhs.syntax(), "assignment to a string's char")
+            }
         };
     }
     match lhs {
@@ -1166,7 +1211,12 @@ pub fn place_assign(
 
 // `Wrapping` / `Reverse` from std, which Java erases to the value they hold.
 pub(super) fn erased_wrapper(cx: &Cx, e: &ast::Expr) -> Option<&'static str> {
-    let adt = cx.sema.type_of_expr(e)?.original.strip_references().as_adt()?;
+    let adt = cx
+        .sema
+        .type_of_expr(e)?
+        .original
+        .strip_references()
+        .as_adt()?;
     if adt.module(cx.db).krate(cx.db).origin(cx.db).is_local() {
         return None;
     }
@@ -1180,7 +1230,10 @@ pub(super) fn erased_wrapper(cx: &Cx, e: &ast::Expr) -> Option<&'static str> {
 // A closure's own parameter (`take_if(|x| *x > 10)`), or a never-written binding out of a call's
 // result (`let (_, mid, _) = v.select_nth_unstable(i)`): it holds the value, so reads are fine.
 fn closure_param(cx: &Cx, e: &ast::Expr) -> bool {
-    let Some(ip) = cx.local_of_path(e).and_then(|l| l.primary_source(cx.db).into_ident_pat()) else {
+    let Some(ip) = cx
+        .local_of_path(e)
+        .and_then(|l| l.primary_source(cx.db).into_ident_pat())
+    else {
         return false;
     };
     let in_closure = ip
@@ -1267,9 +1320,9 @@ fn lower_prefix(cx: &mut Cx, p: &ast::PrefixExpr, out: &mut Vec<Stmt>) -> Expr {
             let resolved = |cx: &Cx| {
                 cx.cell_path(&inner).is_some()
                     || cx.handle_path(&inner).is_some()
-                    || cx
-                        .local_of_path(&inner)
-                        .is_some_and(|l| cx.returned_params.contains(&l) || cx.elem_aliases.contains_key(&l))
+                    || cx.local_of_path(&inner).is_some_and(|l| {
+                        cx.returned_params.contains(&l) || cx.elem_aliases.contains_key(&l)
+                    })
                     || closure_param(cx, &inner)
             };
             if let Ty::Ref {
@@ -1638,7 +1691,9 @@ fn lower_cast(cx: &mut Cx, c: &ast::CastExpr, out: &mut Vec<Stmt>) -> Expr {
     let unbox = maybe_boxed(&v) && from.is_primitive() && to.is_primitive() && narrowing;
     // Only a cast applied to the boxed value itself needs it (`(char) (x & 0xFF)` already unboxes).
     let fix = |e: Expr| match e {
-        Expr::Cast(t, inner) if unbox && crate::emit::render_expr(&inner) == crate::emit::render_expr(&v) => {
+        Expr::Cast(t, inner)
+            if unbox && crate::emit::render_expr(&inner) == crate::emit::render_expr(&v) =>
+        {
             Expr::Cast(t, Box::new(Expr::Cast(fj.clone(), inner)))
         }
         e => e,

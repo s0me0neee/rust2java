@@ -976,30 +976,84 @@ fn int_family(
     let bits = storage_bits(i);
     let signed = !i.is_unsigned();
     let t = Ty::Int(i);
-    let cast_to = |j: Int, e: String| if j.java() == "long" { e } else { format!("({}) {e}", j.java()) };
+    let cast_to = |j: Int, e: String| {
+        if j.java() == "long" {
+            e
+        } else {
+            format!("({}) {e}", j.java())
+        }
+    };
     let cast = |e: String| cast_to(i, e);
     // Pure helpers that don't need the operands lowered first.
     match name {
         "to_le" | "from_le" => return Some(recv),
-        "to_be" | "from_be" => return lower_int_method(cx, recv, args, i, "swap_bytes", ret, line, out),
+        "to_be" | "from_be" => {
+            return lower_int_method(cx, recv, args, i, "swap_bytes", ret, line, out);
+        }
         "format_into" => return Some(Expr::call(Expr::raw("String"), "valueOf", vec![recv])),
         _ => {}
     }
     // Nothing is emitted for a name this doesn't handle: the caller tries trait methods next.
     let single = [
-        "ilog", "ilog2", "ilog10", "checked_ilog", "checked_ilog2", "checked_ilog10", "isqrt", "checked_isqrt",
-        "midpoint", "next_multiple_of", "checked_next_multiple_of", "checked_next_power_of_two", "bit_width",
-        "leading_ones", "trailing_ones", "highest_one", "lowest_one", "isolate_highest_one", "isolate_lowest_one",
-        "cast_signed", "cast_unsigned", "carrying_add", "borrowing_sub", "carrying_mul", "carrying_mul_add",
+        "ilog",
+        "ilog2",
+        "ilog10",
+        "checked_ilog",
+        "checked_ilog2",
+        "checked_ilog10",
+        "isqrt",
+        "checked_isqrt",
+        "midpoint",
+        "next_multiple_of",
+        "checked_next_multiple_of",
+        "checked_next_power_of_two",
+        "bit_width",
+        "leading_ones",
+        "trailing_ones",
+        "highest_one",
+        "lowest_one",
+        "isolate_highest_one",
+        "isolate_lowest_one",
+        "cast_signed",
+        "cast_unsigned",
+        "carrying_add",
+        "borrowing_sub",
+        "carrying_mul",
+        "carrying_mul_add",
         "checked_signed_diff",
     ];
     let family_ops = [
-        "add", "sub", "mul", "div", "rem", "div_euclid", "rem_euclid", "neg", "abs", "pow", "shl", "shr",
-        "add_signed", "sub_signed", "add_unsigned", "sub_unsigned",
+        "add",
+        "sub",
+        "mul",
+        "div",
+        "rem",
+        "div_euclid",
+        "rem_euclid",
+        "neg",
+        "abs",
+        "pow",
+        "shl",
+        "shr",
+        "add_signed",
+        "sub_signed",
+        "add_unsigned",
+        "sub_unsigned",
     ];
-    let family = ["checked_", "overflowing_", "saturating_", "strict_", "wrapping_", "unbounded_"]
-        .iter()
-        .find_map(|p| name.strip_prefix(p).filter(|o| family_ops.contains(o)).map(|o| (p.trim_end_matches('_'), o)));
+    let family = [
+        "checked_",
+        "overflowing_",
+        "saturating_",
+        "strict_",
+        "wrapping_",
+        "unbounded_",
+    ]
+    .iter()
+    .find_map(|p| {
+        name.strip_prefix(p)
+            .filter(|o| family_ops.contains(o))
+            .map(|o| (p.trim_end_matches('_'), o))
+    });
     if !single.contains(&name) && family.is_none() {
         return None;
     }
@@ -1049,10 +1103,16 @@ fn int_family(
         }
         "midpoint" => {
             let sum = format!("{}.add({})", val(&a, signed), val(&b, signed));
-            return Some(Expr::raw(cast(format!("{sum}.divide(BigInteger.TWO).longValue()"))));
+            return Some(Expr::raw(cast(format!(
+                "{sum}.divide(BigInteger.TWO).longValue()"
+            ))));
         }
         "next_multiple_of" | "checked_next_multiple_of" => {
-            let r = format!("int_next_multiple({}, {})", val(&a, signed), val(&b, signed));
+            let r = format!(
+                "int_next_multiple({}, {})",
+                val(&a, signed),
+                val(&b, signed)
+            );
             if name == "next_multiple_of" {
                 return Some(Expr::raw(cast(wrap(&r, signed))));
             }
@@ -1062,11 +1122,24 @@ fn int_family(
         }
         "checked_next_power_of_two" => {
             let r = local(cx, out, format!("int_next_pow2({})", val(&a, signed)));
-            return Some(ternary(fits(&r, signed), some(cast(wrap(&r, signed))), empty(&t)));
+            return Some(ternary(
+                fits(&r, signed),
+                some(cast(wrap(&r, signed))),
+                empty(&t),
+            ));
         }
         "bit_width" => return Some(Expr::raw(format!("{}.bitLength()", val(&a, false)))),
-        "leading_ones" => return Some(Expr::raw(format!("({bits} - {}.bitLength())", val(&format!("~{a}"), false)))),
-        "trailing_ones" => return Some(Expr::raw(format!("Math.min({bits}, Long.numberOfTrailingZeros(~(long) {a}))"))),
+        "leading_ones" => {
+            return Some(Expr::raw(format!(
+                "({bits} - {}.bitLength())",
+                val(&format!("~{a}"), false)
+            )));
+        }
+        "trailing_ones" => {
+            return Some(Expr::raw(format!(
+                "Math.min({bits}, Long.numberOfTrailingZeros(~(long) {a}))"
+            )));
+        }
         "highest_one" | "lowest_one" => {
             let at = if name == "highest_one" {
                 format!("{}.bitLength() - 1", val(&a, false))
@@ -1076,25 +1149,56 @@ fn int_family(
             return Some(ternary(format!("{a} == 0"), empty(&opt_u32), some(at)));
         }
         "isolate_highest_one" => {
-            let top = format!("BigInteger.ONE.shiftLeft({}.bitLength() - 1)", val(&a, false));
-            return Some(Expr::raw(cast(format!("({a} == 0 ? 0 : {})", wrap(&top, signed)))));
+            let top = format!(
+                "BigInteger.ONE.shiftLeft({}.bitLength() - 1)",
+                val(&a, false)
+            );
+            return Some(Expr::raw(cast(format!(
+                "({a} == 0 ? 0 : {})",
+                wrap(&top, signed)
+            ))));
         }
         "isolate_lowest_one" => return Some(Expr::raw(cast(format!("({a} & -{a})")))),
         "cast_signed" | "cast_unsigned" => {
-            let Ty::Int(to) = ret.strip_refs() else { return None };
-            let r = format!("int_wrap({}, {bits}, {})", val(&a, signed), name == "cast_signed");
+            let Ty::Int(to) = ret.strip_refs() else {
+                return None;
+            };
+            let r = format!(
+                "int_wrap({}, {bits}, {})",
+                val(&a, signed),
+                name == "cast_signed"
+            );
             return Some(Expr::raw(cast_to(*to, r)));
         }
         // `(low, carry)` / `(low, high)`: the exact sum or product split at the type's width.
         "carrying_add" | "borrowing_sub" | "carrying_mul" | "carrying_mul_add" => {
             let c = args.get(1).cloned().unwrap_or_else(|| "false".into());
             let exact = match name {
-                "carrying_add" => format!("{}.add({}).add(BigInteger.valueOf({c} ? 1 : 0))", val(&a, signed), val(&b, signed)),
-                "borrowing_sub" => format!("{}.subtract({}).subtract(BigInteger.valueOf({c} ? 1 : 0))", val(&a, signed), val(&b, signed)),
-                "carrying_mul" => format!("{}.multiply({}).add({})", val(&a, signed), val(&b, signed), val(&c, signed)),
+                "carrying_add" => format!(
+                    "{}.add({}).add(BigInteger.valueOf({c} ? 1 : 0))",
+                    val(&a, signed),
+                    val(&b, signed)
+                ),
+                "borrowing_sub" => format!(
+                    "{}.subtract({}).subtract(BigInteger.valueOf({c} ? 1 : 0))",
+                    val(&a, signed),
+                    val(&b, signed)
+                ),
+                "carrying_mul" => format!(
+                    "{}.multiply({}).add({})",
+                    val(&a, signed),
+                    val(&b, signed),
+                    val(&c, signed)
+                ),
                 _ => {
                     let d = args.get(2).cloned().unwrap_or_else(|| "0".into());
-                    format!("{}.multiply({}).add({}).add({})", val(&a, signed), val(&b, signed), val(&c, signed), val(&d, signed))
+                    format!(
+                        "{}.multiply({}).add({}).add({})",
+                        val(&a, signed),
+                        val(&b, signed),
+                        val(&c, signed),
+                        val(&d, signed)
+                    )
                 }
             };
             let r = local(cx, out, exact);
@@ -1103,28 +1207,59 @@ fn int_family(
             } else {
                 format!("!{}", fits(&r, signed))
             };
-            return Some(super::super::expr::tuple_expr(cx, ret, vec![Expr::raw(cast(wrap(&r, signed))), Expr::raw(second)]));
+            return Some(super::super::expr::tuple_expr(
+                cx,
+                ret,
+                vec![Expr::raw(cast(wrap(&r, signed))), Expr::raw(second)],
+            ));
         }
         "checked_signed_diff" => {
-            let Ty::Option(to) = ret.strip_refs() else { return None };
-            let Ty::Int(to) = to.strip_refs() else { return None };
-            let r = local(cx, out, format!("{}.subtract({})", val(&a, false), val(&b, false)));
+            let Ty::Option(to) = ret.strip_refs() else {
+                return None;
+            };
+            let Ty::Int(to) = to.strip_refs() else {
+                return None;
+            };
+            let r = local(
+                cx,
+                out,
+                format!("{}.subtract({})", val(&a, false), val(&b, false)),
+            );
             let v = cast_to(*to, format!("int_wrap({r}, {bits}, true)"));
-            return Some(ternary(format!("int_fits({r}, {bits}, true)"), some(v), empty(&Ty::Int(*to))));
+            return Some(ternary(
+                format!("int_fits({r}, {bits}, true)"),
+                some(v),
+                empty(&Ty::Int(*to)),
+            ));
         }
         _ => {}
     }
     let (mode, op) = family?;
     // Shifts: the amount, not the value, can overflow.
     if matches!(op, "shl" | "shr") {
-        let wrapped = render(&wrapping_int(Expr::raw(a.clone()), Expr::raw(b.clone()), i, &format!("wrapping_{op}")));
+        let wrapped = render(&wrapping_int(
+            Expr::raw(a.clone()),
+            Expr::raw(b.clone()),
+            i,
+            &format!("wrapping_{op}"),
+        ));
         let over = format!("{b} >= {bits}");
         return Some(match mode {
             "checked" => ternary(over, empty(&t), some(wrapped)),
-            "overflowing" => super::super::expr::tuple_expr(cx, ret, vec![Expr::raw(wrapped), Expr::raw(over)]),
-            "strict" => ternary(over, "int_panic(\"attempt to shift with overflow\")".into(), wrapped),
+            "overflowing" => {
+                super::super::expr::tuple_expr(cx, ret, vec![Expr::raw(wrapped), Expr::raw(over)])
+            }
+            "strict" => ternary(
+                over,
+                "int_panic(\"attempt to shift with overflow\")".into(),
+                wrapped,
+            ),
             "unbounded" => {
-                let fill = if op == "shr" && signed { format!("({a} < 0 ? -1 : 0)") } else { "0".into() };
+                let fill = if op == "shr" && signed {
+                    format!("({a} < 0 ? -1 : 0)")
+                } else {
+                    "0".into()
+                };
                 Expr::raw(cast(format!("({over} ? {fill} : {wrapped})")))
             }
             _ => return None,
@@ -1149,7 +1284,15 @@ fn int_family(
     };
     let divides = matches!(op, "div" | "rem" | "div_euclid" | "rem_euclid");
     let guarded = mode == "checked" && divides;
-    let r = local(cx, out, if guarded { format!("{b} == 0 ? null : {exact}") } else { exact });
+    let r = local(
+        cx,
+        out,
+        if guarded {
+            format!("{b} == 0 ? null : {exact}")
+        } else {
+            exact
+        },
+    );
     let value = cast(wrap(&r, signed));
     // `MIN % -1` is 0, yet Rust reports it as overflowing (the division would).
     let in_range = if signed && matches!(op, "rem" | "rem_euclid") {
@@ -1159,7 +1302,11 @@ fn int_family(
     };
     Some(match mode {
         "checked" => {
-            let ok = if guarded { format!("{r} != null && {in_range}") } else { in_range };
+            let ok = if guarded {
+                format!("{r} != null && {in_range}")
+            } else {
+                in_range
+            };
             ternary(ok, some(value), empty(&t))
         }
         "overflowing" => {
@@ -1167,9 +1314,11 @@ fn int_family(
             super::super::expr::tuple_expr(cx, ret, vec![Expr::raw(value), Expr::raw(flag)])
         }
         "saturating" => Expr::raw(cast(format!("int_sat({r}, {bits}, {signed})"))),
-        "strict" if signed && matches!(op, "rem" | "rem_euclid") => {
-            ternary(in_range, value, "int_panic(\"attempt to calculate the remainder with overflow\")".into())
-        }
+        "strict" if signed && matches!(op, "rem" | "rem_euclid") => ternary(
+            in_range,
+            value,
+            "int_panic(\"attempt to calculate the remainder with overflow\")".into(),
+        ),
         "strict" => Expr::raw(cast(format!("int_strict({r}, {bits}, {signed})"))),
         "wrapping" => Expr::raw(value),
         _ => return None,
@@ -1192,7 +1341,11 @@ pub(super) fn from_bytes(key: &str, bytes: Expr) -> Option<Expr> {
     match owner {
         "f64" => {
             let bits = from_bytes(&format!("u64::{name}"), bytes)?;
-            return Some(Expr::call(Expr::raw("Double"), "longBitsToDouble", vec![bits]));
+            return Some(Expr::call(
+                Expr::raw("Double"),
+                "longBitsToDouble",
+                vec![bits],
+            ));
         }
         "f32" => {
             let bits = from_bytes(&format!("u32::{name}"), bytes)?;
@@ -1548,7 +1701,11 @@ pub(super) fn checked_int(
             // The unsigned product fits when its high 64 bits are zero.
             Int::U64 | Int::U128 => conditional(
                 Expr::bin(
-                    Expr::call(Expr::raw("Math"), "unsignedMultiplyHigh", vec![recv.clone(), b0.clone()]),
+                    Expr::call(
+                        Expr::raw("Math"),
+                        "unsignedMultiplyHigh",
+                        vec![recv.clone(), b0.clone()],
+                    ),
                     "==",
                     Expr::raw("0"),
                 ),
@@ -1855,7 +2012,11 @@ pub(super) fn wrapping_int(recv: Expr, b: Expr, i: Int, name: &str) -> Expr {
                 wrap(Expr::bin(recv, "<<", b))
             } else if i.is_unsigned() {
                 // A `u16` is a sign-extended Java short: shift its unsigned value.
-                let v = if matches!(i, Int::U16) { Expr::bin(recv, "&", Expr::raw("0xFFFF")) } else { recv };
+                let v = if matches!(i, Int::U16) {
+                    Expr::bin(recv, "&", Expr::raw("0xFFFF"))
+                } else {
+                    recv
+                };
                 narrow(Expr::bin(v, ">>>", b), i)
             } else {
                 narrow(Expr::bin(recv, ">>", b), i)
@@ -1931,7 +2092,9 @@ pub(super) fn lower_float_method(
         // `0.0.signum()` is 1.0 in Rust (only NaN has no sign).
         "signum" => {
             let a = render(&simple(cx, recv, &fty, line, out));
-            Expr::raw(format!("({cls}.isNaN({a}) ? {a} : Math.copySign({one}, {a}))"))
+            Expr::raw(format!(
+                "({cls}.isNaN({a}) ? {a} : Math.copySign({one}, {a}))"
+            ))
         }
         "mul_add" => math("fma", vec![recv, b0, b1]),
         "rem_euclid" | "div_euclid" => {
@@ -1948,14 +2111,26 @@ pub(super) fn lower_float_method(
             cast(Expr::static_call(format!("float_{name}"), vec![recv]))
         }
         // Rust's `log(b)` is `ln() / b.ln()`.
-        "log" => cast(Expr::bin(math("log", vec![recv]), "/", math("log", vec![b0]))),
+        "log" => cast(Expr::bin(
+            math("log", vec![recv]),
+            "/",
+            math("log", vec![b0]),
+        )),
         "recip" => Expr::bin(Expr::raw(one), "/", recv),
         "round_ties_even" => cast(math("rint", vec![recv])),
         "next_up" => math("nextUp", vec![recv]),
         "next_down" => math("nextDown", vec![recv]),
         "is_sign_negative" | "is_sign_positive" => {
-            let bits = if f32 { "Float.floatToRawIntBits" } else { "Double.doubleToRawLongBits" };
-            let op = if name == "is_sign_negative" { "<" } else { ">=" };
+            let bits = if f32 {
+                "Float.floatToRawIntBits"
+            } else {
+                "Double.doubleToRawLongBits"
+            };
+            let op = if name == "is_sign_negative" {
+                "<"
+            } else {
+                ">="
+            };
             Expr::raw(format!("({bits}({}) {op} 0)", render(&recv)))
         }
         "is_normal" | "is_subnormal" => {
@@ -1968,23 +2143,47 @@ pub(super) fn lower_float_method(
         }
         "classify" => {
             helper(cx);
-            Expr::static_call("float_classify", vec![recv, Expr::raw(format!("{cls}.MIN_NORMAL"))])
+            Expr::static_call(
+                "float_classify",
+                vec![recv, Expr::raw(format!("{cls}.MIN_NORMAL"))],
+            )
         }
-        "midpoint" if f32 => {
-            Expr::raw(format!("(float) (((double) {} + {}) / 2)", render(&recv), render(&b0)))
-        }
+        "midpoint" if f32 => Expr::raw(format!(
+            "(float) (((double) {} + {}) / 2)",
+            render(&recv),
+            render(&b0)
+        )),
         "midpoint" => {
             helper(cx);
             Expr::static_call("float_midpoint", vec![recv, b0])
         }
         "sin_cos" => {
             let a = simple(cx, recv, &fty, line, out);
-            let (s, c) = (cast(math("sin", vec![a.clone()])), cast(math("cos", vec![a])));
+            let (s, c) = (
+                cast(math("sin", vec![a.clone()])),
+                cast(math("cos", vec![a])),
+            );
             super::super::expr::tuple_expr(cx, ret, vec![s, c])
         }
-        "to_bits" => Expr::call(Expr::raw(cls), if f32 { "floatToRawIntBits" } else { "doubleToRawLongBits" }, vec![recv]),
+        "to_bits" => Expr::call(
+            Expr::raw(cls),
+            if f32 {
+                "floatToRawIntBits"
+            } else {
+                "doubleToRawLongBits"
+            },
+            vec![recv],
+        ),
         "to_be_bytes" | "to_le_bytes" | "to_ne_bytes" => {
-            let bits = Expr::call(Expr::raw(cls), if f32 { "floatToRawIntBits" } else { "doubleToRawLongBits" }, vec![recv]);
+            let bits = Expr::call(
+                Expr::raw(cls),
+                if f32 {
+                    "floatToRawIntBits"
+                } else {
+                    "doubleToRawLongBits"
+                },
+                vec![recv],
+            );
             let i = if f32 { Int::U32 } else { Int::U64 };
             return lower_int_method(cx, bits, vec![], i, name, ret, line, out);
         }

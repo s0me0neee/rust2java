@@ -17,7 +17,10 @@ pub fn unwrapper(e: &SyntaxNode) -> Option<SyntaxNode> {
         let is_recv = m
             .receiver()
             .is_some_and(|r| r.syntax().text_range() == e.text_range());
-        let name = m.name_ref().map(|n| n.text().to_string()).unwrap_or_default();
+        let name = m
+            .name_ref()
+            .map(|n| n.text().to_string())
+            .unwrap_or_default();
         return (is_recv && matches!(name.as_str(), "unwrap" | "expect")).then_some(p);
     }
     (crate::mode::throws() && ast::TryExpr::can_cast(p.kind())).then_some(p)
@@ -59,7 +62,8 @@ pub fn eligible(cx: &Cx, root: &SyntaxNode) -> Result<(), (SyntaxNode, &'static 
             .and_then(ast::MethodCallExpr::cast)
             .is_some_and(|m| {
                 matches!(method_name(&m).as_str(), "map" | "and_then")
-                    && m.receiver().is_some_and(|r| matches!(cx.ty(&r).strip_refs(), Ty::Result(..)))
+                    && m.receiver()
+                        .is_some_and(|r| matches!(cx.ty(&r).strip_refs(), Ty::Result(..)))
             });
         if !callee && !applied && nested_result(&ty, false) {
             return Err((node, "a Result inside another type"));
@@ -75,7 +79,10 @@ pub fn eligible(cx: &Cx, root: &SyntaxNode) -> Result<(), (SyntaxNode, &'static 
             continue;
         }
         if !producer_ok(cx, &e) {
-            return Err((node, "a Result from a call that can't become a throwing call"));
+            return Err((
+                node,
+                "a Result from a call that can't become a throwing call",
+            ));
         }
         if !context_ok(cx, &e) {
             return Err((node, "a Result value that is stored or passed on"));
@@ -106,9 +113,12 @@ fn nested_result(ty: &Ty, inner: bool) -> bool {
         Ty::Result(ok, err) => {
             (inner && !(ok.is_str() && is_io_error(err))) || here(ok) || here(err)
         }
-        Ty::Vec(t) | Ty::Set { t, .. } | Ty::Deque(t) | Ty::Heap(t) | Ty::Option(t) | Ty::Iter(t) => {
-            here(t)
-        }
+        Ty::Vec(t)
+        | Ty::Set { t, .. }
+        | Ty::Deque(t)
+        | Ty::Heap(t)
+        | Ty::Option(t)
+        | Ty::Iter(t) => here(t),
         Ty::Map { k, v, .. } => here(k) || here(v),
         Ty::Tuple(ts) | Ty::Adt { args: ts, .. } => ts.iter().any(here),
         Ty::Ref { inner: t, .. } => nested_result(t, inner),
@@ -138,7 +148,9 @@ fn allowed_type(cx: &Cx, t: &ast::Type) -> bool {
 }
 
 fn method_name(m: &ast::MethodCallExpr) -> String {
-    m.name_ref().map(|n| n.text().to_string()).unwrap_or_default()
+    m.name_ref()
+        .map(|n| n.text().to_string())
+        .unwrap_or_default()
 }
 
 fn is_local_fn(cx: &Cx, f: ra_ap_hir::Function) -> bool {
@@ -154,8 +166,7 @@ fn result_ctor(cx: &Cx, c: &ast::CallExpr) -> Option<&'static str> {
         return None;
     };
     let e = v.parent_enum(cx.db);
-    if e.name(cx.db).as_str() != "Result" || e.module(cx.db).krate(cx.db).origin(cx.db).is_local()
-    {
+    if e.name(cx.db).as_str() != "Result" || e.module(cx.db).krate(cx.db).origin(cx.db).is_local() {
         return None;
     }
     match v.name(cx.db).as_str() {
@@ -214,8 +225,8 @@ fn producer_ok(cx: &Cx, e: &ast::Expr) -> bool {
                 ),
                 // `write_fmt` is a `write!` expansion; the macro call is checked in the file.
                 "read_line" | "read_to_string" | "read" | "flush" | "write_all" | "write_fmt"
-                | "write_str" | "write_char" | "map_err" | "ok_or"
-                | "ok_or_else" | "map" | "and_then" => true,
+                | "write_str" | "write_char" | "map_err" | "ok_or" | "ok_or_else" | "map"
+                | "and_then" => true,
                 "unwrap" | "expect" => super::std_map::io::phantom_line_result(cx, e),
                 _ => false,
             }
@@ -230,10 +241,7 @@ fn producer_ok(cx: &Cx, e: &ast::Expr) -> bool {
 
 // `Err(x)` only where a `throw` can stand: returned from the function, or `Err(x)?`.
 fn err_context_ok(c: &ast::CallExpr) -> bool {
-    matches!(
-        walk_up(c.syntax()),
-        Some(Context::Return | Context::Try)
-    )
+    matches!(walk_up(c.syntax()), Some(Context::Return | Context::Try))
 }
 
 enum Context {
@@ -260,10 +268,14 @@ fn same_error(cx: &Cx, e: &ast::Expr) -> bool {
     };
     match fn_error(cx, e.syntax()) {
         // Every error travels as a RuntimeException, which is what a `dyn Error` is caught as.
-        Some(Ty::Other(n)) if n.contains("dyn Error") || n.contains("dyn std::error::Error") => true,
+        Some(Ty::Other(n)) if n.contains("dyn Error") || n.contains("dyn std::error::Error") => {
+            true
+        }
         Some(to) => {
             let user = user_error(&from).is_some() || user_error(&to).is_some();
-            !user || from.strip_refs() == to.strip_refs() || from_conversion(cx, e.syntax(), &from, &to)
+            !user
+                || from.strip_refs() == to.strip_refs()
+                || from_conversion(cx, e.syntax(), &from, &to)
         }
         None => true,
     }
@@ -284,17 +296,23 @@ fn from_conversion(cx: &Cx, node: &SyntaxNode, from: &Ty, to: &Ty) -> bool {
         Ty::Other(n) => crate::ty::is_parse_error_name(n) || is_io_error(from),
         _ => false,
     };
-    let Some(to_name) = user_error(to) else { return false };
+    let Some(to_name) = user_error(to) else {
+        return false;
+    };
     if !std_exception {
         return false;
     }
-    let Some(root) = node.ancestors().last() else { return false };
+    let Some(root) = node.ancestors().last() else {
+        return false;
+    };
     root.descendants().filter_map(ast::Impl::cast).any(|imp| {
         let is_from = imp.trait_().is_some_and(|t| {
             let text = t.syntax().text().to_string();
             text.starts_with("From<") || text.contains("::From<")
         });
-        let for_to = imp.self_ty().is_some_and(|t| cx.type_ref(&t).strip_refs().java() == to_name);
+        let for_to = imp
+            .self_ty()
+            .is_some_and(|t| cx.type_ref(&t).strip_refs().java() == to_name);
         let from_arg = imp
             .trait_()
             .and_then(|t| t.syntax().descendants().find_map(ast::GenericArgList::cast))
@@ -310,19 +328,34 @@ fn from_conversion(cx: &Cx, node: &SyntaxNode, from: &Ty, to: &Ty) -> bool {
 
 // `e?` whose error converts `From` a std error into the function's user error:
 // `try { v = e; } catch (NumberFormatException ex) { throw new AppErrorException(AppError.from(ex)); }`.
-pub fn try_converted(cx: &mut Cx, t: &ast::TryExpr, inner: &ast::Expr, line: u32, out: &mut Vec<Stmt>) -> Option<Expr> {
-    let Ty::Result(ok, from) = cx.ty(inner) else { return None };
+pub fn try_converted(
+    cx: &mut Cx,
+    t: &ast::TryExpr,
+    inner: &ast::Expr,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) -> Option<Expr> {
+    let Ty::Result(ok, from) = cx.ty(inner) else {
+        return None;
+    };
     let to = fn_error(cx, t.syntax())?;
     if from.strip_refs() == to.strip_refs() || !from_conversion(cx, t.syntax(), &from, &to) {
         return None;
     }
     let to_java = to.strip_refs().java();
     let class = exception_class(cx, &from);
-    let var = (!ok.is_unit()).then(|| cx.take_let_target(t.syntax()).unwrap_or_else(|| cx.fresh("value")));
+    let var = (!ok.is_unit()).then(|| {
+        cx.take_let_target(t.syntax())
+            .unwrap_or_else(|| cx.fresh("value"))
+    });
     if let Some(v) = &var {
         out.push(Stmt::new(
             line,
-            StmtKind::Local { ty: stmt::decl_type_explicit(&ok), name: v.clone(), init: None },
+            StmtKind::Local {
+                ty: stmt::decl_type_explicit(&ok),
+                name: v.clone(),
+                init: None,
+            },
         ));
     }
     let taken = cx.method_names.clone();
@@ -344,9 +377,15 @@ pub fn try_converted(cx: &mut Cx, t: &ast::TryExpr, inner: &ast::Expr, line: u32
     out.push(Stmt::new(
         line,
         StmtKind::Try {
-            body: Block { stmts: body, close_line: line },
+            body: Block {
+                stmts: body,
+                close_line: line,
+            },
             decl: format!("{class} {ex}"),
-            handler: Block { stmts: vec![Stmt::new(line, StmtKind::Throw(thrown))], close_line: line },
+            handler: Block {
+                stmts: vec![Stmt::new(line, StmtKind::Throw(thrown))],
+                close_line: line,
+            },
         },
     ));
     cx.release_param(&ex);
@@ -361,7 +400,10 @@ fn walk_up(node: &SyntaxNode) -> Option<Context> {
         let Some(parent) = cur.parent() else {
             return (cur.kind() != SyntaxKind::SOURCE_FILE).then_some(Context::Consumed);
         };
-        if matches!(parent.kind(), SyntaxKind::MACRO_STMTS | SyntaxKind::MACRO_EXPR) {
+        if matches!(
+            parent.kind(),
+            SyntaxKind::MACRO_STMTS | SyntaxKind::MACRO_EXPR
+        ) {
             return Some(Context::Consumed);
         }
         match parent.kind() {
@@ -412,9 +454,9 @@ fn walk_up(node: &SyntaxNode) -> Option<Context> {
                     .then_some(Context::Consumed);
             }
             SyntaxKind::RETURN_EXPR => {
-                let owner = parent
-                    .ancestors()
-                    .find(|a| ast::Fn::can_cast(a.kind()) || ast::ClosureExpr::can_cast(a.kind()))?;
+                let owner = parent.ancestors().find(|a| {
+                    ast::Fn::can_cast(a.kind()) || ast::ClosureExpr::can_cast(a.kind())
+                })?;
                 return ast::Fn::can_cast(owner.kind()).then_some(Context::Return);
             }
             SyntaxKind::TRY_EXPR => return Some(Context::Try),
@@ -441,7 +483,8 @@ fn walk_up(node: &SyntaxNode) -> Option<Context> {
             SyntaxKind::EXPR_STMT => return Some(Context::Consumed),
             SyntaxKind::LET_STMT => {
                 let l = ast::LetStmt::cast(parent)?;
-                return matches!(l.pat(), Some(ast::Pat::WildcardPat(_))).then_some(Context::Consumed);
+                return matches!(l.pat(), Some(ast::Pat::WildcardPat(_)))
+                    .then_some(Context::Consumed);
             }
             _ => return None,
         }
@@ -544,7 +587,9 @@ fn result_arms(m: &ast::MatchExpr) -> Option<(Vec<ast::MatchArm>, Option<ast::Ma
 
 // The pattern inside `Ok(p)`.
 fn ok_pat_inner(p: &ast::Pat) -> Option<ast::Pat> {
-    let ast::Pat::TupleStructPat(tp) = p else { return None };
+    let ast::Pat::TupleStructPat(tp) = p else {
+        return None;
+    };
     if tp.path()?.segment()?.name_ref()?.text() != "Ok" {
         return None;
     }
@@ -556,9 +601,7 @@ fn ok_pat_inner(p: &ast::Pat) -> Option<ast::Pat> {
 // The Java exception an `Err` of this type travels as.
 pub fn exception_class(cx: &mut Cx, err: &Ty) -> String {
     match err.strip_refs() {
-        Ty::Other(n) if crate::ty::is_parse_error_name(n) => {
-            "NumberFormatException".into()
-        }
+        Ty::Other(n) if crate::ty::is_parse_error_name(n) => "NumberFormatException".into(),
         t if is_io_error(t) => {
             cx.import("java.io.*");
             "UncheckedIOException".into()
@@ -674,8 +717,14 @@ fn arm_dest(cx: &Cx, dest: &Dest) -> Dest {
 // try { <ok binding> = scrut; ok_body } catch (X e) { err_body }
 // A block arm ending the try or catch block is that block's own statements (nothing follows it).
 fn flatten_tail_block(stmts: &mut Vec<Stmt>) {
-    if let Some(Stmt { kind: StmtKind::Block(_), .. }) = stmts.last()
-        && let Some(Stmt { kind: StmtKind::Block(b), .. }) = stmts.pop()
+    if let Some(Stmt {
+        kind: StmtKind::Block(_),
+        ..
+    }) = stmts.last()
+        && let Some(Stmt {
+            kind: StmtKind::Block(b),
+            ..
+        }) = stmts.pop()
     {
         stmts.extend(b.stmts);
     }
@@ -707,7 +756,9 @@ fn lower_try_catch(
     cx.push_scope();
     let v = expr::lower_expr(cx, scrut, &mut body);
     match ok_bind {
-        OkValue::Bind(Some(ip)) => super::pat::bind_pattern(cx, &ast::Pat::IdentPat(ip), v, &mut body),
+        OkValue::Bind(Some(ip)) => {
+            super::pat::bind_pattern(cx, &ast::Pat::IdentPat(ip), v, &mut body)
+        }
         OkValue::Bind(None) => stmt::push_discard(&mut body, line, v),
         OkValue::Arms(arms, dest) => {
             let ok_ty = match cx.ty(scrut).strip_refs() {
@@ -717,7 +768,11 @@ fn lower_try_catch(
             let value = cx.fresh("value");
             body.push(Stmt::new(
                 line,
-                StmtKind::Local { ty: stmt::decl_type_explicit(&ok_ty), name: value.clone(), init: Some(v) },
+                StmtKind::Local {
+                    ty: stmt::decl_type_explicit(&ok_ty),
+                    name: value.clone(),
+                    init: Some(v),
+                },
             ));
             // `case Tok.Num(var n) when n > 40 ->` reads better than an if-chain with casts.
             if super::pat::can_switch_alts(cx, arms, &ok_ty) {
@@ -763,7 +818,10 @@ fn catch_decl(
     line: u32,
     handler: &mut Vec<Stmt>,
 ) -> String {
-    let rust_name = err_bind.as_ref().and_then(|ip| ip.name()).map(|n| n.text().to_string());
+    let rust_name = err_bind
+        .as_ref()
+        .and_then(|ip| ip.name())
+        .map(|n| n.text().to_string());
     match (&rust_name, err.strip_refs()) {
         (Some(n), Ty::Str) => {
             let ex = cx.fresh_param("ex");
@@ -824,10 +882,16 @@ fn map_err_rethrow(
         .parent()
         .filter(|p| ast::TryExpr::can_cast(p.kind()))
         .unwrap_or_else(|| m.syntax().clone());
-    let var = cx.take_let_target(&target).unwrap_or_else(|| cx.fresh("value"));
+    let var = cx
+        .take_let_target(&target)
+        .unwrap_or_else(|| cx.fresh("value"));
     out.push(Stmt::new(
         line,
-        StmtKind::Local { ty: stmt::decl_type_explicit(ok_ty), name: var.clone(), init: None },
+        StmtKind::Local {
+            ty: stmt::decl_type_explicit(ok_ty),
+            name: var.clone(),
+            init: None,
+        },
     ));
     let err = err_ty(cx, recv_ast);
     let class = exception_class(cx, &err);
@@ -838,13 +902,26 @@ fn map_err_rethrow(
     push_throw(cx, &body, line, &mut handler);
     cx.pop_scope();
     cx.method_names = taken;
-    let assign = Stmt::new(line, StmtKind::Expr(Expr::Assign(Box::new(Expr::name(&var)), "=", Box::new(recv))));
+    let assign = Stmt::new(
+        line,
+        StmtKind::Expr(Expr::Assign(
+            Box::new(Expr::name(&var)),
+            "=",
+            Box::new(recv),
+        )),
+    );
     out.push(Stmt::new(
         line,
         StmtKind::Try {
-            body: Block { stmts: vec![assign], close_line: line },
+            body: Block {
+                stmts: vec![assign],
+                close_line: line,
+            },
             decl,
-            handler: Block { stmts: handler, close_line: line },
+            handler: Block {
+                stmts: handler,
+                close_line: line,
+            },
         },
     ));
     Some(Expr::name(var))
@@ -890,7 +967,10 @@ pub fn result_method(
         };
         let (owner, method) = f.rsplit_once("::")?;
         return Some(if method == "new" {
-            Expr::New { ty: owner.to_string(), args: vec![recv] }
+            Expr::New {
+                ty: owner.to_string(),
+                args: vec![recv],
+            }
         } else if owner == "Main" {
             Expr::static_call(method, vec![recv])
         } else {
@@ -950,7 +1030,9 @@ pub fn result_method(
         _ => return None,
     };
     let hint = if name == "ok" { "maybe" } else { "value" };
-    let var = cx.take_let_target(m.syntax()).unwrap_or_else(|| cx.fresh(hint));
+    let var = cx
+        .take_let_target(m.syntax())
+        .unwrap_or_else(|| cx.fresh(hint));
     out.push(Stmt::new(
         line,
         StmtKind::Local {
@@ -965,7 +1047,14 @@ pub fn result_method(
             StmtKind::Expr(Expr::Assign(Box::new(Expr::name(&var)), "=", Box::new(v))),
         )
     };
-    push_try(cx, recv_ast, vec![assign(value)], vec![assign(fallback)], line, out);
+    push_try(
+        cx,
+        recv_ast,
+        vec![assign(value)],
+        vec![assign(fallback)],
+        line,
+        out,
+    );
     Some(Expr::name(var))
 }
 
@@ -1029,21 +1118,46 @@ pub fn lower_match(cx: &mut Cx, m: &ast::MatchExpr, dest: &Dest, out: &mut Vec<S
     // `Ok(Some(x))`, `Ok((a, b))`, guards, several Ok arms: test the value inside the try.
     let plain = matches!(oks.as_slice(), [a] if a.guard().is_none() && a.pat().and_then(|p| simple_result_pat(&p)).is_some());
     if !plain {
-        let alts: Vec<(Option<ast::Pat>, &ast::MatchArm)> =
-            oks.iter().map(|a| (a.pat().as_ref().and_then(ok_pat_inner), a)).collect();
+        let alts: Vec<(Option<ast::Pat>, &ast::MatchArm)> = oks
+            .iter()
+            .map(|a| (a.pat().as_ref().and_then(ok_pat_inner), a))
+            .collect();
         let ok = OkValue::Arms(&alts, &dest);
-        lower_try_catch(cx, &scrut, ok, &|_, _| {}, err_bind, &run_err, line, close, out);
+        lower_try_catch(
+            cx,
+            &scrut,
+            ok,
+            &|_, _| {},
+            err_bind,
+            &run_err,
+            line,
+            close,
+            out,
+        );
         return true;
     }
     let ok = oks.into_iter().next().unwrap();
-    let ok_bind = ok.pat().and_then(|p| simple_result_pat(&p)).and_then(|(_, b)| b);
+    let ok_bind = ok
+        .pat()
+        .and_then(|p| simple_result_pat(&p))
+        .and_then(|(_, b)| b);
     let ok_expr = ok.expr();
     let run_ok = |cx: &mut Cx, out: &mut Vec<Stmt>| {
         if let Some(e) = &ok_expr {
             stmt::lower_to_dest(cx, e, &dest, out);
         }
     };
-    lower_try_catch(cx, &scrut, OkValue::Bind(ok_bind), &run_ok, err_bind, &run_err, line, close, out);
+    lower_try_catch(
+        cx,
+        &scrut,
+        OkValue::Bind(ok_bind),
+        &run_ok,
+        err_bind,
+        &run_err,
+        line,
+        close,
+        out,
+    );
     true
 }
 
@@ -1074,9 +1188,29 @@ pub fn lower_if_let(cx: &mut Cx, i: &ast::IfExpr, dest: &Dest, out: &mut Vec<Stm
         None => {}
     };
     if which == "Ok" {
-        lower_try_catch(cx, &scrut, OkValue::Bind(bind), &run_then, None, &run_else, line, close, out);
+        lower_try_catch(
+            cx,
+            &scrut,
+            OkValue::Bind(bind),
+            &run_then,
+            None,
+            &run_else,
+            line,
+            close,
+            out,
+        );
     } else {
-        lower_try_catch(cx, &scrut, OkValue::Bind(None), &run_else, bind, &run_then, line, close, out);
+        lower_try_catch(
+            cx,
+            &scrut,
+            OkValue::Bind(None),
+            &run_else,
+            bind,
+            &run_then,
+            line,
+            close,
+            out,
+        );
     }
     true
 }

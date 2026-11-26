@@ -498,12 +498,16 @@ fn lower_cell_op(
 ) -> Option<Expr> {
     let line = cx.line(node);
     let name = key.rsplit("::").next().unwrap_or(key);
-    if matches!(name, "set" | "replace" | "replace_with" | "take" | "swap") && shared_object(cx, recv) {
+    if matches!(name, "set" | "replace" | "replace_with" | "take" | "swap")
+        && shared_object(cx, recv)
+    {
         return Some(cx.unsupported(node, "replacing a shared object-backed cell"));
     }
-    if matches!(name, "replace" | "replace_with" | "take" | "update" | "swap")
-        && (!stable_place(recv)
-            || (name == "swap" && args.first().is_some_and(|e| !stable_place(e))))
+    if matches!(
+        name,
+        "replace" | "replace_with" | "take" | "update" | "swap"
+    ) && (!stable_place(recv)
+        || (name == "swap" && args.first().is_some_and(|e| !stable_place(e))))
     {
         return Some(cx.unsupported(node, "cell operation on a complex receiver"));
     }
@@ -525,7 +529,10 @@ fn lower_cell_op(
             cx.needs_result = true;
             let v = expr::lower_expr(cx, recv, out);
             let v = contents(cx, recv, v);
-            Some(Expr::New { ty: "Ok<>".into(), args: vec![v] })
+            Some(Expr::New {
+                ty: "Ok<>".into(),
+                args: vec![v],
+            })
         }
         // `f` sees the old value (and may change it); the cell then holds what it returns.
         "replace_with" => {
@@ -535,10 +542,21 @@ fn lower_cell_op(
             let f = expr::lower_expr(cx, arg, out);
             let fty = format!("UnaryOperator<{}>", inner.boxed());
             let f = Expr::name(push_local(cx, line, fty, Some(f), out, "f"));
-            let old = push_local(cx, line, super::super::stmt::decl_type(&inner), Some(p.clone()), out, "old");
+            let old = push_local(
+                cx,
+                line,
+                super::super::stmt::decl_type(&inner),
+                Some(p.clone()),
+                out,
+                "old",
+            );
             out.push(Stmt::new(
                 line,
-                StmtKind::Expr(Expr::Assign(Box::new(p), "=", Box::new(Expr::call(f, "apply", vec![Expr::name(old.clone())])))),
+                StmtKind::Expr(Expr::Assign(
+                    Box::new(p),
+                    "=",
+                    Box::new(Expr::call(f, "apply", vec![Expr::name(old.clone())])),
+                )),
             ));
             Some(Expr::name(old))
         }
@@ -652,9 +670,10 @@ fn lower_cell_op(
             let inner = inner?;
             Some(clone_expr(v, &inner))
         }
-        "swap_borrow" | "undo_leak" | "as_ptr"
-        | "as_slice_of_cells" | "from_mut" | "from_mut_slice" | "map" | "map_split"
-        | "filter_map" | "leak" | "clone_into" => Some(cx.unsupported(node, &format!("`{key}`"))),
+        "swap_borrow" | "undo_leak" | "as_ptr" | "as_slice_of_cells" | "from_mut"
+        | "from_mut_slice" | "map" | "map_split" | "filter_map" | "leak" | "clone_into" => {
+            Some(cx.unsupported(node, &format!("`{key}`")))
+        }
         _ => None,
     }
 }

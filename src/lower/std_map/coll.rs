@@ -1209,11 +1209,18 @@ out.add(Map.entry(valid, new ArrayList<>(b.subList(i, Math.min(n, i + bad))))); 
 // `a..b` / `a..=b` / `..` over list `v`, as Java `[from, to)` bounds.
 fn range_ends(cx: &mut Cx, r: &ast::RangeExpr, v: &Expr, out: &mut Vec<Stmt>) -> (Expr, Expr) {
     use ast::RangeItem;
-    let from = r.start().map(|s| expr::lower_expr(cx, &s, out)).unwrap_or_else(|| Expr::raw("0"));
+    let from = r
+        .start()
+        .map(|s| expr::lower_expr(cx, &s, out))
+        .unwrap_or_else(|| Expr::raw("0"));
     let to = match r.end() {
         Some(e) => {
             let e = expr::lower_expr(cx, &e, out);
-            if r.op_kind() == Some(ast::RangeOp::Inclusive) { Expr::bin(e, "+", Expr::raw("1")) } else { e }
+            if r.op_kind() == Some(ast::RangeOp::Inclusive) {
+                Expr::bin(e, "+", Expr::raw("1"))
+            } else {
+                e
+            }
         }
         None => Expr::call(v.clone(), "size", vec![]),
     };
@@ -1224,7 +1231,13 @@ fn range_ends(cx: &mut Cx, r: &ast::RangeExpr, v: &Expr, out: &mut Vec<Stmt>) ->
 pub(crate) fn const_arg(m: &ast::MethodCallExpr) -> Option<String> {
     use ra_ap_syntax::ast::HasGenericArgs;
     let arg = m.generic_arg_list()?.generic_args().next()?;
-    Some(arg.syntax().text().to_string().trim_matches(|c| c == '{' || c == '}' || c == ' ').to_string())
+    Some(
+        arg.syntax()
+            .text()
+            .to_string()
+            .trim_matches(|c| c == '{' || c == '}' || c == ' ')
+            .to_string(),
+    )
 }
 
 pub(super) fn lower_vec_method(
@@ -1587,13 +1600,19 @@ pub(super) fn lower_vec_method(
             let i = simple(cx, b0, &Ty::Int(Int::Usize), line, out);
             let cmp = match name {
                 "select_nth_unstable" => Expr::raw("null"),
-                "select_nth_unstable_by" => Expr::Cast(format!("Comparator<{}>", elem.boxed()), Box::new(b1.clone())),
+                "select_nth_unstable_by" => Expr::Cast(
+                    format!("Comparator<{}>", elem.boxed()),
+                    Box::new(b1.clone()),
+                ),
                 _ => {
                     let key = arg_asts
                         .get(1)
                         .and_then(|a| crate::lower::iter::closure_body_ty(cx, a))
                         .unwrap_or(Ty::Other("?".into()));
-                    let f = Expr::Cast(format!("Function<{}, {}>", elem.boxed(), key.boxed()), Box::new(b1.clone()));
+                    let f = Expr::Cast(
+                        format!("Function<{}, {}>", elem.boxed(), key.boxed()),
+                        Box::new(b1.clone()),
+                    );
                     Expr::raw(format!("Comparator.comparing({})", render(&f)))
                 }
             };
@@ -1625,11 +1644,24 @@ pub(super) fn lower_vec_method(
             Some(conditional(ok, opt_of(pair), opt_empty(Some(&pair_ty))))
         }
         // Const-generic views: `first_chunk::<N>()`, `as_array::<N>()`, `as_chunks::<N>()`.
-        "first_chunk" | "first_chunk_mut" | "last_chunk" | "last_chunk_mut" | "split_first_chunk"
-        | "split_first_chunk_mut" | "split_last_chunk" | "split_last_chunk_mut" | "as_array" | "as_mut_array"
-        | "as_chunks" | "as_chunks_mut" | "as_rchunks" | "as_rchunks_mut" => {
+        "first_chunk"
+        | "first_chunk_mut"
+        | "last_chunk"
+        | "last_chunk_mut"
+        | "split_first_chunk"
+        | "split_first_chunk_mut"
+        | "split_last_chunk"
+        | "split_last_chunk_mut"
+        | "as_array"
+        | "as_mut_array"
+        | "as_chunks"
+        | "as_chunks_mut"
+        | "as_rchunks"
+        | "as_rchunks_mut" => {
             let Some(n) = const_arg(m) else {
-                return Some(cx.unsupported(m.syntax(), &format!("`{name}` without a `::<N>` length")));
+                return Some(
+                    cx.unsupported(m.syntax(), &format!("`{name}` without a `::<N>` length")),
+                );
             };
             let v = simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out);
             let vs = render(&v);
@@ -1638,47 +1670,92 @@ pub(super) fn lower_vec_method(
             let inner = opt_inner(ret).unwrap_or_else(|| ret.strip_refs().clone());
             let (cond, value) = match name.trim_end_matches("_mut") {
                 "first_chunk" => (format!("{len} >= {n}"), sub("0".into(), n.clone())),
-                "last_chunk" => (format!("{len} >= {n}"), sub(format!("{len} - {n}"), len.clone())),
+                "last_chunk" => (
+                    format!("{len} >= {n}"),
+                    sub(format!("{len} - {n}"), len.clone()),
+                ),
                 "split_first_chunk" => (
                     format!("{len} >= {n}"),
-                    expr::tuple_expr(cx, &inner, vec![sub("0".into(), n.clone()), sub(n.clone(), len.clone())]),
+                    expr::tuple_expr(
+                        cx,
+                        &inner,
+                        vec![sub("0".into(), n.clone()), sub(n.clone(), len.clone())],
+                    ),
                 ),
                 "split_last_chunk" => (
                     format!("{len} >= {n}"),
-                    expr::tuple_expr(cx, &inner, vec![sub("0".into(), format!("{len} - {n}")), sub(format!("{len} - {n}"), len.clone())]),
+                    expr::tuple_expr(
+                        cx,
+                        &inner,
+                        vec![
+                            sub("0".into(), format!("{len} - {n}")),
+                            sub(format!("{len} - {n}"), len.clone()),
+                        ],
+                    ),
                 ),
                 "as_array" | "as_mut_array" => (format!("{len} == {n}"), v.clone()),
                 "as_chunks" => {
                     super::super::fmt::file_helper(cx, SLICE_VIEW_HELPERS);
-                    let chunks = Expr::static_call("chunks_of", vec![v.clone(), Expr::raw("0"), Expr::raw(n.clone())]);
+                    let chunks = Expr::static_call(
+                        "chunks_of",
+                        vec![v.clone(), Expr::raw("0"), Expr::raw(n.clone())],
+                    );
                     let rest = sub(format!("{len} - {len} % {n}"), len.clone());
                     return Some(expr::tuple_expr(cx, ret, vec![chunks, rest]));
                 }
                 _ => {
                     super::super::fmt::file_helper(cx, SLICE_VIEW_HELPERS);
                     let head = sub("0".into(), format!("{len} % {n}"));
-                    let chunks = Expr::static_call("chunks_of", vec![v.clone(), Expr::raw(format!("{len} % {n}")), Expr::raw(n.clone())]);
+                    let chunks = Expr::static_call(
+                        "chunks_of",
+                        vec![
+                            v.clone(),
+                            Expr::raw(format!("{len} % {n}")),
+                            Expr::raw(n.clone()),
+                        ],
+                    );
                     return Some(expr::tuple_expr(cx, ret, vec![head, chunks]));
                 }
             };
-            Some(conditional(Expr::raw(cond), opt_of(value), opt_empty(Some(&inner))))
+            Some(conditional(
+                Expr::raw(cond),
+                opt_of(value),
+                opt_empty(Some(&inner)),
+            ))
         }
         // `s.split_off_first()` on a `&[T]` binding: the item, and `s` shrinks past it.
         "split_off_first" | "split_off_first_mut" | "split_off_last" | "split_off_last_mut" => {
             let v = simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out);
             let vs = render(&v);
             let first = name.starts_with("split_off_first");
-            let item = if first { format!("{vs}.getFirst()") } else { format!("{vs}.getLast()") };
+            let item = if first {
+                format!("{vs}.getFirst()")
+            } else {
+                format!("{vs}.getLast()")
+            };
             let taken = push_local(
                 cx,
                 line,
                 format!("Optional<{}>", elem.boxed()),
-                Some(Expr::raw(format!("{vs}.isEmpty() ? Optional.empty() : Optional.of({item})"))),
+                Some(Expr::raw(format!(
+                    "{vs}.isEmpty() ? Optional.empty() : Optional.of({item})"
+                ))),
                 out,
                 "taken",
             );
-            let rest = if first { format!("{vs}.subList(1, {vs}.size())") } else { format!("{vs}.subList(0, {vs}.size() - 1)") };
-            assign_if(cx, _recv_ast, &format!("!{vs}.isEmpty()"), Expr::raw(rest), line, out);
+            let rest = if first {
+                format!("{vs}.subList(1, {vs}.size())")
+            } else {
+                format!("{vs}.subList(0, {vs}.size() - 1)")
+            };
+            assign_if(
+                cx,
+                _recv_ast,
+                &format!("!{vs}.isEmpty()"),
+                Expr::raw(rest),
+                line,
+                out,
+            );
             Some(Expr::name(taken))
         }
         // `s.split_off(..k)` / `s.split_off(k..)` on a slice binding (a `Vec`'s takes an index).
@@ -1693,26 +1770,53 @@ pub(super) fn lower_vec_method(
             };
             let k = render(&simple(cx, bound, &Ty::Int(Int::Usize), line, out));
             let (removed, kept) = if front {
-                (format!("{vs}.subList(0, {k})"), format!("{vs}.subList({k}, {vs}.size())"))
+                (
+                    format!("{vs}.subList(0, {k})"),
+                    format!("{vs}.subList({k}, {vs}.size())"),
+                )
             } else {
-                (format!("{vs}.subList({k}, {vs}.size())"), format!("{vs}.subList(0, {k})"))
+                (
+                    format!("{vs}.subList({k}, {vs}.size())"),
+                    format!("{vs}.subList(0, {k})"),
+                )
             };
             let taken = push_local(
                 cx,
                 line,
                 format!("Optional<List<{}>>", elem.boxed()),
-                Some(Expr::raw(format!("{k} <= {vs}.size() ? Optional.of({removed}) : Optional.empty()"))),
+                Some(Expr::raw(format!(
+                    "{k} <= {vs}.size() ? Optional.of({removed}) : Optional.empty()"
+                ))),
                 out,
                 "taken",
             );
-            assign_if(cx, _recv_ast, &format!("{taken}.isPresent()"), Expr::raw(kept), line, out);
+            assign_if(
+                cx,
+                _recv_ast,
+                &format!("{taken}.isPresent()"),
+                Expr::raw(kept),
+                line,
+                out,
+            );
             Some(Expr::name(taken))
         }
         // `[i, j]` distinct and in range: the items (shared objects, so writes reach the list).
         "get_disjoint_mut" => {
             cx.needs_result = true;
-            let v = render(&simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out));
-            let idx = render(&simple(cx, b0, &Ty::Vec(Box::new(Ty::Int(Int::Usize))), line, out));
+            let v = render(&simple(
+                cx,
+                recv,
+                &Ty::Vec(Box::new(elem.clone())),
+                line,
+                out,
+            ));
+            let idx = render(&simple(
+                cx,
+                b0,
+                &Ty::Vec(Box::new(Ty::Int(Int::Usize))),
+                line,
+                out,
+            ));
             lambda_params!(cx; i);
             let ok_ty = match ret.strip_refs() {
                 Ty::Result(ok, _) => ok.boxed(),
@@ -1750,9 +1854,16 @@ pub(super) fn lower_vec_method(
                 "is_sorted" => Expr::static_call("is_sorted", vec![recv, sorted_le(cx, elem)]),
                 "is_sorted_by" => Expr::static_call("is_sorted", vec![recv, b0]),
                 _ => {
-                    let key = arg_asts.first().and_then(|a| closure_body_ty(cx, a)).unwrap_or(Ty::Other("?".into()));
+                    let key = arg_asts
+                        .first()
+                        .and_then(|a| closure_body_ty(cx, a))
+                        .unwrap_or(Ty::Other("?".into()));
                     let keys = Expr::call(
-                        Expr::call(Expr::call(recv, "stream", vec![]), &format!("<{}>map", key.boxed()), vec![b0]),
+                        Expr::call(
+                            Expr::call(recv, "stream", vec![]),
+                            &format!("<{}>map", key.boxed()),
+                            vec![b0],
+                        ),
                         "toList",
                         vec![],
                     );
@@ -1771,12 +1882,19 @@ pub(super) fn lower_vec_method(
             };
             let v = simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out);
             let (from, to) = range_ends(cx, &r, &v, out);
-            Some(Expr::static_call("copy_within", vec![v, from, to, b1.clone()]))
+            Some(Expr::static_call(
+                "copy_within",
+                vec![v, from, to, b1.clone()],
+            ))
         }
         "repeat" => {
             let copies = Expr::call(Expr::raw("Collections"), "nCopies", vec![b0, recv]);
             Some(Expr::call(
-                Expr::call(Expr::call(copies, "stream", vec![]), "flatMap", vec![Expr::raw("List::stream")]),
+                Expr::call(
+                    Expr::call(copies, "stream", vec![]),
+                    "flatMap",
+                    vec![Expr::raw("List::stream")],
+                ),
                 "collect",
                 vec![Expr::raw("Collectors.toCollection(ArrayList::new)")],
             ))
@@ -1786,27 +1904,57 @@ pub(super) fn lower_vec_method(
             super::super::fmt::file_helper(cx, SLICE_EDIT_HELPERS);
             Some(Expr::static_call("slice_join", vec![recv, b0]))
         }
-        "connect" => lower_vec_method(cx, m, _recv_ast, recv, elem, args, arg_asts, "join", ret, line, out),
+        "connect" => lower_vec_method(
+            cx, m, _recv_ast, recv, elem, args, arg_asts, "join", ret, line, out,
+        ),
         "into_vec" => Some(recv),
         // `[u8]` as ASCII text.
         "is_ascii" => {
             lambda_params!(cx; b);
-            Some(Expr::call(Expr::call(recv, "stream", vec![]), "allMatch", vec![Expr::raw(format!("{b} -> {b} < 128"))]))
+            Some(Expr::call(
+                Expr::call(recv, "stream", vec![]),
+                "allMatch",
+                vec![Expr::raw(format!("{b} -> {b} < 128"))],
+            ))
         }
-        "eq_ignore_ascii_case" | "to_ascii_uppercase" | "to_ascii_lowercase" | "make_ascii_uppercase" | "make_ascii_lowercase" => {
+        "eq_ignore_ascii_case"
+        | "to_ascii_uppercase"
+        | "to_ascii_lowercase"
+        | "make_ascii_uppercase"
+        | "make_ascii_lowercase" => {
             super::super::fmt::file_helper(cx, super::text::ASCII_CHAR_HELPERS);
             lambda_params!(cx; b);
-            let f = if name.ends_with("uppercase") { "ascii_upper" } else { "ascii_lower" };
+            let f = if name.ends_with("uppercase") {
+                "ascii_upper"
+            } else {
+                "ascii_lower"
+            };
             Some(match name {
                 "eq_ignore_ascii_case" => {
                     let lower = |e: Expr| {
-                        Expr::call(Expr::call(e, "stream", vec![]), "map", vec![Expr::raw(format!("{b} -> ascii_lower({b})"))])
+                        Expr::call(
+                            Expr::call(e, "stream", vec![]),
+                            "map",
+                            vec![Expr::raw(format!("{b} -> ascii_lower({b})"))],
+                        )
                     };
-                    Expr::call(Expr::call(lower(recv), "toList", vec![]), "equals", vec![Expr::call(lower(b0), "toList", vec![])])
+                    Expr::call(
+                        Expr::call(lower(recv), "toList", vec![]),
+                        "equals",
+                        vec![Expr::call(lower(b0), "toList", vec![])],
+                    )
                 }
-                n if n.starts_with("make_") => Expr::call(recv, "replaceAll", vec![Expr::raw(format!("{b} -> {f}({b})"))]),
+                n if n.starts_with("make_") => Expr::call(
+                    recv,
+                    "replaceAll",
+                    vec![Expr::raw(format!("{b} -> {f}({b})"))],
+                ),
                 _ => Expr::call(
-                    Expr::call(Expr::call(recv, "stream", vec![]), "map", vec![Expr::raw(format!("{b} -> {f}({b})"))]),
+                    Expr::call(
+                        Expr::call(recv, "stream", vec![]),
+                        "map",
+                        vec![Expr::raw(format!("{b} -> {f}({b})"))],
+                    ),
                     "collect",
                     vec![Expr::raw("Collectors.toCollection(ArrayList::new)")],
                 ),
@@ -1819,7 +1967,10 @@ pub(super) fn lower_vec_method(
                 "trim_ascii_start" => ("true", "false"),
                 _ => ("false", "true"),
             };
-            Some(Expr::static_call("trim_ascii_bytes", vec![recv, Expr::raw(s), Expr::raw(e)]))
+            Some(Expr::static_call(
+                "trim_ascii_bytes",
+                vec![recv, Expr::raw(s), Expr::raw(e)],
+            ))
         }
         "split_first" | "split_last" | "split_first_mut" | "split_last_mut" => {
             let recv = simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out);
@@ -1907,7 +2058,9 @@ pub(super) fn lower_vec_method(
             Some(Expr::raw("null"))
         }
         "clone" => Some(clone_elems(cx, m, recv, elem)),
-        "as_slice" | "as_mut" | "as_mut_slice" | "into_boxed_slice" | "each_ref" | "each_mut" => Some(recv),
+        "as_slice" | "as_mut" | "as_mut_slice" | "into_boxed_slice" | "each_ref" | "each_mut" => {
+            Some(recv)
+        }
         // `[T; N]::map`: a new array of the results.
         "map" => {
             let f = args.first().cloned()?;
@@ -2642,9 +2795,11 @@ fn binary_search_loop(
     };
     let cmp = match key {
         // Simple mode has no comparator for ints: a primitive key compares statically.
-        Some((k, kty)) if crate::mode::simple() && kty.strip_refs().is_primitive() => {
-            Expr::call(Expr::raw(kty.strip_refs().boxed()), "compare", vec![applied, k])
-        }
+        Some((k, kty)) if crate::mode::simple() && kty.strip_refs().is_primitive() => Expr::call(
+            Expr::raw(kty.strip_refs().boxed()),
+            "compare",
+            vec![applied, k],
+        ),
         Some((k, kty)) => ord_compare(cx, &kty, applied, k),
         None => applied,
     };
@@ -2687,7 +2842,9 @@ fn binary_search_loop(
 
 // `v.binary_search(&x)` on a list, as a syntax node.
 fn search_call(cx: &Cx, e: &ast::Expr) -> Option<ast::MethodCallExpr> {
-    let ast::Expr::MethodCallExpr(m) = strip_parens(e) else { return None };
+    let ast::Expr::MethodCallExpr(m) = strip_parens(e) else {
+        return None;
+    };
     let recv = m.receiver()?;
     (super::method_name(&m) == "binary_search" && matches!(cx.ty(&recv).strip_refs(), Ty::Vec(_)))
         .then_some(m)
@@ -2700,7 +2857,14 @@ fn search_arms(m: &ast::MatchExpr) -> Option<Vec<(Option<bool>, Option<String>, 
         let (ok, bind) = match a.pat()? {
             ast::Pat::WildcardPat(_) => (None, None),
             ast::Pat::TupleStructPat(tp) => {
-                let ok = match tp.path()?.segment()?.name_ref()?.text().to_string().as_ref() {
+                let ok = match tp
+                    .path()?
+                    .segment()?
+                    .name_ref()?
+                    .text()
+                    .to_string()
+                    .as_ref()
+                {
                     "Ok" => true,
                     "Err" => false,
                     _ => return None,
@@ -2708,7 +2872,9 @@ fn search_arms(m: &ast::MatchExpr) -> Option<Vec<(Option<bool>, Option<String>, 
                 let mut fields = tp.fields();
                 let bind = match fields.next()? {
                     ast::Pat::WildcardPat(_) => None,
-                    ast::Pat::IdentPat(ip) if ip.pat().is_none() => Some(ip.name()?.text().to_string()),
+                    ast::Pat::IdentPat(ip) if ip.pat().is_none() => {
+                        Some(ip.name()?.text().to_string())
+                    }
                     _ => return None,
                 };
                 if fields.next().is_some() {
@@ -2729,7 +2895,9 @@ pub(crate) fn plain_search_use(cx: &Cx, e: &ast::Expr) -> bool {
     if !crate::mode::simple() || search_call(cx, e).is_none() {
         return false;
     }
-    let Some(parent) = e.syntax().parent() else { return false };
+    let Some(parent) = e.syntax().parent() else {
+        return false;
+    };
     if let Some(m) = ast::MethodCallExpr::cast(parent.clone()) {
         return match super::method_name(&m).as_str() {
             "is_ok" | "is_err" => true,
@@ -2745,7 +2913,10 @@ fn insertion_closure(m: &ast::MethodCallExpr) -> bool {
     let Some(ast::Expr::ClosureExpr(c)) = m.arg_list().and_then(|a| a.args().next()) else {
         return false;
     };
-    let param = c.param_list().and_then(|p| p.params().next()).and_then(|p| p.pat());
+    let param = c
+        .param_list()
+        .and_then(|p| p.params().next())
+        .and_then(|p| p.pat());
     let body = c.body().map(|b| b.syntax().text().to_string());
     matches!((param, body), (Some(ast::Pat::IdentPat(ip)), Some(b)) if ip.name().is_some_and(|n| n.text() == b.as_str()))
 }
@@ -2758,12 +2929,20 @@ fn search_expr(cx: &mut Cx, call: &ast::MethodCallExpr, out: &mut Vec<Stmt>) -> 
         k => k,
     };
     let key = expr::lower_expr(cx, &key, out);
-    Some(Expr::call(Expr::raw("Collections"), "binarySearch", vec![v, key]))
+    Some(Expr::call(
+        Expr::raw("Collections"),
+        "binarySearch",
+        vec![v, key],
+    ))
 }
 
 // `v.binary_search(&x).is_ok()` → `Collections.binarySearch(v, x) >= 0`; `.unwrap_or_else(|i| i)`
 // → `pos >= 0 ? pos : -pos - 1`.
-pub(crate) fn lower_search_method(cx: &mut Cx, m: &ast::MethodCallExpr, out: &mut Vec<Stmt>) -> Option<Expr> {
+pub(crate) fn lower_search_method(
+    cx: &mut Cx,
+    m: &ast::MethodCallExpr,
+    out: &mut Vec<Stmt>,
+) -> Option<Expr> {
     let recv = m.receiver()?;
     if !plain_search_use(cx, &recv) {
         return None;
@@ -2789,15 +2968,28 @@ pub(crate) fn lower_search_method(cx: &mut Cx, m: &ast::MethodCallExpr, out: &mu
 // `match v.binary_search(&x) { Ok(i) => .., Err(i) if .. => .., Err(i) => .. }` as an if-chain
 // on `int pos = Collections.binarySearch(v, x);`, where a found `i` is `pos` and a missing one
 // `-pos - 1`.
-pub(crate) fn lower_search_match(cx: &mut Cx, m: &ast::MatchExpr, dest: &super::super::stmt::Dest, out: &mut Vec<Stmt>) -> bool {
+pub(crate) fn lower_search_match(
+    cx: &mut Cx,
+    m: &ast::MatchExpr,
+    dest: &super::super::stmt::Dest,
+    out: &mut Vec<Stmt>,
+) -> bool {
     let Some(scrut) = m.expr() else { return false };
     if !plain_search_use(cx, &scrut) {
         return false;
     }
-    let (Some(call), Some(arms)) = (search_call(cx, &scrut), search_arms(m)) else { return false };
+    let (Some(call), Some(arms)) = (search_call(cx, &scrut), search_arms(m)) else {
+        return false;
+    };
     let line = cx.line(m.syntax());
-    let Some(search) = search_expr(cx, &call, out) else { return false };
-    let base = if arms.iter().any(|(_, b, _)| b.as_deref() == Some("pos")) { "index" } else { "pos" };
+    let Some(search) = search_expr(cx, &call, out) else {
+        return false;
+    };
+    let base = if arms.iter().any(|(_, b, _)| b.as_deref() == Some("pos")) {
+        "index"
+    } else {
+        "pos"
+    };
     let pos = push_local(cx, line, "int".into(), Some(search), out, base);
     let missing = format!("-{pos} - 1");
     // `Ok(_) => {}` does nothing: drop it, and keep the Ok/Err test on the arms after it.
@@ -2805,7 +2997,8 @@ pub(crate) fn lower_search_match(cx: &mut Cx, m: &ast::MatchExpr, dest: &super::
         a.guard().is_none()
             && matches!(a.expr(), Some(ast::Expr::BlockExpr(b)) if b.stmt_list().is_some_and(|l| l.statements().next().is_none() && l.tail_expr().is_none()))
     };
-    let dropped = matches!(dest, super::super::stmt::Dest::Discard) && arms.iter().any(|(_, _, a)| is_empty(a));
+    let dropped = matches!(dest, super::super::stmt::Dest::Discard)
+        && arms.iter().any(|(_, _, a)| is_empty(a));
     let mut kept = Vec::new();
     // Whether a kept unguarded arm before this one already took every found / missing position.
     let (mut found_done, mut missing_done) = (false, false);
@@ -2842,7 +3035,11 @@ pub(crate) fn lower_search_match(cx: &mut Cx, m: &ast::MatchExpr, dest: &super::
                     let java = cx.declare(b);
                     stmts.push(Stmt::new(
                         aline,
-                        StmtKind::Local { ty: "int".into(), name: java, init: Some(Expr::raw(missing.clone())) },
+                        StmtKind::Local {
+                            ty: "int".into(),
+                            name: java,
+                            init: Some(Expr::raw(missing.clone())),
+                        },
                     ));
                 }
             }
@@ -2851,7 +3048,11 @@ pub(crate) fn lower_search_match(cx: &mut Cx, m: &ast::MatchExpr, dest: &super::
         // rustc checked exhaustiveness: the last arm needs no test, unless an arm was dropped.
         if i + 1 < n || arm.guard().is_some() || dropped {
             if let Some(found) = side {
-                conds.push(Expr::bin(Expr::name(&pos), if *found { ">=" } else { "<" }, Expr::raw("0")));
+                conds.push(Expr::bin(
+                    Expr::name(&pos),
+                    if *found { ">=" } else { "<" },
+                    Expr::raw("0"),
+                ));
             }
             if let Some(g) = arm.guard().and_then(|g| g.condition()) {
                 conds.push(expr::lower_expr(cx, &g, &mut Vec::new()));
@@ -2861,8 +3062,14 @@ pub(crate) fn lower_search_match(cx: &mut Cx, m: &ast::MatchExpr, dest: &super::
             Some(b) => {
                 super::super::stmt::lower_to_dest(cx, &b, dest, &mut stmts);
                 // A block arm is the branch's own block.
-                if let Some(Stmt { kind: StmtKind::Block(_), .. }) = stmts.last()
-                    && let Some(Stmt { kind: StmtKind::Block(inner), .. }) = stmts.pop()
+                if let Some(Stmt {
+                    kind: StmtKind::Block(_),
+                    ..
+                }) = stmts.last()
+                    && let Some(Stmt {
+                        kind: StmtKind::Block(inner),
+                        ..
+                    }) = stmts.pop()
                 {
                     stmts.extend(inner.stmts);
                 }
@@ -2872,14 +3079,23 @@ pub(crate) fn lower_search_match(cx: &mut Cx, m: &ast::MatchExpr, dest: &super::
         };
         cx.pop_scope();
         let cond = conds.into_iter().reduce(|a, b| Expr::bin(a, "&&", b));
-        let empty = stmts.iter().all(|s| matches!(&s.kind, StmtKind::Block(b) if b.stmts.is_empty()));
+        let empty = stmts
+            .iter()
+            .all(|s| matches!(&s.kind, StmtKind::Block(b) if b.stmts.is_empty()));
         els = Some(Box::new(match cond {
             Some(cond) => Stmt::new(
                 aline,
-                StmtKind::If { cond, then: crate::jir::Block { stmts, close_line }, els: els.take() },
+                StmtKind::If {
+                    cond,
+                    then: crate::jir::Block { stmts, close_line },
+                    els: els.take(),
+                },
             ),
             None if empty && els.is_none() => continue,
-            None => Stmt::new(aline, StmtKind::Block(crate::jir::Block { stmts, close_line })),
+            None => Stmt::new(
+                aline,
+                StmtKind::Block(crate::jir::Block { stmts, close_line }),
+            ),
         }));
     }
     if let Some(e) = els {

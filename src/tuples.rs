@@ -47,7 +47,10 @@ pub fn named(ts: &[Ty]) -> Option<Named> {
 // Every named record, sorted by name.
 pub fn all() -> Vec<Named> {
     let guard = NAMED.read().unwrap();
-    let mut v: Vec<Named> = guard.as_ref().map(|m| m.values().cloned().collect()).unwrap_or_default();
+    let mut v: Vec<Named> = guard
+        .as_ref()
+        .map(|m| m.values().cloned().collect())
+        .unwrap_or_default();
     v.sort_by(|a, b| a.name.cmp(&b.name));
     v
 }

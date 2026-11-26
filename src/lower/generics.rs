@@ -35,10 +35,13 @@ pub fn analyze(cx: &mut Cx, root: &SyntaxNode) {
             let mine = type_params(f);
             let Some(body) = f.body() else { continue };
             for (callee, arg_tys) in calls(cx, body.syntax()) {
-                let Some(theirs) = need.get(&callee).cloned() else { continue };
+                let Some(theirs) = need.get(&callee).cloned() else {
+                    continue;
+                };
                 let subst = substitute(cx, callee, &arg_tys);
                 for name in theirs {
-                    let Some(Ty::Param(to)) = subst.get(&name).map(|t| t.strip_refs().clone()) else {
+                    let Some(Ty::Param(to)) = subst.get(&name).map(|t| t.strip_refs().clone())
+                    else {
                         continue;
                     };
                     if !mine.contains(&to) {
@@ -67,9 +70,10 @@ fn type_params(f: &ast::Fn) -> Vec<String> {
         .flat_map(|l| l.type_or_const_params())
         .filter_map(|p| Some(p.name()?.text().to_string()))
         .collect();
-    let owner = f.syntax().ancestors().find(|a| {
-        ast::Impl::can_cast(a.kind()) || ast::Trait::can_cast(a.kind())
-    });
+    let owner = f
+        .syntax()
+        .ancestors()
+        .find(|a| ast::Impl::can_cast(a.kind()) || ast::Trait::can_cast(a.kind()));
     if let Some(owner) = owner {
         let list = ast::Impl::cast(owner.clone())
             .and_then(|i| i.generic_param_list())
@@ -85,12 +89,16 @@ fn type_params(f: &ast::Fn) -> Vec<String> {
 
 // Which of `params` the body asks `default()` for.
 fn default_params(params: &[String], f: &ast::Fn) -> Vec<String> {
-    let Some(body) = f.body() else { return Vec::new() };
+    let Some(body) = f.body() else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     for p in body.syntax().descendants().filter_map(ast::PathExpr::cast) {
         let Some(path) = p.path() else { continue };
         let text = path.syntax().text().to_string();
-        let Some(q) = text.strip_suffix("::default").map(|q| q.rsplit("::").next().unwrap_or(q))
+        let Some(q) = text
+            .strip_suffix("::default")
+            .map(|q| q.rsplit("::").next().unwrap_or(q))
         else {
             continue;
         };
@@ -106,18 +114,29 @@ fn calls(cx: &Cx, body: &SyntaxNode) -> Vec<(Function, Vec<Ty>)> {
     let mut out = Vec::new();
     for n in body.descendants() {
         if let Some(c) = ast::CallExpr::cast(n.clone()) {
-            let Some(ast::Expr::PathExpr(pe)) = c.expr() else { continue };
+            let Some(ast::Expr::PathExpr(pe)) = c.expr() else {
+                continue;
+            };
             let Some(PathResolution::Def(ModuleDef::Function(f))) =
                 pe.path().and_then(|p| cx.sema.resolve_path(&p))
             else {
                 continue;
             };
-            let tys = c.arg_list().map(|a| a.args().map(|x| cx.ty(&x)).collect()).unwrap_or_default();
+            let tys = c
+                .arg_list()
+                .map(|a| a.args().map(|x| cx.ty(&x)).collect())
+                .unwrap_or_default();
             out.push((f, tys));
         } else if let Some(m) = ast::MethodCallExpr::cast(n) {
-            let Some(f) = cx.sema.resolve_method_call(&m) else { continue };
+            let Some(f) = cx.sema.resolve_method_call(&m) else {
+                continue;
+            };
             let mut tys: Vec<Ty> = m.receiver().map(|r| vec![cx.ty(&r)]).unwrap_or_default();
-            tys.extend(m.arg_list().map(|a| a.args().map(|x| cx.ty(&x)).collect::<Vec<_>>()).unwrap_or_default());
+            tys.extend(
+                m.arg_list()
+                    .map(|a| a.args().map(|x| cx.ty(&x)).collect::<Vec<_>>())
+                    .unwrap_or_default(),
+            );
             out.push((f, tys));
         }
     }
@@ -176,8 +195,15 @@ pub(super) fn default_supplier(ty: &Ty) -> Option<String> {
 }
 
 // The extra arguments a call to `f` needs: a `Supplier<T>` per type parameter it asks for.
-pub(super) fn supplier_args(cx: &mut Cx, f: Function, arg_tys: &[Ty], node: &SyntaxNode) -> Vec<Expr> {
-    let Some(names) = cx.supplier_fns.get(&f).cloned() else { return Vec::new() };
+pub(super) fn supplier_args(
+    cx: &mut Cx,
+    f: Function,
+    arg_tys: &[Ty],
+    node: &SyntaxNode,
+) -> Vec<Expr> {
+    let Some(names) = cx.supplier_fns.get(&f).cloned() else {
+        return Vec::new();
+    };
     let subst = substitute(cx, f, arg_tys);
     let mut out = Vec::new();
     for name in names {

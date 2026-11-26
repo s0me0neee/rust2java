@@ -163,7 +163,11 @@ fn lower_for_kind(
         };
         let header = ix.header(&idx);
         let mut binds = Vec::new();
-        for ((field, value), item) in fields.iter().zip(super::indexed::item_exprs(&ix, &idx)).zip(&ix.items) {
+        for ((field, value), item) in fields
+            .iter()
+            .zip(super::indexed::item_exprs(&ix, &idx))
+            .zip(&ix.items)
+        {
             if plain_idx.is_some() && matches!(value, Expr::Name(ref n) if *n == idx) {
                 continue;
             }
@@ -171,13 +175,18 @@ fn lower_for_kind(
             if let ast::Pat::IdentPat(ip) = field
                 && ip.pat().is_none()
                 && matches!(cx.pat_ty(field), Ty::Ref { mutable: true, ref inner } if super::is_mut_ref_cell_ty(&Ty::Ref { mutable: true, inner: inner.clone() }))
-                && let super::indexed::Item::Elem { seq, text: false, .. } = item
+                && let super::indexed::Item::Elem {
+                    seq, text: false, ..
+                } = item
                 && let Some(local) = cx.sema.to_def(ip)
             {
                 if let Some(n) = simple_ident(field) {
                     cx.declare(&n);
                 }
-                cx.elem_aliases.insert(local, (seq.clone(), item.at(&idx), super::ElemAliasKind::List));
+                cx.elem_aliases.insert(
+                    local,
+                    (seq.clone(), item.at(&idx), super::ElemAliasKind::List),
+                );
                 continue;
             }
             super::pat::bind_pattern(cx, field, value, &mut binds);
@@ -272,12 +281,27 @@ fn lower_for_kind(
         && idx_ip.mut_token().is_none()
         && let Some(idx_name) = simple_ident(idx_pat)
     {
-        return counted_each(cx, f, idx_ip, &idx_name, elem_pat, &strip_parens(&src), line, out);
+        return counted_each(
+            cx,
+            f,
+            idx_ip,
+            &idx_name,
+            elem_pat,
+            &strip_parens(&src),
+            line,
+            out,
+        );
     }
     for_each(cx, f, p, iterable, out)
 }
 
-fn for_each(cx: &mut Cx, f: &ast::ForExpr, p: &ast::Pat, iterable: &ast::Expr, out: &mut Vec<Stmt>) -> ForStmt {
+fn for_each(
+    cx: &mut Cx,
+    f: &ast::ForExpr,
+    p: &ast::Pat,
+    iterable: &ast::Expr,
+    out: &mut Vec<Stmt>,
+) -> ForStmt {
     // A line-mode stdin `lines()` stream carries plain Strings, not phantom `Result`s.
     let elem_ty = if super::std_map::io::plain_lines_iterable(cx, iterable) {
         Ty::Str
@@ -288,9 +312,14 @@ fn for_each(cx: &mut Cx, f: &ast::ForExpr, p: &ast::Pat, iterable: &ast::Expr, o
     let iter = for_each_source(cx, iterable, &it_ty, &elem_ty, out);
     // Leaving early must leave the rest of stdin unread.
     let iter = match iter {
-        Expr::Call { recv: Some(r), name, .. } if name == "toList" && reads_stdin(&r) && exits_early(cx, f) => {
-            Expr::Cast("Iterable<String>".into(), Box::new(Expr::raw(format!("{}::iterator", render(&r)))))
-        }
+        Expr::Call {
+            recv: Some(r),
+            name,
+            ..
+        } if name == "toList" && reads_stdin(&r) && exits_early(cx, f) => Expr::Cast(
+            "Iterable<String>".into(),
+            Box::new(Expr::raw(format!("{}::iterator", render(&r)))),
+        ),
         other => other,
     };
     let (name, mut binds) = match simple_ident(p) {
@@ -331,26 +360,62 @@ fn counted_each(
     let skips = continues_loop(f);
     let pos = out.len();
     let idx = cx.declare(idx_name);
-    let counter = if captured || skips { cx.fresh("index") } else { idx.clone() };
-    let ForStmt::Each { ty, name, iter, mut body } = for_each(cx, f, elem_pat, src, out) else {
+    let counter = if captured || skips {
+        cx.fresh("index")
+    } else {
+        idx.clone()
+    };
+    let ForStmt::Each {
+        ty,
+        name,
+        iter,
+        mut body,
+    } = for_each(cx, f, elem_pat, src, out)
+    else {
         unreachable!()
     };
     let falls_through = body.stmts.last().is_none_or(completes);
-    let counter = if counter == idx && !falls_through { cx.fresh("index") } else { counter };
+    let counter = if counter == idx && !falls_through {
+        cx.fresh("index")
+    } else {
+        counter
+    };
     out.insert(
         pos,
-        Stmt::new(line, StmtKind::Local { ty: jt.clone(), name: counter.clone(), init: Some(Expr::raw("0")) }),
+        Stmt::new(
+            line,
+            StmtKind::Local {
+                ty: jt.clone(),
+                name: counter.clone(),
+                init: Some(Expr::raw("0")),
+            },
+        ),
     );
     if counter == idx {
         let end = body.close_line.max(line);
-        body.stmts.push(Stmt::new(end, StmtKind::Expr(Expr::raw(format!("{idx}++")))));
+        body.stmts.push(Stmt::new(
+            end,
+            StmtKind::Expr(Expr::raw(format!("{idx}++"))),
+        ));
     } else {
         body.stmts.insert(
             0,
-            Stmt::new(line, StmtKind::Local { ty: jt, name: idx, init: Some(Expr::raw(format!("{counter}++"))) }),
+            Stmt::new(
+                line,
+                StmtKind::Local {
+                    ty: jt,
+                    name: idx,
+                    init: Some(Expr::raw(format!("{counter}++"))),
+                },
+            ),
         );
     }
-    ForStmt::Each { ty, name, iter, body }
+    ForStmt::Each {
+        ty,
+        name,
+        iter,
+        body,
+    }
 }
 
 // A `break`, `return` or `?` in the body (conservatively, at any depth); `line?` on a plain stdin
@@ -361,7 +426,8 @@ fn exits_early(cx: &Cx, f: &ast::ForExpr) -> bool {
             ast::BreakExpr::can_cast(n.kind())
                 || ast::ReturnExpr::can_cast(n.kind())
                 || ast::TryExpr::cast(n).is_some_and(|t| {
-                    !t.expr().is_some_and(|e| super::std_map::io::phantom_line_result(cx, &e))
+                    !t.expr()
+                        .is_some_and(|e| super::std_map::io::phantom_line_result(cx, &e))
                 })
         })
     })
@@ -374,30 +440,42 @@ fn reads_stdin(e: &Expr) -> bool {
 
 // A `continue` (bare or labeled) that restarts this loop.
 fn continues_loop(f: &ast::ForExpr) -> bool {
-    let label = f.label().and_then(|l| l.lifetime()).map(|l| l.text().to_string());
-    let Some(body) = f.loop_body() else { return false };
-    body.syntax().descendants().filter_map(ast::ContinueExpr::cast).any(|c| {
-        match c.lifetime() {
-            Some(l) => Some(l.text().to_string()) == label,
-            // Bare: the innermost loop around it is this one.
-            None => c
-                .syntax()
-                .ancestors()
-                .find(|a| {
-                    ast::ForExpr::can_cast(a.kind())
-                        || ast::WhileExpr::can_cast(a.kind())
-                        || ast::LoopExpr::can_cast(a.kind())
-                })
-                .is_some_and(|a| a == *f.syntax()),
-        }
-    })
+    let label = f
+        .label()
+        .and_then(|l| l.lifetime())
+        .map(|l| l.text().to_string());
+    let Some(body) = f.loop_body() else {
+        return false;
+    };
+    body.syntax()
+        .descendants()
+        .filter_map(ast::ContinueExpr::cast)
+        .any(|c| {
+            match c.lifetime() {
+                Some(l) => Some(l.text().to_string()) == label,
+                // Bare: the innermost loop around it is this one.
+                None => c
+                    .syntax()
+                    .ancestors()
+                    .find(|a| {
+                        ast::ForExpr::can_cast(a.kind())
+                            || ast::WhileExpr::can_cast(a.kind())
+                            || ast::LoopExpr::can_cast(a.kind())
+                    })
+                    .is_some_and(|a| a == *f.syntax()),
+            }
+        })
 }
 
 // Whether control can reach the statement after `s`.
 fn completes(s: &Stmt) -> bool {
     match &s.kind {
-        StmtKind::Return(_) | StmtKind::Break(_) | StmtKind::Continue(_) | StmtKind::Throw(_) => false,
-        StmtKind::If { then, els: Some(e), .. } => then.stmts.last().is_none_or(completes) || completes(e),
+        StmtKind::Return(_) | StmtKind::Break(_) | StmtKind::Continue(_) | StmtKind::Throw(_) => {
+            false
+        }
+        StmtKind::If {
+            then, els: Some(e), ..
+        } => then.stmts.last().is_none_or(completes) || completes(e),
         StmtKind::Block(b) => b.stmts.last().is_none_or(completes),
         StmtKind::Switch { arms, .. } => arms.iter().any(|a| match &a.body {
             crate::jir::ArmBody::Expr(_) => true,
@@ -535,19 +613,35 @@ fn iter_mut_for_each(
 fn range_parts(cx: &Cx, e: &ast::Expr) -> Option<(Option<ast::Expr>, Option<ast::Expr>, bool)> {
     use ast::RangeItem;
     match strip_parens(e) {
-        ast::Expr::RangeExpr(r) => Some((r.start(), r.end(), r.op_kind() == Some(ast::RangeOp::Inclusive))),
+        ast::Expr::RangeExpr(r) => Some((
+            r.start(),
+            r.end(),
+            r.op_kind() == Some(ast::RangeOp::Inclusive),
+        )),
         ast::Expr::CallExpr(c)
-            if c.expr().is_some_and(|f| f.syntax().text().to_string().ends_with("RangeInclusive::new")) =>
+            if c.expr().is_some_and(|f| {
+                f.syntax()
+                    .text()
+                    .to_string()
+                    .ends_with("RangeInclusive::new")
+            }) =>
         {
             let mut args = c.arg_list()?.args();
             Some((args.next(), args.next(), true))
         }
         p @ ast::Expr::PathExpr(_) => {
-            let ip = cx.local_of_path(&p)?.primary_source(cx.db).into_ident_pat()?;
+            let ip = cx
+                .local_of_path(&p)?
+                .primary_source(cx.db)
+                .into_ident_pat()?;
             if ip.mut_token().is_some() {
                 return None;
             }
-            let init = ip.syntax().parent().and_then(ast::LetStmt::cast)?.initializer()?;
+            let init = ip
+                .syntax()
+                .parent()
+                .and_then(ast::LetStmt::cast)?
+                .initializer()?;
             let parts = range_parts(cx, &init)?;
             // Read again at the use: the bounds must not have changed since.
             let fixed = |b: &Option<ast::Expr>| b.as_ref().is_none_or(|b| fixed_value(cx, b));
@@ -631,8 +725,8 @@ fn for_each_source(
         );
     }
     // Simple mode: `for x in [a, b]` only reads the literal, so `List.of(a, b)` will do.
-    cx.read_only_literal =
-        crate::mode::simple() && matches!(iterable, ast::Expr::ArrayExpr(a) if a.semicolon_token().is_none());
+    cx.read_only_literal = crate::mode::simple()
+        && matches!(iterable, ast::Expr::ArrayExpr(a) if a.semicolon_token().is_none());
     let src = expr::lower_expr(cx, iterable, out);
     cx.read_only_literal = false;
     // A user type with `impl Iterator` iterates through its generated `stream()`.
@@ -671,7 +765,12 @@ fn for_each_source(
 // Simple mode: a split's `Arrays.stream(parts)` iterates `parts`, and a bare `lines()` stream its
 // `toList()` (stdin is read up front, which piped input doesn't notice).
 fn simple_loop_source(src: &Expr) -> Option<Expr> {
-    let Expr::Call { recv: Some(recv), name, args } = src else {
+    let Expr::Call {
+        recv: Some(recv),
+        name,
+        args,
+    } = src
+    else {
         return None;
     };
     match (name.as_str(), args.as_slice()) {
@@ -827,7 +926,11 @@ fn collection_iterable(v: Expr, ty: &Ty) -> Expr {
             };
             Expr::call(Expr::call(v, "stream", vec![]), "toList", vec![])
         }
-        Ty::Result(..) => Expr::call(Expr::call(Expr::call(v, "ok", vec![]), "stream", vec![]), "toList", vec![]),
+        Ty::Result(..) => Expr::call(
+            Expr::call(Expr::call(v, "ok", vec![]), "stream", vec![]),
+            "toList",
+            vec![],
+        ),
         _ => v,
     }
 }
@@ -1040,17 +1143,25 @@ pub fn lower_iter_method(
     {
         let line = cx.line(m.syntax());
         let ty = cx.ty(&ast::Expr::MethodCallExpr(m.clone()));
-        let bound = |cx: &mut Cx, b: &Option<ast::Expr>, out: &mut Vec<Stmt>| b.as_ref().map(|b| lower_arg(cx, b, out));
+        let bound = |cx: &mut Cx, b: &Option<ast::Expr>, out: &mut Vec<Stmt>| {
+            b.as_ref().map(|b| lower_arg(cx, b, out))
+        };
         let (s, e) = (bound(cx, &start, out), bound(cx, &end, out));
         return match (name.as_str(), s, e) {
             ("start", Some(s), _) => Some(s),
             ("end", _, Some(e)) => Some(e),
             ("into_inner", Some(s), Some(e)) => Some(expr::tuple_expr(cx, &ty, vec![s, e])),
             ("is_empty", Some(s), Some(e)) => {
-                let elem = start.as_ref().map(|a| cx.ty(a)).unwrap_or(Ty::Int(crate::ty::Int::I32));
+                let elem = start
+                    .as_ref()
+                    .map(|a| cx.ty(a))
+                    .unwrap_or(Ty::Int(crate::ty::Int::I32));
                 let s = ensure_simple(cx, s, &elem, line, out);
                 let e = ensure_simple(cx, e, &elem, line, out);
-                Some(Expr::Unary("!", Box::new(Expr::bin(s, if inclusive { "<=" } else { "<" }, e))))
+                Some(Expr::Unary(
+                    "!",
+                    Box::new(Expr::bin(s, if inclusive { "<=" } else { "<" }, e)),
+                ))
             }
             _ => None,
         };
@@ -1093,7 +1204,10 @@ pub fn lower_iter_method(
     // `rchunks_exact`: the first `len % k`.
     if name == "remainder"
         && let ast::Expr::MethodCallExpr(chunks) = strip_parens(&recv_ast)
-        && matches!(method_name(&chunks).as_str(), "chunks_exact" | "rchunks_exact")
+        && matches!(
+            method_name(&chunks).as_str(),
+            "chunks_exact" | "rchunks_exact"
+        )
         && let (Some(v), Some(k)) = (chunks.receiver(), arg_exprs(&chunks).first().cloned())
     {
         let line = cx.line(m.syntax());
@@ -1263,7 +1377,11 @@ fn lower_source(
             let k = ensure_simple(cx, k, &Ty::Int(Int::Usize), line, out);
             let i = cx.fresh("i");
             let (vs, ks) = (render(&v), render(&k));
-            let count = if name == "chunks" { format!("({vs}.size() + {ks} - 1) / {ks}") } else { format!("{vs}.size() / {ks}") };
+            let count = if name == "chunks" {
+                format!("({vs}.size() + {ks} - 1) / {ks}")
+            } else {
+                format!("{vs}.size() / {ks}")
+            };
             Expr::raw(format!(
                 "IntStream.range(0, {count}).mapToObj({i} -> {vs}.subList({i} * {ks}, Math.min({i} * {ks} + {ks}, {vs}.size())))"
             ))
@@ -1275,23 +1393,48 @@ fn lower_source(
             let v = ensure_simple(cx, recv.clone(), &recv_ty, line, out);
             let i = cx.fresh("i");
             let vs = render(&v);
-            Expr::raw(format!("IntStream.rangeClosed(0, {vs}.size() - {n}).mapToObj({i} -> {vs}.subList({i}, {i} + {n}))"))
+            Expr::raw(format!(
+                "IntStream.rangeClosed(0, {vs}.size() - {n}).mapToObj({i} -> {vs}.subList({i}, {i} + {n}))"
+            ))
         }
         (Ty::Vec(_), "rchunks" | "rchunks_mut" | "rchunks_exact" | "rchunks_exact_mut") => {
             super::fmt::file_helper(cx, super::std_map::coll::SLICE_VIEW_HELPERS);
             let k = lower_arg(cx, &args[0], out);
-            let exact = Expr::raw(if name.contains("exact") { "true" } else { "false" });
-            Expr::call(Expr::static_call("rchunks", vec![recv, k, exact]), "stream", vec![])
+            let exact = Expr::raw(if name.contains("exact") {
+                "true"
+            } else {
+                "false"
+            });
+            Expr::call(
+                Expr::static_call("rchunks", vec![recv, k, exact]),
+                "stream",
+                vec![],
+            )
         }
         (Ty::Vec(_), "chunk_by" | "chunk_by_mut") => {
             super::fmt::file_helper(cx, super::std_map::coll::SLICE_VIEW_HELPERS);
             let f = lower_arg(cx, &args[0], out);
-            Expr::call(Expr::static_call("chunk_by", vec![recv, f]), "stream", vec![])
+            Expr::call(
+                Expr::static_call("chunk_by", vec![recv, f]),
+                "stream",
+                vec![],
+            )
         }
         // Splits at the items a predicate picks: `split`, `splitn`, `rsplit`, `rsplitn`,
         // `split_inclusive`, and their `_mut` forms.
-        (Ty::Vec(_), "split" | "split_mut" | "splitn" | "splitn_mut" | "rsplit" | "rsplit_mut" | "rsplitn" | "rsplitn_mut"
-            | "split_inclusive" | "split_inclusive_mut") => {
+        (
+            Ty::Vec(_),
+            "split"
+            | "split_mut"
+            | "splitn"
+            | "splitn_mut"
+            | "rsplit"
+            | "rsplit_mut"
+            | "rsplitn"
+            | "rsplitn_mut"
+            | "split_inclusive"
+            | "split_inclusive_mut",
+        ) => {
             super::fmt::file_helper(cx, super::std_map::coll::SLICE_VIEW_HELPERS);
             let base = name.trim_end_matches("_mut");
             let (n, p) = if base.ends_with('n') {
@@ -1299,24 +1442,51 @@ fn lower_source(
             } else {
                 (Expr::raw("-1"), lower_arg(cx, &args[0], out))
             };
-            let rev = Expr::raw(if base.starts_with('r') { "true" } else { "false" });
-            let inclusive = Expr::raw(if base == "split_inclusive" { "true" } else { "false" });
-            Expr::call(Expr::static_call("slice_split", vec![recv, p, n, rev, inclusive]), "stream", vec![])
+            let rev = Expr::raw(if base.starts_with('r') {
+                "true"
+            } else {
+                "false"
+            });
+            let inclusive = Expr::raw(if base == "split_inclusive" {
+                "true"
+            } else {
+                "false"
+            });
+            Expr::call(
+                Expr::static_call("slice_split", vec![recv, p, n, rev, inclusive]),
+                "stream",
+                vec![],
+            )
         }
         // `[u8]::escape_ascii` yields the bytes of the escaped text.
         (Ty::Vec(_), "escape_ascii") => {
             super::fmt::file_helper(cx, super::std_map::coll::BYTES_HELPERS);
-            Expr::call(Expr::call(Expr::static_call("esc_ascii", vec![recv]), "chars", vec![]), "boxed", vec![])
+            Expr::call(
+                Expr::call(Expr::static_call("esc_ascii", vec![recv]), "chars", vec![]),
+                "boxed",
+                vec![],
+            )
         }
         (Ty::Vec(_), "utf8_chunks") => {
             super::fmt::file_helper(cx, super::std_map::coll::BYTES_HELPERS);
-            let chunks = Expr::call(Expr::static_call("utf8_chunks", vec![recv]), "stream", vec![]);
+            let chunks = Expr::call(
+                Expr::static_call("utf8_chunks", vec![recv]),
+                "stream",
+                vec![],
+            );
             // Simple mode names the pair type: rebuild each entry as that record.
             let parts = [Ty::Str, Ty::Vec(Box::new(Ty::Int(Int::U8)))];
             match crate::tuples::named(&parts) {
                 Some(n) => {
                     lambda_params!(cx; e);
-                    Expr::call(chunks, "map", vec![Expr::raw(format!("{e} -> new {}({e}.getKey(), {e}.getValue())", n.name))])
+                    Expr::call(
+                        chunks,
+                        "map",
+                        vec![Expr::raw(format!(
+                            "{e} -> new {}({e}.getKey(), {e}.getValue())",
+                            n.name
+                        ))],
+                    )
                 }
                 None => chunks,
             }
@@ -1408,22 +1578,42 @@ fn lower_source(
             } else {
                 recv
             };
-            let mode = match name { "escape_debug" => "'d'", "escape_default" => "'e'", _ => "'u'" };
+            let mode = match name {
+                "escape_debug" => "'d'",
+                "escape_default" => "'e'",
+                _ => "'u'",
+            };
             lambda_params!(cx; c);
             let escaped = Expr::static_call("esc", vec![text, Expr::raw(mode)]);
-            Expr::call(Expr::call(escaped, "chars", vec![]), "mapToObj", vec![Expr::raw(format!("{c} -> (char) {c}"))])
+            Expr::call(
+                Expr::call(escaped, "chars", vec![]),
+                "mapToObj",
+                vec![Expr::raw(format!("{c} -> (char) {c}"))],
+            )
         }
         (Ty::Str, "encode_utf16") => {
             lambda_params!(cx; c);
-            Expr::call(Expr::call(recv, "chars", vec![]), "mapToObj", vec![Expr::raw(format!("{c} -> (short) {c}"))])
+            Expr::call(
+                Expr::call(recv, "chars", vec![]),
+                "mapToObj",
+                vec![Expr::raw(format!("{c} -> (short) {c}"))],
+            )
         }
         // Matches of a string, char or char predicate: positions, pieces, or the text split there.
-        (Ty::Str, "match_indices" | "rmatch_indices" | "rmatches" | "split_inclusive" | "rsplit_terminator") => {
+        (
+            Ty::Str,
+            "match_indices" | "rmatch_indices" | "rmatches" | "split_inclusive"
+            | "rsplit_terminator",
+        ) => {
             super::fmt::file_helper(cx, super::std_map::STR_MATCH_HELPERS);
             let pat = text_pattern(cx, &args[0], out)
                 .unwrap_or_else(|p| Expr::Cast("Predicate<Character>".into(), Box::new(p)));
             let s = ensure_simple(cx, recv, &recv_ty, line, out);
-            let rev = Expr::raw(if name.starts_with('r') { "true" } else { "false" });
+            let rev = Expr::raw(if name.starts_with('r') {
+                "true"
+            } else {
+                "false"
+            });
             match name {
                 "split_inclusive" => Expr::call(
                     Expr::static_call("str_split", vec![s, pat, Expr::raw("true")]),
@@ -1435,7 +1625,10 @@ fn lower_source(
                         cx,
                         line,
                         "List<String>".into(),
-                        Some(Expr::static_call("str_split", vec![s, pat, Expr::raw("false")])),
+                        Some(Expr::static_call(
+                            "str_split",
+                            vec![s, pat, Expr::raw("false")],
+                        )),
                         out,
                         "parts",
                     );
@@ -1459,7 +1652,10 @@ fn lower_source(
                     Expr::call(
                         Expr::call(found, "stream", vec![]),
                         "map",
-                        vec![Expr::Lambda { params: vec![mm], body: LambdaBody::Expr(Box::new(item)) }],
+                        vec![Expr::Lambda {
+                            params: vec![mm],
+                            body: LambdaBody::Expr(Box::new(item)),
+                        }],
                     )
                 }
             }
@@ -1974,11 +2170,14 @@ return true; }";
 
 // `is_sorted`'s `<=` on `t`; typed parameters, since an empty `Vec::new()` source is a `List<Object>`.
 pub(crate) fn sorted_le(cx: &mut Cx, t: &Ty) -> Expr {
-        lambda_params!(cx; x, y);
+    lambda_params!(cx; x, y);
     let b = t.boxed();
     Expr::raw(match t.strip_refs() {
         t if t.is_primitive() => format!("({b} {x}, {b} {y}) -> {x} <= {y}"),
-        t => format!("({b} {x}, {b} {y}) -> {} <= 0", super::std_map::coll::compare_call(cx, t, &x, &y)),
+        t => format!(
+            "({b} {x}, {b} {y}) -> {} <= 0",
+            super::std_map::coll::compare_call(cx, t, &x, &y)
+        ),
     })
 }
 
@@ -1990,7 +2189,11 @@ pub(crate) fn char_iter_text(cx: &mut Cx, stream: Expr, item: &Ty) -> Expr {
         lambda_params!(cx; b);
         format!("{b} -> String.valueOf((char) (int) {b})")
     };
-    Expr::call(Expr::call(stream, "map", vec![Expr::raw(to_text)]), "collect", vec![Expr::raw("Collectors.joining()")])
+    Expr::call(
+        Expr::call(stream, "map", vec![Expr::raw(to_text)]),
+        "collect",
+        vec![Expr::raw("Collectors.joining()")],
+    )
 }
 
 // The type a key closure returns (`|p| p.1`).
@@ -2018,7 +2221,7 @@ return new Ok<>(null); }";
 
 // `(x, y) -> ..` comparing two items as `partial_cmp` would: an Integer, or null for NaN.
 fn partial_cmp_fn(cx: &mut Cx, item: &Ty) -> String {
-        lambda_params!(cx; x, y);
+    lambda_params!(cx; x, y);
     let body = match item.strip_refs() {
         Ty::F64 => format!("{x}.isNaN() || {y}.isNaN() ? null : Double.compare({x}, {y})"),
         Ty::F32 => format!("{x}.isNaN() || {y}.isNaN() ? null : Float.compare({x}, {y})"),
@@ -2032,17 +2235,26 @@ fn partial_cmp_fn(cx: &mut Cx, item: &Ty) -> String {
 fn size_hint(cx: &mut Cx, e: &ast::Expr, out: &mut Vec<Stmt>) -> Option<(String, Option<String>)> {
     let e = strip_parens(e);
     // A collection passed to `zip` / `chain` iterates all its items.
-    if matches!(cx.ty(&e).strip_refs(), Ty::Vec(_) | Ty::Deque(_) | Ty::Map { .. } | Ty::Set { .. }) {
+    if matches!(
+        cx.ty(&e).strip_refs(),
+        Ty::Vec(_) | Ty::Deque(_) | Ty::Map { .. } | Ty::Set { .. }
+    ) {
         let n = format!("{}.size()", render(&expr::lower_expr(cx, &e, out)));
         return Some((n.clone(), Some(n)));
     }
     if let ast::Expr::RangeExpr(r) = &e {
         let (a, b, inclusive) = range_bounds(cx, r, out);
         let (a, b) = (render(&a), render(&b));
-        let n = if inclusive { format!("Math.max(0, {b} - {a} + 1)") } else { format!("Math.max(0, {b} - {a})") };
+        let n = if inclusive {
+            format!("Math.max(0, {b} - {a} + 1)")
+        } else {
+            format!("Math.max(0, {b} - {a})")
+        };
         return Some((n.clone(), Some(n)));
     }
-    let ast::Expr::MethodCallExpr(m) = &e else { return None };
+    let ast::Expr::MethodCallExpr(m) = &e else {
+        return None;
+    };
     let name = method_name(m);
     let recv = m.receiver()?;
     let arg = |cx: &mut Cx, out: &mut Vec<Stmt>| -> Option<String> {
@@ -2061,16 +2273,18 @@ fn size_hint(cx: &mut Cx, e: &ast::Expr, out: &mut Vec<Stmt>) -> Option<(String,
         }
         "chars" | "char_indices" | "bytes" if rty.is_str() => {
             cx.import("java.nio.charset.StandardCharsets");
-            let b = format!("{}.getBytes(StandardCharsets.UTF_8).length", render(&expr::lower_expr(cx, &recv, out)));
+            let b = format!(
+                "{}.getBytes(StandardCharsets.UTF_8).length",
+                render(&expr::lower_expr(cx, &recv, out))
+            );
             if name == "bytes" {
                 Some((b.clone(), Some(b)))
             } else {
                 Some((format!("({b} + 3) / 4"), Some(b)))
             }
         }
-        "map" | "inspect" | "rev" | "copied" | "cloned" | "enumerate" | "fuse" | "by_ref" | "peekable" => {
-            size_hint(cx, &recv, out)
-        }
+        "map" | "inspect" | "rev" | "copied" | "cloned" | "enumerate" | "fuse" | "by_ref"
+        | "peekable" => size_hint(cx, &recv, out),
         "filter" | "filter_map" | "take_while" | "skip_while" | "map_while" | "scan" => {
             let (_, hi) = size_hint(cx, &recv, out)?;
             Some(("0".into(), hi))
@@ -2078,7 +2292,10 @@ fn size_hint(cx: &mut Cx, e: &ast::Expr, out: &mut Vec<Stmt>) -> Option<(String,
         "skip" => {
             let (lo, hi) = size_hint(cx, &recv, out)?;
             let k = arg(cx, out)?;
-            Some((format!("Math.max(0, {lo} - {k})"), hi.map(|h| format!("Math.max(0, {h} - {k})"))))
+            Some((
+                format!("Math.max(0, {lo} - {k})"),
+                hi.map(|h| format!("Math.max(0, {h} - {k})")),
+            ))
         }
         "take" => {
             let (lo, hi) = size_hint(cx, &recv, out)?;
@@ -2402,15 +2619,27 @@ fn lower_adaptor_core(
             let c = partial_cmp_fn(cx, &item);
             let r = Expr::static_call(
                 "lex_cmp",
-                vec![call("toList", vec![]), Expr::call(other, "toList", vec![]), Expr::raw(c)],
+                vec![
+                    call("toList", vec![]),
+                    Expr::call(other, "toList", vec![]),
+                    Expr::raw(c),
+                ],
             );
             match name {
                 "cmp" => r,
                 "partial_cmp" => Expr::call(Expr::raw("Optional"), "ofNullable", vec![r]),
                 _ => {
-                    let sym = match name { "lt" => "<", "le" => "<=", "gt" => ">", _ => ">=" };
+                    let sym = match name {
+                        "lt" => "<",
+                        "le" => "<=",
+                        "gt" => ">",
+                        _ => ">=",
+                    };
                     let v = cx.fresh("order");
-                    Expr::raw(format!("({} instanceof Integer {v} && {v} {sym} 0)", render(&r)))
+                    Expr::raw(format!(
+                        "({} instanceof Integer {v} && {v} {sym} 0)",
+                        render(&r)
+                    ))
                 }
             }
         }
@@ -2420,7 +2649,14 @@ fn lower_adaptor_core(
                 return cx.unsupported(m.syntax(), "cycle() inside a closure");
             }
             let t = item.boxed();
-            let items = super::std_map::push_local(cx, line, format!("List<{t}>"), Some(call("toList", vec![])), out, "items");
+            let items = super::std_map::push_local(
+                cx,
+                line,
+                format!("List<{t}>"),
+                Some(call("toList", vec![])),
+                out,
+                "items",
+            );
             Expr::raw(format!(
                 "({items}.isEmpty() ? Stream.<{t}>empty() : Stream.generate(() -> {items}).flatMap(List::stream))"
             ))
@@ -2446,7 +2682,11 @@ fn lower_adaptor_core(
                     };
                     let le = sorted_le(cx, &key);
                     let f = lower_arg(cx, &args[0], out);
-                    let keys = Expr::call(call(&format!("<{}>map", key.boxed()), vec![f]), "toList", vec![]);
+                    let keys = Expr::call(
+                        call(&format!("<{}>map", key.boxed()), vec![f]),
+                        "toList",
+                        vec![],
+                    );
                     (keys, le)
                 }
             };
@@ -2477,7 +2717,11 @@ fn lower_adaptor_core(
         }
         // From the back: the forward method on the reversed items.
         "nth_back" | "rfind" | "rfold" | "try_rfold" => {
-            let rev = Expr::call(Expr::call(call("toList", vec![]), "reversed", vec![]), "stream", vec![]);
+            let rev = Expr::call(
+                Expr::call(call("toList", vec![]), "reversed", vec![]),
+                "stream",
+                vec![],
+            );
             let fwd = match name {
                 "nth_back" => "nth",
                 "rfind" => "find",
@@ -2489,7 +2733,9 @@ fn lower_adaptor_core(
         "copied" | "cloned" | "into_iter" | "iter" | "by_ref" | "peekable" | "fuse" => src,
         "count" | "len" => Expr::Cast("int".into(), Box::new(call("count", vec![]))),
         // `c.to_uppercase().to_string()`: the Display text of a char iterator.
-        "to_string" if matches!(item.strip_refs(), Ty::Char | Ty::Int(Int::U8)) => char_iter_text(cx, src, &item),
+        "to_string" if matches!(item.strip_refs(), Ty::Char | Ty::Int(Int::U8)) => {
+            char_iter_text(cx, src, &item)
+        }
         "sum" | "product" => lower_sum_product(cx, m.syntax(), name == "product", src, ret_ty),
         "min" | "max" => {
             if item.is_primitive() || item.is_str() || name == "min" {
@@ -2521,7 +2767,10 @@ fn lower_adaptor_core(
             };
             // Simple mode takes Java's `max`, which keeps the first of equal maxima, not the last.
             if name == "min_by_key" || crate::mode::simple() {
-                call(if name == "min_by_key" { "min" } else { "max" }, vec![Expr::raw(cmp)])
+                call(
+                    if name == "min_by_key" { "min" } else { "max" },
+                    vec![Expr::raw(cmp)],
+                )
             } else {
                 let (a, b) = (cx.fresh("a"), cx.fresh("b"));
                 call(
@@ -2897,7 +3146,10 @@ fn lower_collect(
             }
             cx.needs_result = true;
             let Ty::Result(piece, _) = item.strip_refs() else {
-                return cx.unsupported(m.syntax(), "collect into Result<String> from non-Result items");
+                return cx.unsupported(
+                    m.syntax(),
+                    "collect into Result<String> from non-Result items",
+                );
             };
             let (tb, eb) = (piece.boxed(), err.boxed());
             let (text, res, it) = (cx.fresh("text"), cx.fresh("collected"), cx.fresh("r"));
@@ -3039,7 +3291,11 @@ fn lower_pulled(
     let guarded = |v: String| {
         Expr::Ternary(
             Box::new(Expr::call(Expr::raw(&it), "hasNext", vec![])),
-            Box::new(Expr::call(Expr::raw("Optional"), &format!("<{t}>of"), vec![Expr::raw(v)])),
+            Box::new(Expr::call(
+                Expr::raw("Optional"),
+                &format!("<{t}>of"),
+                vec![Expr::raw(v)],
+            )),
             Box::new(Expr::raw(format!("Optional.<{t}>empty()"))),
         )
     };

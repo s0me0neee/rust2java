@@ -981,12 +981,22 @@ fn lower_trait(cx: &mut Cx, t: &ast::Trait) -> Option<Member> {
         .map(|p| p.children().filter_map(ast::Impl::cast).collect())
         .unwrap_or_default();
     for imp in siblings {
-        let Some((tr, fmt_trait)) = dyn_fmt_impl(cx, &imp) else { continue };
+        let Some((tr, fmt_trait)) = dyn_fmt_impl(cx, &imp) else {
+            continue;
+        };
         if Some(tr) != this {
             continue;
         }
-        let header = if fmt_trait == "Debug" { "default String debug()" } else { "default String display()" };
-        let target = Target { java: name.clone(), interface: true, generics: Vec::new() };
+        let header = if fmt_trait == "Debug" {
+            "default String debug()"
+        } else {
+            "default String display()"
+        };
+        let target = Target {
+            java: name.clone(),
+            interface: true,
+            generics: Vec::new(),
+        };
         if let Some(m) = write_method(cx, &imp, &target, header) {
             members.push(Member::Method(m));
         }
@@ -1005,20 +1015,28 @@ fn lower_trait(cx: &mut Cx, t: &ast::Trait) -> Option<Member> {
 
 // `impl Debug|Display for dyn Trait` with a local trait: that trait and `"Debug"` / `"Display"`.
 fn dyn_fmt_impl(cx: &Cx, imp: &ast::Impl) -> Option<(Trait, &'static str)> {
-    let ast::Type::DynTraitType(d) = imp.self_ty()? else { return None };
+    let ast::Type::DynTraitType(d) = imp.self_ty()? else {
+        return None;
+    };
     let fmt_trait = match impl_trait(cx, imp)?.name(cx.db).as_str() {
         "Debug" => "Debug",
         "Display" => "Display",
         _ => return None,
     };
     let tr = d.type_bound_list()?.bounds().find_map(|b| {
-        let ast::Type::PathType(p) = b.ty()? else { return None };
+        let ast::Type::PathType(p) = b.ty()? else {
+            return None;
+        };
         match cx.sema.resolve_path(&p.path()?)? {
             ra_ap_hir::PathResolution::Def(ra_ap_hir::ModuleDef::Trait(tr)) => Some(tr),
             _ => None,
         }
     })?;
-    tr.module(cx.db).krate(cx.db).origin(cx.db).is_local().then_some((tr, fmt_trait))
+    tr.module(cx.db)
+        .krate(cx.db)
+        .origin(cx.db)
+        .is_local()
+        .then_some((tr, fmt_trait))
 }
 
 pub(crate) fn impl_trait(cx: &Cx, imp: &ast::Impl) -> Option<Trait> {
@@ -1521,17 +1539,31 @@ fn write_method(cx: &mut Cx, imp: &ast::Impl, target: &Target, header: &str) -> 
 // The String a fmt body writes when it's a single `f.append(e)`, or a switch whose every arm is.
 fn written_value(kind: &StmtKind, f: &str) -> Option<Expr> {
     let appended = |e: &Expr| -> Option<Expr> {
-        let Expr::Call { recv: Some(r), name, args } = e else { return None };
+        let Expr::Call {
+            recv: Some(r),
+            name,
+            args,
+        } = e
+        else {
+            return None;
+        };
         if name != "append" || !matches!(&**r, Expr::Name(n) if n == f) {
             return None;
         }
         let [v] = args.as_slice() else { return None };
         // `f.alternate()` and the like still need the formatter.
         let text = crate::emit::render_expr(v);
-        if text.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| w == f) {
+        if text
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .any(|w| w == f)
+        {
             return None;
         }
-        Some(if is_string(v) { v.clone() } else { Expr::call(Expr::raw("String"), "valueOf", vec![v.clone()]) })
+        Some(if is_string(v) {
+            v.clone()
+        } else {
+            Expr::call(Expr::raw("String"), "valueOf", vec![v.clone()])
+        })
     };
     match kind {
         StmtKind::Expr(e) => appended(e),
@@ -1551,10 +1583,17 @@ fn written_value(kind: &StmtKind, f: &str) -> Option<Expr> {
                         },
                         crate::jir::ArmBody::Throw(e) => crate::jir::ArmBody::Throw(e.clone()),
                     };
-                    Some(crate::jir::Arm { line: a.line, label: a.label.clone(), body })
+                    Some(crate::jir::Arm {
+                        line: a.line,
+                        label: a.label.clone(),
+                        body,
+                    })
                 })
                 .collect::<Option<Vec<_>>>()?;
-            Some(Expr::Switch { scrut: Box::new(scrut.clone()), arms })
+            Some(Expr::Switch {
+                scrut: Box::new(scrut.clone()),
+                arms,
+            })
         }
         _ => None,
     }
@@ -1563,11 +1602,23 @@ fn written_value(kind: &StmtKind, f: &str) -> Option<Expr> {
 // Java text that's already a String: a literal, a concatenation with one, `String.format(..)`.
 fn is_string(e: &Expr) -> bool {
     match e {
-        Expr::Raw(r) => r.starts_with('"') || r.starts_with("String.format(") || r.starts_with("String.valueOf("),
+        Expr::Raw(r) => {
+            r.starts_with('"')
+                || r.starts_with("String.format(")
+                || r.starts_with("String.valueOf(")
+        }
         Expr::Binary(l, "+", r) => is_string(l) || is_string(r),
-        Expr::Call { recv: Some(r), name, .. } => {
-            matches!(&**r, Expr::Raw(s) if s == "String") && matches!(name.as_str(), "format" | "valueOf" | "join")
-                || matches!(name.as_str(), "formatted" | "toString" | "repeat" | "display" | "toUpperCase" | "toLowerCase")
+        Expr::Call {
+            recv: Some(r),
+            name,
+            ..
+        } => {
+            matches!(&**r, Expr::Raw(s) if s == "String")
+                && matches!(name.as_str(), "format" | "valueOf" | "join")
+                || matches!(
+                    name.as_str(),
+                    "formatted" | "toString" | "repeat" | "display" | "toUpperCase" | "toLowerCase"
+                )
         }
         _ => false,
     }
@@ -2648,7 +2699,11 @@ pub fn debug_to_string_types(root: &SyntaxNode) -> std::collections::HashSet<Str
             .map(|t| t.syntax().text().to_string())
             .is_some_and(|t| t.ends_with("Display") || t.ends_with("Debug"));
         let self_name = imp.self_ty().and_then(|t| match t {
-            ast::Type::PathType(p) => p.path()?.segment()?.name_ref().map(|n| n.text().to_string()),
+            ast::Type::PathType(p) => p
+                .path()?
+                .segment()?
+                .name_ref()
+                .map(|n| n.text().to_string()),
             _ => None,
         });
         if fmt_trait && let Some(n) = self_name {
@@ -2926,7 +2981,12 @@ pub fn debug_value(cx: &mut Cx, ty: &Ty, v: Expr, depth: usize) -> Expr {
         }
         Ty::Tuple(ts) if ts.len() == 2 => str_concat(vec![
             Expr::str_lit("("),
-            debug_value(cx, &ts[0], super::expr::tuple_field(v.clone(), 0, ts), depth),
+            debug_value(
+                cx,
+                &ts[0],
+                super::expr::tuple_field(v.clone(), 0, ts),
+                depth,
+            ),
             Expr::str_lit(", "),
             debug_value(cx, &ts[1], super::expr::tuple_field(v, 1, ts), depth),
             Expr::str_lit(")"),

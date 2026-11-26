@@ -92,7 +92,14 @@ fn relayout_masked(src: &str, blank: &dyn Fn(usize) -> bool, hints: &Hints) -> O
     let (mut renames, mut dropped) = copy_renames(root, src, &assigned);
     let (inlined, gone) = inlines(root, src, &hints.macro_locals, &decl_types, &dropped);
     dropped.extend(gone);
-    restore_names(root, src, &hints.renamed_locals, &dropped, &inlined, &mut renames);
+    restore_names(
+        root,
+        src,
+        &hints.renamed_locals,
+        &dropped,
+        &inlined,
+        &mut renames,
+    );
     let mut f = Fmt {
         src,
         blank,
@@ -199,8 +206,13 @@ fn io_throwing(root: Node, src: &str) -> HashSet<String> {
                 .and_then(|m| m.child_by_field_name("name"))
         {
             let stdin_read = &src[name.byte_range()] == "read"
-                && n.child_by_field_name("object").is_some_and(|o| &src[o.byte_range()] == "STDIN");
-            let callee = if stdin_read { "readLine" } else { &src[name.byte_range()] };
+                && n.child_by_field_name("object")
+                    .is_some_and(|o| &src[o.byte_range()] == "STDIN");
+            let callee = if stdin_read {
+                "readLine"
+            } else {
+                &src[name.byte_range()]
+            };
             calls.push((src[m.byte_range()].to_string(), callee.to_string()));
         }
         stack.extend(children(n));
@@ -225,19 +237,25 @@ fn io_throwing(root: Node, src: &str) -> HashSet<String> {
 
 // `x = e;` -> (x, e).
 fn simple_assign(n: Node) -> Option<(Node, Node)> {
-    let a = n.named_child(0).filter(|a| {
-        n.kind() == "expression_statement" && a.kind() == "assignment_expression"
-    })?;
+    let a = n
+        .named_child(0)
+        .filter(|a| n.kind() == "expression_statement" && a.kind() == "assignment_expression")?;
     let op = a.child_by_field_name("operator")?;
     let left = a.child_by_field_name("left")?;
-    (op.kind() == "=" && left.kind() == "identifier").then_some((left, a.child_by_field_name("right")?))
+    (op.kind() == "=" && left.kind() == "identifier")
+        .then_some((left, a.child_by_field_name("right")?))
 }
 
 fn is_literal(n: Node) -> bool {
     matches!(
         n.kind(),
-        "string_literal" | "decimal_integer_literal" | "decimal_floating_point_literal"
-            | "null_literal" | "true" | "false" | "character_literal"
+        "string_literal"
+            | "decimal_integer_literal"
+            | "decimal_floating_point_literal"
+            | "null_literal"
+            | "true"
+            | "false"
+            | "character_literal"
     )
 }
 
@@ -293,12 +311,18 @@ fn copy_renames(
         if block.kind() != "block" {
             continue;
         }
-        let stmts: Vec<Node> = children(block).into_iter().filter(|c| c.is_named()).collect();
+        let stmts: Vec<Node> = children(block)
+            .into_iter()
+            .filter(|c| c.is_named())
+            .collect();
         for (q, &copy) in stmts.iter().enumerate() {
-            let Some(d) = single_declarator(copy) else { continue };
+            let Some(d) = single_declarator(copy) else {
+                continue;
+            };
             let (Some(b), Some(a)) = (
                 d.child_by_field_name("name"),
-                d.child_by_field_name("value").filter(|v| v.kind() == "identifier"),
+                d.child_by_field_name("value")
+                    .filter(|v| v.kind() == "identifier"),
             ) else {
                 continue;
             };
@@ -312,18 +336,23 @@ fn copy_renames(
             };
             let ty = |s: Node| s.child_by_field_name("type").map(|t| &src[t.byte_range()]);
             let same_type = ty(copy) == Some("var") || ty(copy) == ty(stmts[p]);
-            let uses: Vec<Node> = stmts[p..q].iter().flat_map(|s| idents_named(*s, src, a)).collect();
+            let uses: Vec<Node> = stmts[p..q]
+                .iter()
+                .flat_map(|s| idents_named(*s, src, a))
+                .collect();
             // Every mention is a plain local: none is a field name or a method name.
             let plain = uses.iter().all(|u| {
                 u.parent().is_none_or(|par| {
                     par.child_by_field_name("field") != Some(*u)
-                        && !(par.kind() == "method_invocation" && par.child_by_field_name("name") == Some(*u))
+                        && !(par.kind() == "method_invocation"
+                            && par.child_by_field_name("name") == Some(*u))
                 })
             });
             let written = uses.iter().any(|u| {
                 u.parent().is_some_and(|par| {
                     par.kind() == "update_expression"
-                        || par.kind() == "assignment_expression" && par.child_by_field_name("left") == Some(*u)
+                        || par.kind() == "assignment_expression"
+                            && par.child_by_field_name("left") == Some(*u)
                 })
             });
             // A lambda captures only effectively final locals, which renaming must not change.
@@ -334,7 +363,11 @@ fn copy_renames(
                 .any(|u| in_lambda(u, block));
             if !same_type
                 || !plain
-                || stmts[p..].iter().map(|s| idents_named(*s, src, a).len()).sum::<usize>() != uses.len() + 1
+                || stmts[p..]
+                    .iter()
+                    .map(|s| idents_named(*s, src, a).len())
+                    .sum::<usize>()
+                    != uses.len() + 1
                 || stmts[p..q].iter().any(|s| mentions(*s, src, b))
                 || written && captured_b
                 || captured_a && assigned.contains(b)
@@ -369,20 +402,37 @@ fn inlines<'t>(
         if block.kind() != "block" {
             continue;
         }
-        let stmts: Vec<Node> = children(block).into_iter().filter(|c| c.is_named()).collect();
+        let stmts: Vec<Node> = children(block)
+            .into_iter()
+            .filter(|c| c.is_named())
+            .collect();
         for (at, pair) in stmts.windows(2).enumerate() {
             let (decl, next) = (pair[0], pair[1]);
-            let Some(d) = single_declarator(decl) else { continue };
-            let (Some(name), Some(init)) = (d.child_by_field_name("name"), d.child_by_field_name("value"))
-            else {
+            let Some(d) = single_declarator(decl) else {
+                continue;
+            };
+            let (Some(name), Some(init)) = (
+                d.child_by_field_name("name"),
+                d.child_by_field_name("value"),
+            ) else {
                 continue;
             };
             let name = &src[name.byte_range()];
-            let ty = decl.child_by_field_name("type").map(|t| &src[t.byte_range()]);
-            let primary = matches!(init.kind(), "method_invocation" | "object_creation_expression");
+            let ty = decl
+                .child_by_field_name("type")
+                .map(|t| &src[t.byte_range()]);
+            let primary = matches!(
+                init.kind(),
+                "method_invocation" | "object_creation_expression"
+            );
             let found = idents_named(next, src, name);
-            let later: usize = stmts[at + 2..].iter().map(|s| idents_named(*s, src, name).len()).sum();
-            let ([u], 0) = (found.as_slice(), later) else { continue };
+            let later: usize = stmts[at + 2..]
+                .iter()
+                .map(|s| idents_named(*s, src, name).len())
+                .sum();
+            let ([u], 0) = (found.as_slice(), later) else {
+                continue;
+            };
             if !inlinable.contains(name)
                 || !matches!(ty, Some("String" | "var"))
                 || !primary
@@ -404,15 +454,19 @@ fn inlines<'t>(
 fn straight_path(u: Node, stmt: Node) -> bool {
     if !matches!(
         stmt.kind(),
-        "local_variable_declaration" | "expression_statement" | "return_statement"
-            | "throw_statement" | "if_statement"
+        "local_variable_declaration"
+            | "expression_statement"
+            | "return_statement"
+            | "throw_statement"
+            | "if_statement"
     ) {
         return false;
     }
     let mut cur = u;
     while let Some(p) = cur.parent() {
         if p == stmt {
-            return stmt.kind() != "if_statement" || p.child_by_field_name("condition") == Some(cur);
+            return stmt.kind() != "if_statement"
+                || p.child_by_field_name("condition") == Some(cur);
         }
         let ok = match p.kind() {
             "ternary_expression" => p.child_by_field_name("condition") == Some(cur),
@@ -452,11 +506,21 @@ fn pure_prefix(
         let parent = n.parent();
         let field_of = |f: &str| parent.is_some_and(|p| p.child_by_field_name(f) == Some(n));
         let ok = match n.kind() {
-            "method_invocation" | "object_creation_expression" | "assignment_expression"
-            | "update_expression" | "array_creation_expression" | "lambda_expression" | "this" => false,
-            "field_access" => n.child_by_field_name("object").is_some_and(|o| o.kind() == "identifier" && upper(o)),
+            "method_invocation"
+            | "object_creation_expression"
+            | "assignment_expression"
+            | "update_expression"
+            | "array_creation_expression"
+            | "lambda_expression"
+            | "this" => false,
+            "field_access" => n
+                .child_by_field_name("object")
+                .is_some_and(|o| o.kind() == "identifier" && upper(o)),
             "identifier" => {
-                field_of("name") || field_of("field") || upper(n) || locals.contains_key(&src[n.byte_range()])
+                field_of("name")
+                    || field_of("field")
+                    || upper(n)
+                    || locals.contains_key(&src[n.byte_range()])
             }
             _ => true,
         };
@@ -488,8 +552,14 @@ fn restore_names(
             stack.extend(children(m));
             continue;
         }
-        let within = |n: Node, outer: Node| outer.start_byte() <= n.start_byte() && n.end_byte() <= outer.end_byte();
-        let inits: Vec<Node> = inlined.values().copied().filter(|i| within(*i, m)).collect();
+        let within = |n: Node, outer: Node| {
+            outer.start_byte() <= n.start_byte() && n.end_byte() <= outer.end_byte()
+        };
+        let inits: Vec<Node> = inlined
+            .values()
+            .copied()
+            .filter(|i| within(*i, m))
+            .collect();
         // Identifiers that still print: outside dropped statements, or in an inlined initializer.
         let mut printed = Vec::new();
         let mut walk = vec![m];
@@ -501,7 +571,8 @@ fn restore_names(
             let mut up = n.parent();
             let mut in_dropped = false;
             while let Some(p) = up.filter(|p| *p != m) {
-                let stmt = p.kind() == "local_variable_declaration" || p.kind().ends_with("statement");
+                let stmt =
+                    p.kind() == "local_variable_declaration" || p.kind().ends_with("statement");
                 in_dropped |= stmt && dropped.contains(&p.start_byte());
                 up = p.parent();
             }
@@ -517,7 +588,10 @@ fn restore_names(
         };
         for (java, rust) in &pairs {
             let name = |n: &Node| {
-                renames.get(&n.start_byte()).cloned().unwrap_or_else(|| src[n.byte_range()].to_string())
+                renames
+                    .get(&n.start_byte())
+                    .cloned()
+                    .unwrap_or_else(|| src[n.byte_range()].to_string())
             };
             let free = !printed.iter().any(|n| name(n) == **rust);
             let hits: Vec<usize> = printed
@@ -578,7 +652,8 @@ fn reads_value_field(root: Node, src: &str) -> bool {
         });
         if n.kind() == "field_access"
             && !written
-            && n.child_by_field_name("field").is_some_and(|f| &src[f.byte_range()] == "value")
+            && n.child_by_field_name("field")
+                .is_some_and(|f| &src[f.byte_range()] == "value")
         {
             return true;
         }
@@ -592,11 +667,15 @@ fn is_string_expr(n: Node, src: &str) -> bool {
     match n.kind() {
         "string_literal" => true,
         "binary_expression" => {
-            n.child_by_field_name("operator").is_some_and(|o| &src[o.byte_range()] == "+")
-                && [n.child_by_field_name("left"), n.child_by_field_name("right")]
-                    .into_iter()
-                    .flatten()
-                    .any(|c| is_string_expr(c, src))
+            n.child_by_field_name("operator")
+                .is_some_and(|o| &src[o.byte_range()] == "+")
+                && [
+                    n.child_by_field_name("left"),
+                    n.child_by_field_name("right"),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|c| is_string_expr(c, src))
         }
         "parenthesized_expression" => n.named_child(0).is_some_and(|c| is_string_expr(c, src)),
         "method_invocation" => is_value_of(n, src),
@@ -639,9 +718,12 @@ fn typed_slot(n: Node, src: &str) -> bool {
 // `String.valueOf(x)` with one argument.
 fn is_value_of(n: Node, src: &str) -> bool {
     n.kind() == "method_invocation"
-        && n.child_by_field_name("object").is_some_and(|o| &src[o.byte_range()] == "String")
-        && n.child_by_field_name("name").is_some_and(|o| &src[o.byte_range()] == "valueOf")
-        && n.child_by_field_name("arguments").is_some_and(|a| a.named_child_count() == 1)
+        && n.child_by_field_name("object")
+            .is_some_and(|o| &src[o.byte_range()] == "String")
+        && n.child_by_field_name("name")
+            .is_some_and(|o| &src[o.byte_range()] == "valueOf")
+        && n.child_by_field_name("arguments")
+            .is_some_and(|a| a.named_child_count() == 1)
 }
 
 // Names whose every declaration (local, parameter, for-each variable) has the same type text.
@@ -650,24 +732,29 @@ fn declared_types(root: Node, src: &str) -> std::collections::HashMap<String, St
     let mut stack = vec![root];
     while let Some(n) = stack.pop() {
         let decl = match n.kind() {
-            "local_variable_declaration" => n
+            "local_variable_declaration" => n.child_by_field_name("type").zip(
+                n.child_by_field_name("declarator")
+                    .and_then(|d| d.child_by_field_name("name")),
+            ),
+            "formal_parameter" | "enhanced_for_statement" | "catch_formal_parameter" => n
                 .child_by_field_name("type")
-                .zip(n.child_by_field_name("declarator").and_then(|d| d.child_by_field_name("name"))),
-            "formal_parameter" | "enhanced_for_statement" | "catch_formal_parameter" => {
-                n.child_by_field_name("type").zip(n.child_by_field_name("name"))
-            }
+                .zip(n.child_by_field_name("name")),
             _ => None,
         };
         if let Some((t, name)) = decl {
             let t = src[t.byte_range()].to_string();
-            let entry = seen.entry(src[name.byte_range()].to_string()).or_insert(Some(t.clone()));
+            let entry = seen
+                .entry(src[name.byte_range()].to_string())
+                .or_insert(Some(t.clone()));
             if entry.as_deref() != Some(t.as_str()) {
                 *entry = None;
             }
         }
         stack.extend(children(n));
     }
-    seen.into_iter().filter_map(|(k, v)| Some((k, v?))).collect()
+    seen.into_iter()
+        .filter_map(|(k, v)| Some((k, v?)))
+        .collect()
 }
 
 fn indent(n: usize) -> String {
@@ -689,8 +776,15 @@ impl Fmt<'_> {
         else {
             return Vec::new();
         };
-        let items: Vec<Node> = children(body).into_iter().filter(|c| c.is_named()).collect();
-        let lead: Vec<Node> = items.iter().copied().take_while(|c| is_comment(*c)).collect();
+        let items: Vec<Node> = children(body)
+            .into_iter()
+            .filter(|c| c.is_named())
+            .collect();
+        let lead: Vec<Node> = items
+            .iter()
+            .copied()
+            .take_while(|c| is_comment(*c))
+            .collect();
         match (lead.last(), items.get(lead.len())) {
             (Some(last), Some(next)) if self.blank_between(*last, *next, false) => lead,
             (Some(_), None) => lead,
@@ -750,8 +844,11 @@ impl Fmt<'_> {
             if branch
                 && matches!(
                     n.kind(),
-                    "if_statement" | "while_statement" | "for_statement"
-                        | "enhanced_for_statement" | "do_statement"
+                    "if_statement"
+                        | "while_statement"
+                        | "for_statement"
+                        | "enhanced_for_statement"
+                        | "do_statement"
                 )
                 && c.kind() != "block"
                 && !else_if
@@ -782,7 +879,9 @@ impl Fmt<'_> {
         let name = self.render(decl.child_by_field_name("name")?, ind);
         let value = decl.child_by_field_name("value")?;
         if !targs.starts_with('<')
-            || self.assigned.contains(self.text(decl.child_by_field_name("name")?))
+            || self
+                .assigned
+                .contains(self.text(decl.child_by_field_name("name")?))
             || self.assigned.contains(&name)
             || value.kind() != "object_creation_expression"
             || value.child_by_field_name("type").map(|t| self.text(t)) != Some("ArrayList<>")
@@ -805,7 +904,12 @@ impl Fmt<'_> {
         let object = n.child_by_field_name("object");
         let args: Vec<Node> = n
             .child_by_field_name("arguments")
-            .map(|a| children(a).into_iter().filter(|c| c.is_named() && !is_comment(*c)).collect())
+            .map(|a| {
+                children(a)
+                    .into_iter()
+                    .filter(|c| c.is_named() && !is_comment(*c))
+                    .collect()
+            })
             .unwrap_or_default();
         // `Arrays.stream(a)` of an object array, as its one argument.
         let stream_of_array = |o: Node| -> Option<String> {
@@ -819,7 +923,9 @@ impl Fmt<'_> {
         };
         match (name, object, args.as_slice()) {
             // A literal char made a String is a String literal.
-            ("valueOf", Some(o), [c]) if self.text(o) == "String" && c.kind() == "character_literal" => {
+            ("valueOf", Some(o), [c])
+                if self.text(o) == "String" && c.kind() == "character_literal" =>
+            {
                 let inner = &self.text(*c)[1..self.text(*c).len() - 1];
                 let inner = match inner {
                     "\\'" => "'",
@@ -830,16 +936,26 @@ impl Fmt<'_> {
             }
             // `toList()` is never mutated, so the fixed-size `asList` view serves.
             ("toList", Some(o), []) => Some(format!("Arrays.asList({})", stream_of_array(o)?)),
-            ("collect", Some(o), [c]) if self.text(*c) == "Collectors.toCollection(ArrayList::new)" => {
+            ("collect", Some(o), [c])
+                if self.text(*c) == "Collectors.toCollection(ArrayList::new)" =>
+            {
                 if let Some(a) = stream_of_array(o) {
                     return Some(format!("new ArrayList<>(Arrays.asList({a}))"));
                 }
                 let src = o.child_by_field_name("object")?;
                 let empty = o.child_by_field_name("arguments")?.named_child_count() == 0;
                 let collection = self.decl_types.get(self.text(src)).is_some_and(|t| {
-                    ["List<", "ArrayList<", "Set<", "HashSet<", "TreeSet<", "Deque<", "ArrayDeque<"]
-                        .iter()
-                        .any(|p| t.starts_with(p))
+                    [
+                        "List<",
+                        "ArrayList<",
+                        "Set<",
+                        "HashSet<",
+                        "TreeSet<",
+                        "Deque<",
+                        "ArrayDeque<",
+                    ]
+                    .iter()
+                    .any(|p| t.starts_with(p))
                 });
                 (src.kind() == "identifier"
                     && self.text(o.child_by_field_name("name")?) == "stream"
@@ -860,8 +976,12 @@ impl Fmt<'_> {
 
     // `s -> Integer.parseInt(s)` -> `Integer::parseInt`.
     fn method_ref(&self, n: Node) -> Option<String> {
-        let p = n.child_by_field_name("parameters").filter(|p| p.kind() == "identifier")?;
-        let body = n.child_by_field_name("body").filter(|b| b.kind() == "method_invocation")?;
+        let p = n
+            .child_by_field_name("parameters")
+            .filter(|p| p.kind() == "identifier")?;
+        let body = n
+            .child_by_field_name("body")
+            .filter(|b| b.kind() == "method_invocation")?;
         let class = self.text(body.child_by_field_name("object")?);
         let method = self.text(body.child_by_field_name("name")?);
         let args = body.child_by_field_name("arguments")?;
@@ -880,7 +1000,9 @@ impl Fmt<'_> {
         ];
         (parsers.contains(&(class, method))
             && args.named_child_count() == 1
-            && args.named_child(0).is_some_and(|a| self.text(a) == self.text(p)))
+            && args
+                .named_child(0)
+                .is_some_and(|a| self.text(a) == self.text(p)))
         .then(|| format!("{class}::{method}"))
     }
 
@@ -890,7 +1012,9 @@ impl Fmt<'_> {
         match n.kind() {
             // `"a" + String.valueOf(x)`: the concatenation already converts `x`.
             "method_invocation" if is_value_of(n, self.src) => {
-                let Some(arg) = n.child_by_field_name("arguments").and_then(|a| a.named_child(0))
+                let Some(arg) = n
+                    .child_by_field_name("arguments")
+                    .and_then(|a| a.named_child(0))
                 else {
                     return n;
                 };
@@ -912,9 +1036,14 @@ impl Fmt<'_> {
                 };
                 let tight = matches!(
                     arg.kind(),
-                    "identifier" | "field_access" | "method_invocation" | "array_access"
-                        | "parenthesized_expression" | "decimal_integer_literal"
-                        | "character_literal" | "object_creation_expression"
+                    "identifier"
+                        | "field_access"
+                        | "method_invocation"
+                        | "array_access"
+                        | "parenthesized_expression"
+                        | "decimal_integer_literal"
+                        | "character_literal"
+                        | "object_creation_expression"
                 );
                 if tight && other.is_some_and(|o| is_string_expr(o, self.src)) {
                     arg
@@ -923,8 +1052,10 @@ impl Fmt<'_> {
                 }
             }
             "cast_expression" => {
-                let (Some(t), Some(v)) = (n.child_by_field_name("type"), n.child_by_field_name("value"))
-                else {
+                let (Some(t), Some(v)) = (
+                    n.child_by_field_name("type"),
+                    n.child_by_field_name("value"),
+                ) else {
                     return n;
                 };
                 let v = self.plain(v);
@@ -939,8 +1070,12 @@ impl Fmt<'_> {
                 // `if (c)`, `while (c)`, `switch (x)`: these parentheses are syntax.
                 if matches!(
                     parent.kind(),
-                    "if_statement" | "while_statement" | "do_statement" | "switch_expression"
-                        | "switch_statement" | "synchronized_statement"
+                    "if_statement"
+                        | "while_statement"
+                        | "do_statement"
+                        | "switch_expression"
+                        | "switch_statement"
+                        | "synchronized_statement"
                 ) {
                     return n;
                 }
@@ -953,15 +1088,27 @@ impl Fmt<'_> {
                 let inner = self.plain(inner);
                 let primary = matches!(
                     inner.kind(),
-                    "identifier" | "decimal_integer_literal" | "decimal_floating_point_literal"
-                        | "string_literal" | "character_literal" | "true" | "false"
-                        | "null_literal" | "this" | "method_invocation" | "field_access"
-                        | "array_access" | "parenthesized_expression"
+                    "identifier"
+                        | "decimal_integer_literal"
+                        | "decimal_floating_point_literal"
+                        | "string_literal"
+                        | "character_literal"
+                        | "true"
+                        | "false"
+                        | "null_literal"
+                        | "this"
+                        | "method_invocation"
+                        | "field_access"
+                        | "array_access"
+                        | "parenthesized_expression"
                 );
                 let any_slot = matches!(
                     parent.kind(),
-                    "argument_list" | "variable_declarator" | "return_statement"
-                        | "parenthesized_expression" | "expression_statement"
+                    "argument_list"
+                        | "variable_declarator"
+                        | "return_statement"
+                        | "parenthesized_expression"
+                        | "expression_statement"
                 ) || (parent.kind() == "assignment_expression"
                     && parent.child_by_field_name("right") == Some(n));
                 if primary || any_slot { inner } else { n }
@@ -1002,9 +1149,10 @@ impl Fmt<'_> {
                 continue;
             }
             // `x = "";` right before `x = e;` is never read.
-            if let (Some((l1, r1)), Some((l2, r2))) =
-                (simple_assign(c), items.get(at + 1).and_then(|n| simple_assign(*n)))
-                && self.text(l1) == self.text(l2)
+            if let (Some((l1, r1)), Some((l2, r2))) = (
+                simple_assign(c),
+                items.get(at + 1).and_then(|n| simple_assign(*n)),
+            ) && self.text(l1) == self.text(l2)
                 && is_literal(r1)
                 && !mentions(r2, self.src, self.text(l1))
             {
@@ -1110,12 +1258,23 @@ impl Fmt<'_> {
         if items.is_empty() {
             return "{}".into();
         }
-        let class = matches!(n.kind(), "class_body" | "interface_body" | "annotation_type_body");
-        if n.kind() == "class_body" && n.parent().and_then(|p| p.parent()).is_some_and(|g| g.kind() == "program") {
+        let class = matches!(
+            n.kind(),
+            "class_body" | "interface_body" | "annotation_type_body"
+        );
+        if n.kind() == "class_body"
+            && n.parent()
+                .and_then(|p| p.parent())
+                .is_some_and(|g| g.kind() == "program")
+        {
             // Static fields first, as people write them; relative order (and so init order) is kept.
             items.sort_by_key(|c| !is_field(*c));
         }
-        format!("{{{}\n{}}}", self.items(&items, ind + 1, class), indent(ind))
+        format!(
+            "{{{}\n{}}}",
+            self.items(&items, ind + 1, class),
+            indent(ind)
+        )
     }
 
     fn enum_body(&self, n: Node, ind: usize) -> String {
@@ -1223,7 +1382,9 @@ pub fn drop_unused(src: &str) -> String {
                 }
             }
         }
-        text = String::from_utf8(bytes).unwrap_or_default().replace(MASK, ".");
+        text = String::from_utf8(bytes)
+            .unwrap_or_default()
+            .replace(MASK, ".");
     }
 }
 
@@ -1241,11 +1402,17 @@ fn drop_unused_records(src: &str) -> String {
     // Members of the top-level class only: enum variants nested in an interface are used through
     // `Shape.Circle`.
     let mut records = Vec::new();
-    for class in children(tree.root_node()).into_iter().filter(|c| c.kind() == "class_declaration") {
-        let Some(body) = class.child_by_field_name("body") else { continue };
+    for class in children(tree.root_node())
+        .into_iter()
+        .filter(|c| c.kind() == "class_declaration")
+    {
+        let Some(body) = class.child_by_field_name("body") else {
+            continue;
+        };
         for n in children(body) {
             if n.kind() == "record_declaration"
-                && n.child_by_field_name("body").is_some_and(|b| b.named_child_count() == 0)
+                && n.child_by_field_name("body")
+                    .is_some_and(|b| b.named_child_count() == 0)
                 && let Some(name) = n.child_by_field_name("name")
             {
                 records.push((&masked[name.byte_range()], n.start_byte(), n.end_byte()));
@@ -1257,7 +1424,9 @@ fn drop_unused_records(src: &str) -> String {
             .filter(|(i, _)| {
                 let before = src[..*i].chars().next_back();
                 let after = src[i + name.len()..].chars().next();
-                let ident = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$');
+                let ident = |c: Option<char>| {
+                    c.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$')
+                };
                 !ident(before) && !ident(after)
             })
             .count()
@@ -1277,7 +1446,9 @@ fn drop_unused_records(src: &str) -> String {
     if !dropped {
         return src.to_string();
     }
-    String::from_utf8(bytes).unwrap_or_default().replace(MASK, ".")
+    String::from_utf8(bytes)
+        .unwrap_or_default()
+        .replace(MASK, ".")
 }
 
 // Calls as (callee, the candidate method containing the call), and the candidate declarations.
@@ -1306,8 +1477,9 @@ fn collect_calls(
                 let name = text(name);
                 let in_result = n.ancestors_named().any(|a| {
                     matches!(a.kind(), "interface_declaration" | "record_declaration")
-                        && a.child_by_field_name("name")
-                            .is_some_and(|x| matches!(&src[x.byte_range()], "Result" | "Ok" | "Err"))
+                        && a.child_by_field_name("name").is_some_and(|x| {
+                            matches!(&src[x.byte_range()], "Result" | "Ok" | "Err")
+                        })
                 });
                 if GENERATED.contains(&name.as_str()) || in_result {
                     decls.push((name.clone(), n.start_byte(), n.end_byte()));
@@ -1372,12 +1544,18 @@ pub fn explicit_imports(src: &str) -> String {
     collect_names(root, &masked, &mut declared, &mut used);
     let mut imports = BTreeSet::new();
     let mut span: Option<(usize, usize)> = None;
-    for c in children(root).into_iter().filter(|c| c.kind() == "import_declaration") {
+    for c in children(root)
+        .into_iter()
+        .filter(|c| c.kind() == "import_declaration")
+    {
         span = Some(match span {
             Some((s, _)) => (s, c.end_byte()),
             None => (c.start_byte(), c.end_byte()),
         });
-        let text = src[c.byte_range()].trim_start_matches("import").trim_end_matches(';').trim();
+        let text = src[c.byte_range()]
+            .trim_start_matches("import")
+            .trim_end_matches(';')
+            .trim();
         if text.starts_with("static ") {
             imports.insert(text.to_string());
             continue;
@@ -1416,7 +1594,9 @@ fn collect_names(n: Node, src: &str, declared: &mut HashSet<String>, used: &mut 
     let text = |n: Node| src[n.byte_range()].to_string();
     match n.kind() {
         "import_declaration" | "package_declaration" => return,
-        "class_declaration" | "record_declaration" | "interface_declaration"
+        "class_declaration"
+        | "record_declaration"
+        | "interface_declaration"
         | "enum_declaration" => {
             if let Some(name) = n.child_by_field_name("name") {
                 declared.insert(text(name));
@@ -1452,47 +1632,158 @@ fn collect_names(n: Node, src: &str, declared: &mut HashSet<String>, used: &mut 
 fn package_classes(pkg: &str) -> Option<&'static [&'static str]> {
     Some(match pkg {
         "java.util" => &[
-            "AbstractMap", "ArrayDeque", "ArrayList", "Arrays", "Base64", "BitSet", "Collection",
-            "Collections", "Comparator", "ConcurrentModificationException", "Deque", "EnumMap",
-            "EnumSet", "Enumeration", "Formatter", "HashMap", "HashSet", "Hashtable",
-            "IdentityHashMap", "InputMismatchException", "Iterator", "LinkedHashMap",
-            "LinkedHashSet", "LinkedList", "List", "ListIterator", "Locale", "Map",
-            "NavigableMap", "NavigableSet", "NoSuchElementException", "Objects", "Optional",
-            "OptionalDouble", "OptionalInt", "OptionalLong", "PrimitiveIterator",
-            "PriorityQueue", "Queue", "Random", "Scanner", "SequencedCollection", "SequencedMap",
-            "SequencedSet", "Set", "SortedMap", "SortedSet", "Spliterator", "Spliterators",
-            "Stack", "StringJoiner", "StringTokenizer", "TreeMap", "TreeSet", "UUID", "Vector",
+            "AbstractMap",
+            "ArrayDeque",
+            "ArrayList",
+            "Arrays",
+            "Base64",
+            "BitSet",
+            "Collection",
+            "Collections",
+            "Comparator",
+            "ConcurrentModificationException",
+            "Deque",
+            "EnumMap",
+            "EnumSet",
+            "Enumeration",
+            "Formatter",
+            "HashMap",
+            "HashSet",
+            "Hashtable",
+            "IdentityHashMap",
+            "InputMismatchException",
+            "Iterator",
+            "LinkedHashMap",
+            "LinkedHashSet",
+            "LinkedList",
+            "List",
+            "ListIterator",
+            "Locale",
+            "Map",
+            "NavigableMap",
+            "NavigableSet",
+            "NoSuchElementException",
+            "Objects",
+            "Optional",
+            "OptionalDouble",
+            "OptionalInt",
+            "OptionalLong",
+            "PrimitiveIterator",
+            "PriorityQueue",
+            "Queue",
+            "Random",
+            "Scanner",
+            "SequencedCollection",
+            "SequencedMap",
+            "SequencedSet",
+            "Set",
+            "SortedMap",
+            "SortedSet",
+            "Spliterator",
+            "Spliterators",
+            "Stack",
+            "StringJoiner",
+            "StringTokenizer",
+            "TreeMap",
+            "TreeSet",
+            "UUID",
+            "Vector",
             "WeakHashMap",
         ],
         "java.util.function" => &[
-            "BiConsumer", "BiFunction", "BiPredicate", "BinaryOperator", "BooleanSupplier",
-            "Consumer", "DoubleBinaryOperator", "DoubleConsumer", "DoubleFunction",
-            "DoublePredicate", "DoubleSupplier", "DoubleUnaryOperator", "Function",
-            "IntBinaryOperator", "IntConsumer", "IntFunction", "IntPredicate", "IntSupplier",
-            "IntToDoubleFunction", "IntToLongFunction", "IntUnaryOperator", "LongBinaryOperator",
-            "LongConsumer", "LongFunction", "LongPredicate", "LongSupplier",
-            "LongToIntFunction", "LongUnaryOperator", "ObjDoubleConsumer", "ObjIntConsumer",
-            "ObjLongConsumer", "Predicate", "Supplier", "ToDoubleBiFunction",
-            "ToDoubleFunction", "ToIntBiFunction", "ToIntFunction", "ToLongBiFunction",
-            "ToLongFunction", "UnaryOperator",
+            "BiConsumer",
+            "BiFunction",
+            "BiPredicate",
+            "BinaryOperator",
+            "BooleanSupplier",
+            "Consumer",
+            "DoubleBinaryOperator",
+            "DoubleConsumer",
+            "DoubleFunction",
+            "DoublePredicate",
+            "DoubleSupplier",
+            "DoubleUnaryOperator",
+            "Function",
+            "IntBinaryOperator",
+            "IntConsumer",
+            "IntFunction",
+            "IntPredicate",
+            "IntSupplier",
+            "IntToDoubleFunction",
+            "IntToLongFunction",
+            "IntUnaryOperator",
+            "LongBinaryOperator",
+            "LongConsumer",
+            "LongFunction",
+            "LongPredicate",
+            "LongSupplier",
+            "LongToIntFunction",
+            "LongUnaryOperator",
+            "ObjDoubleConsumer",
+            "ObjIntConsumer",
+            "ObjLongConsumer",
+            "Predicate",
+            "Supplier",
+            "ToDoubleBiFunction",
+            "ToDoubleFunction",
+            "ToIntBiFunction",
+            "ToIntFunction",
+            "ToLongBiFunction",
+            "ToLongFunction",
+            "UnaryOperator",
         ],
         "java.util.stream" => &[
-            "Collector", "Collectors", "DoubleStream", "IntStream", "LongStream", "Stream",
+            "Collector",
+            "Collectors",
+            "DoubleStream",
+            "IntStream",
+            "LongStream",
+            "Stream",
             "StreamSupport",
         ],
         "java.io" => &[
-            "BufferedInputStream", "BufferedOutputStream", "BufferedReader", "BufferedWriter",
-            "ByteArrayInputStream", "ByteArrayOutputStream", "Closeable", "DataInputStream",
-            "EOFException", "File", "FileInputStream", "FileOutputStream", "FileReader",
-            "FileWriter", "Flushable", "IOException", "InputStream", "InputStreamReader",
-            "OutputStream", "OutputStreamWriter", "PrintStream", "PrintWriter", "Reader",
-            "Serializable", "StreamTokenizer", "StringReader", "StringWriter",
-            "UncheckedIOException", "Writer",
+            "BufferedInputStream",
+            "BufferedOutputStream",
+            "BufferedReader",
+            "BufferedWriter",
+            "ByteArrayInputStream",
+            "ByteArrayOutputStream",
+            "Closeable",
+            "DataInputStream",
+            "EOFException",
+            "File",
+            "FileInputStream",
+            "FileOutputStream",
+            "FileReader",
+            "FileWriter",
+            "Flushable",
+            "IOException",
+            "InputStream",
+            "InputStreamReader",
+            "OutputStream",
+            "OutputStreamWriter",
+            "PrintStream",
+            "PrintWriter",
+            "Reader",
+            "Serializable",
+            "StreamTokenizer",
+            "StringReader",
+            "StringWriter",
+            "UncheckedIOException",
+            "Writer",
         ],
         "java.nio.file" => &[
-            "AccessDeniedException", "DirectoryNotEmptyException", "DirectoryStream",
-            "FileAlreadyExistsException", "FileSystems", "Files", "NoSuchFileException",
-            "NotDirectoryException", "Path", "Paths", "StandardOpenOption",
+            "AccessDeniedException",
+            "DirectoryNotEmptyException",
+            "DirectoryStream",
+            "FileAlreadyExistsException",
+            "FileSystems",
+            "Files",
+            "NoSuchFileException",
+            "NotDirectoryException",
+            "Path",
+            "Paths",
+            "StandardOpenOption",
         ],
         _ => return None,
     })

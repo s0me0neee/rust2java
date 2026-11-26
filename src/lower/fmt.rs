@@ -904,12 +904,18 @@ fn format_one(
     // `Duration` has only Debug: Rust's `1.5s` / `250ms` / `42ns`.
     if super::expr::is_duration(ty) {
         let text = debug(cx, v, ty);
-        let spec = Spec { kind: String::new(), ..spec.clone() };
+        let spec = Spec {
+            kind: String::new(),
+            ..spec.clone()
+        };
         return format_one(cx, node, text, &Ty::Str, &spec, counts, out);
     }
     // A `FpCategory` is its variant name, which `{:?}` prints as is.
     if matches!(ty.strip_refs(), Ty::Other(n) if n.contains("FpCategory")) {
-        let spec = Spec { kind: String::new(), ..spec.clone() };
+        let spec = Spec {
+            kind: String::new(),
+            ..spec.clone()
+        };
         return format_one(cx, node, v, &Ty::Str, &spec, counts, out);
     }
     let width = counts.width.clone();
@@ -1255,9 +1261,18 @@ fn parse_debug_switch(msg: Expr, error: &str) -> Expr {
             "ParseFloatError { kind: Empty }",
         ),
         ("invalid float literal", "ParseFloatError { kind: Invalid }"),
-        ("provided string was not `true` or `false`", "ParseBoolError"),
-        ("cannot parse char from empty string", "ParseCharError { kind: EmptyString }"),
-        ("too many characters in string", "ParseCharError { kind: TooManyChars }"),
+        (
+            "provided string was not `true` or `false`",
+            "ParseBoolError",
+        ),
+        (
+            "cannot parse char from empty string",
+            "ParseCharError { kind: EmptyString }",
+        ),
+        (
+            "too many characters in string",
+            "ParseCharError { kind: TooManyChars }",
+        ),
     ];
     let kinds: &[&str] = if error.contains("ParseBoolError") {
         &["ParseBool"]
@@ -1661,7 +1676,11 @@ fn debug_any(cx: &mut Cx, v: Expr) -> Expr {
     let records: String = crate::tuples::all()
         .iter()
         .map(|n| {
-            let parts: Vec<String> = n.fields.iter().map(|f| format!("debug_any(t.{f}())")).collect();
+            let parts: Vec<String> = n
+                .fields
+                .iter()
+                .map(|f| format!("debug_any(t.{f}())"))
+                .collect();
             format!(
                 "if (o instanceof {} t) return \"(\" + {} + \")\"; ",
                 n.name,
@@ -1678,7 +1697,11 @@ fn debug_any(cx: &mut Cx, v: Expr) -> Expr {
         r#"if (o instanceof Collection<?> c) { StringJoiner j = o instanceof Set ? new StringJoiner(", ", "{", "}") : new StringJoiner(", ", "[", "]"); for (Object x : c) j.add(debug_any(x)); return j.toString(); } "#,
         r#"try { return (String) o.getClass().getMethod("debug").invoke(o); } catch (ReflectiveOperationException e) { return String.valueOf(o); } }"#,
     );
-    let helper = helper.replacen("if (o instanceof Map<?, ?> m)", &format!("{records}if (o instanceof Map<?, ?> m)"), 1);
+    let helper = helper.replacen(
+        "if (o instanceof Map<?, ?> m)",
+        &format!("{records}if (o instanceof Map<?, ?> m)"),
+        1,
+    );
     file_helper(cx, &helper);
     Expr::static_call("debug_any", vec![v])
 }

@@ -116,7 +116,14 @@ fn push_raw(out: &mut Vec<Stmt>, line: u32, text: String) {
 }
 
 // `if (cond) place = value;`: a conditional write back to the receiver's place.
-fn assign_if(cx: &mut Cx, place: &ast::Expr, cond: &str, value: Expr, line: u32, out: &mut Vec<Stmt>) {
+fn assign_if(
+    cx: &mut Cx,
+    place: &ast::Expr,
+    cond: &str,
+    value: Expr,
+    line: u32,
+    out: &mut Vec<Stmt>,
+) {
     let assign = expr::place_assign(cx, place, "=", value, out);
     push_raw(out, line, format!("if ({cond}) {};", render(&assign)));
 }
@@ -338,17 +345,27 @@ fn iter_fn(
         && matches!(aty, Ty::Iter(_))
     {
         let src = super::iter::into_stream(expr::lower_expr(cx, &a, out), &aty);
-        return Some(super::iter::lower_sum_product(cx, c.syntax(), fn_name == "product", src, ret));
+        return Some(super::iter::lower_sum_product(
+            cx,
+            c.syntax(),
+            fn_name == "product",
+            src,
+            ret,
+        ));
     }
     let Ty::Iter(item) = ret else { return None };
     let t = item.boxed();
     let stream = || Expr::raw("Stream");
     let streams = |cx: &mut Cx, out: &mut Vec<Stmt>| -> Vec<Expr> {
         c.arg_list()
-            .map(|l| l.args().map(|a| {
-                let aty = cx.ty(&a);
-                super::iter::into_stream(expr::lower_expr(cx, &a, out), &aty)
-            }).collect())
+            .map(|l| {
+                l.args()
+                    .map(|a| {
+                        let aty = cx.ty(&a);
+                        super::iter::into_stream(expr::lower_expr(cx, &a, out), &aty)
+                    })
+                    .collect()
+            })
             .unwrap_or_default()
     };
     Some(match key {
@@ -360,10 +377,39 @@ fn iter_fn(
             let mut s = streams(cx, out).into_iter();
             let (a, b) = (s.next()?, s.next()?);
             let (ia, ib) = (cx.fresh("a"), cx.fresh("b"));
-            push_raw(out, line, format!("Iterator<{}> {ia} = {}.iterator();", match item.as_ref() { Ty::Tuple(p) => p[0].boxed(), _ => "Object".into() }, render(&a)));
-            push_raw(out, line, format!("Iterator<{}> {ib} = {}.iterator();", match item.as_ref() { Ty::Tuple(p) => p[1].boxed(), _ => "Object".into() }, render(&b)));
+            push_raw(
+                out,
+                line,
+                format!(
+                    "Iterator<{}> {ia} = {}.iterator();",
+                    match item.as_ref() {
+                        Ty::Tuple(p) => p[0].boxed(),
+                        _ => "Object".into(),
+                    },
+                    render(&a)
+                ),
+            );
+            push_raw(
+                out,
+                line,
+                format!(
+                    "Iterator<{}> {ib} = {}.iterator();",
+                    match item.as_ref() {
+                        Ty::Tuple(p) => p[1].boxed(),
+                        _ => "Object".into(),
+                    },
+                    render(&b)
+                ),
+            );
             lambda_params!(cx; x);
-            let pair = expr::tuple_expr(cx, item, vec![Expr::raw(format!("{ia}.next()")), Expr::raw(format!("{ib}.next()"))]);
+            let pair = expr::tuple_expr(
+                cx,
+                item,
+                vec![
+                    Expr::raw(format!("{ia}.next()")),
+                    Expr::raw(format!("{ib}.next()")),
+                ],
+            );
             Expr::raw(format!(
                 "Stream.generate(() -> 0).takeWhile({x} -> {ia}.hasNext() && {ib}.hasNext()).map({x} -> {})",
                 render(&pair)
@@ -386,12 +432,20 @@ fn iter_fn(
         // Lazy and called once.
         _ if fn_name == "once_with" => {
             let f = expr::call_args(cx, c, out).into_iter().next()?;
-            Expr::call(Expr::call(stream(), &format!("<{t}>generate"), vec![f]), "limit", vec![Expr::raw("1")])
+            Expr::call(
+                Expr::call(stream(), &format!("<{t}>generate"), vec![f]),
+                "limit",
+                vec![Expr::raw("1")],
+            )
         }
         _ if fn_name == "repeat_n" => {
             let mut args = expr::call_args(cx, c, out).into_iter();
             let (v, n) = (args.next()?, args.next()?);
-            Expr::call(Expr::call(Expr::raw("Collections"), "nCopies", vec![n, v]), "stream", vec![])
+            Expr::call(
+                Expr::call(Expr::raw("Collections"), "nCopies", vec![n, v]),
+                "stream",
+                vec![],
+            )
         }
         "repeat::repeat" => {
             let first = c.arg_list()?.args().next()?;
@@ -481,7 +535,9 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
         "mem::replace" => return mem_replace(cx, c, &ret, false, out),
         "mem::take" => return mem_replace(cx, c, &ret, true, out),
         "f64::from_bits" | "f32::from_bits" => {
-            let bits = expr::call_args(cx, c, out).pop().unwrap_or_else(|| Expr::raw("0"));
+            let bits = expr::call_args(cx, c, out)
+                .pop()
+                .unwrap_or_else(|| Expr::raw("0"));
             return if key == "f64::from_bits" {
                 Expr::call(Expr::raw("Double"), "longBitsToDouble", vec![bits])
             } else {
@@ -492,22 +548,34 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
         // Storage for `format_into`, which Java's `String.valueOf` doesn't need.
         "NumBuffer::new" => return Expr::raw("new Object()"),
         "OnceCell::from" => {
-            let v = expr::call_args(cx, c, out).pop().unwrap_or_else(|| Expr::raw("null"));
+            let v = expr::call_args(cx, c, out)
+                .pop()
+                .unwrap_or_else(|| Expr::raw("null"));
             return Expr::call(Expr::raw("Optional"), "of", vec![v]);
         }
         // `RangeInclusive::new(a, b)` is `a..=b`.
         "RangeInclusive::new" => {
             let mut args = expr::call_args(cx, c, out).into_iter();
-            let (a, b) = (args.next().unwrap_or(Expr::raw("0")), args.next().unwrap_or(Expr::raw("0")));
-            let class = if matches!(&ret, Ty::Iter(t) if matches!(t.strip_refs(), Ty::Int(i) if i.is_long())) {
+            let (a, b) = (
+                args.next().unwrap_or(Expr::raw("0")),
+                args.next().unwrap_or(Expr::raw("0")),
+            );
+            let class = if matches!(&ret, Ty::Iter(t) if matches!(t.strip_refs(), Ty::Int(i) if i.is_long()))
+            {
                 "LongStream"
             } else {
                 "IntStream"
             };
-            return Expr::call(Expr::call(Expr::raw(class), "rangeClosed", vec![a, b]), "boxed", vec![]);
+            return Expr::call(
+                Expr::call(Expr::raw(class), "rangeClosed", vec![a, b]),
+                "boxed",
+                vec![],
+            );
         }
         "identity" | "convert::identity" => {
-            return expr::call_args(cx, c, out).pop().unwrap_or_else(|| Expr::raw("null"));
+            return expr::call_args(cx, c, out)
+                .pop()
+                .unwrap_or_else(|| Expr::raw("null"));
         }
         "mem::drop" | "mem::forget" => {
             let mut args = expr::call_args(cx, c, out);
@@ -693,7 +761,9 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
         // Java can't produce a value from a type parameter (no static dispatch on `T`).
         // The `Supplier<T>` parameter the function was given for this type parameter.
         "Default::default" if matches!(ret.strip_refs(), Ty::Param(_)) => {
-            let Ty::Param(p) = ret.strip_refs() else { unreachable!() };
+            let Ty::Param(p) = ret.strip_refs() else {
+                unreachable!()
+            };
             match cx.suppliers.get(p).cloned() {
                 Some(java) => Expr::call(Expr::name(java), "get", vec![]),
                 None => cx.unsupported(c.syntax(), "`T::default()` for a generic type parameter"),
@@ -734,8 +804,13 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
         }
         "cmp::min" | "cmp::max" => cmp_min_max(cx, key == "cmp::max", &arg_asts, args, line, out),
         // Equal values: `max_by` returns the second, `min_by` the first.
-        "cmp::min_by" | "cmp::max_by" | "cmp::min_by_key" | "cmp::max_by_key" if args.len() == 3 => {
-            let ty = arg_asts.first().map(|e| cx.ty(e)).unwrap_or(Ty::Other("?".into()));
+        "cmp::min_by" | "cmp::max_by" | "cmp::min_by_key" | "cmp::max_by_key"
+            if args.len() == 3 =>
+        {
+            let ty = arg_asts
+                .first()
+                .map(|e| cx.ty(e))
+                .unwrap_or(Ty::Other("?".into()));
             let mut it = args.into_iter();
             let (a, b, f) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
             let (a, b) = (simple(cx, a, &ty, line, out), simple(cx, b, &ty, line, out));
@@ -746,10 +821,21 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
                     _ => None,
                 }
                 .unwrap_or(Ty::Other("?".into()));
-                let f = render(&Expr::Cast(format!("Function<{}, {}>", ty.boxed(), kty.boxed()), Box::new(f)));
-                coll::compare_call(cx, &kty, &format!("({f}).apply({ra})"), &format!("({f}).apply({rb})"))
+                let f = render(&Expr::Cast(
+                    format!("Function<{}, {}>", ty.boxed(), kty.boxed()),
+                    Box::new(f),
+                ));
+                coll::compare_call(
+                    cx,
+                    &kty,
+                    &format!("({f}).apply({ra})"),
+                    &format!("({f}).apply({rb})"),
+                )
             } else {
-                let f = render(&Expr::Cast(format!("Comparator<{}>", ty.boxed()), Box::new(f)));
+                let f = render(&Expr::Cast(
+                    format!("Comparator<{}>", ty.boxed()),
+                    Box::new(f),
+                ));
                 format!("({f}).compare({ra}, {rb})")
             };
             let greater = Expr::raw(format!("{cmp} > 0"));
@@ -999,7 +1085,10 @@ pub fn lower_std_path(cx: &mut Cx, path: &ast::Path, def: ModuleDef) -> Expr {
         "None" => {
             let pe = path.syntax().parent().and_then(ast::PathExpr::cast);
             let receiver = pe.as_ref().is_some_and(|pe| {
-                pe.syntax().parent().and_then(ast::MethodCallExpr::cast).and_then(|m| m.receiver())
+                pe.syntax()
+                    .parent()
+                    .and_then(ast::MethodCallExpr::cast)
+                    .and_then(|m| m.receiver())
                     .is_some_and(|r| r.syntax() == pe.syntax())
             });
             if receiver
@@ -1010,7 +1099,9 @@ pub fn lower_std_path(cx: &mut Cx, path: &ast::Path, def: ModuleDef) -> Expr {
             }
             return Expr::raw("Optional.empty()");
         }
-        "ZERO" | "MAX" | "SECOND" | "MILLISECOND" | "MICROSECOND" | "NANOSECOND" if text.contains("Duration") => {
+        "ZERO" | "MAX" | "SECOND" | "MILLISECOND" | "MICROSECOND" | "NANOSECOND"
+            if text.contains("Duration") =>
+        {
             cx.import("java.time.Duration");
             return Expr::raw(match last {
                 "ZERO" => "Duration.ZERO",
@@ -1036,9 +1127,16 @@ pub fn lower_std_path(cx: &mut Cx, path: &ast::Path, def: ModuleDef) -> Expr {
                 ast::CastExpr::can_cast(n.kind())
                     || ast::MethodCallExpr::can_cast(n.kind())
                     || ast::BinExpr::cast(n.clone()).is_some_and(|b| {
-                        matches!(b.op_kind(), Some(ast::BinaryOp::ArithOp(
-                            ast::ArithOp::BitAnd | ast::ArithOp::BitOr | ast::ArithOp::BitXor | ast::ArithOp::Shl | ast::ArithOp::Shr
-                        )))
+                        matches!(
+                            b.op_kind(),
+                            Some(ast::BinaryOp::ArithOp(
+                                ast::ArithOp::BitAnd
+                                    | ast::ArithOp::BitOr
+                                    | ast::ArithOp::BitXor
+                                    | ast::ArithOp::Shl
+                                    | ast::ArithOp::Shr
+                            ))
+                        )
                     })
             });
             if let Some(e) = int_const(ty_tok, last, !exact) {
@@ -1581,7 +1679,9 @@ pub fn lower_std_method(
         }
         (Ty::Adt { .. } | Ty::Param(_), "to_string") => Expr::call(recv, "toString", vec![]),
         (Ty::Adt { .. } | Ty::Param(_), "eq") => Expr::call(recv, "equals", args),
-        (Ty::Adt { .. } | Ty::Param(_), "ne") => Expr::Unary("!", Box::new(Expr::call(recv, "equals", args))),
+        (Ty::Adt { .. } | Ty::Param(_), "ne") => {
+            Expr::Unary("!", Box::new(Expr::call(recv, "equals", args)))
+        }
         // `T: Ord` is `T extends Comparable<T>`.
         (Ty::Param(_), "cmp") => Expr::call(recv, "compareTo", args),
         // `a.as_ref()` on an `A: AsRef<[T]>` parameter, already the list itself.

@@ -16,7 +16,10 @@ pub(super) fn fn_call(
     // `i32::from_str(s)` is `s.parse::<i32>()`.
     if key.ends_with("::from_str")
         && let Ty::Result(target, _) = ret.strip_refs()
-        && matches!(target.strip_refs(), Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Bool | Ty::Char)
+        && matches!(
+            target.strip_refs(),
+            Ty::Int(_) | Ty::F32 | Ty::F64 | Ty::Bool | Ty::Char
+        )
     {
         let target = (**target).clone();
         let line = cx.line(c.syntax());
@@ -80,11 +83,20 @@ fn is_parse_error(ty: &Ty) -> bool {
 
 // `cond ? Optional.of(v) : Optional.empty()`, as `(cond, v)`.
 pub(crate) fn guarded_some(e: &Expr) -> Option<(Expr, Expr)> {
-    let Expr::Ternary(cond, some, none) = e else { return None };
+    let Expr::Ternary(cond, some, none) = e else {
+        return None;
+    };
     if !matches!(&**none, Expr::Raw(r) if r.starts_with("Optional.") && r.ends_with("empty()")) {
         return None;
     }
-    let Expr::Call { recv: Some(o), name, args } = &**some else { return None };
+    let Expr::Call {
+        recv: Some(o),
+        name,
+        args,
+    } = &**some
+    else {
+        return None;
+    };
     (matches!(&**o, Expr::Raw(r) if r == "Optional") && name.ends_with("of") && args.len() == 1)
         .then(|| ((**cond).clone(), args[0].clone()))
 }
@@ -136,9 +148,15 @@ pub(super) fn lower_option_method(
         let pure = !render(&v).contains("next(");
         let fallback = match name {
             "unwrap_or" => Some(b0.clone()),
-            "unwrap_or_default" => Some(default_value_cx(cx, &inner.clone().unwrap_or(Ty::Other("?".into())))),
+            "unwrap_or_default" => Some(default_value_cx(
+                cx,
+                &inner.clone().unwrap_or(Ty::Other("?".into())),
+            )),
             "unwrap_or_else" => match &b0 {
-                Expr::Lambda { params, body: LambdaBody::Expr(b) } if params.is_empty() => Some((**b).clone()),
+                Expr::Lambda {
+                    params,
+                    body: LambdaBody::Expr(b),
+                } if params.is_empty() => Some((**b).clone()),
                 _ => None,
             },
             _ => None,
@@ -155,15 +173,22 @@ pub(super) fn lower_option_method(
     // `(nan ? Optional.empty() : Optional.of(compare))` (NaN left to Java's total order).
     if crate::mode::simple() && matches!(name, "unwrap" | "unwrap_unchecked" | "expect") {
         let of = |e: &Expr| match e {
-            Expr::Call { recv: Some(o), name, args }
-                if name == "of" && args.len() == 1 && matches!(&**o, Expr::Raw(r) if r == "Optional") =>
+            Expr::Call {
+                recv: Some(o),
+                name,
+                args,
+            } if name == "of"
+                && args.len() == 1
+                && matches!(&**o, Expr::Raw(r) if r == "Optional") =>
             {
                 Some(args[0].clone())
             }
             _ => None,
         };
         let some = match &recv {
-            Expr::Ternary(_, empty, value) if matches!(&**empty, Expr::Raw(r) if r.starts_with("Optional.")) => of(value),
+            Expr::Ternary(_, empty, value) if matches!(&**empty, Expr::Raw(r) if r.starts_with("Optional.")) => {
+                of(value)
+            }
             other => of(other),
         };
         if some.is_some() {
@@ -296,13 +321,20 @@ pub(super) fn lower_option_method(
             ))
         }
         // `OnceCell::get` / `get_mut` / `into_inner` (a `OnceCell` is an `Optional`).
-        "as_ref" | "as_mut" | "as_deref" | "as_deref_mut" | "cloned" | "copied" | "get" | "get_mut"
-        | "into_inner" => Some(recv),
+        "as_ref" | "as_mut" | "as_deref" | "as_deref_mut" | "cloned" | "copied" | "get"
+        | "get_mut" | "into_inner" => Some(recv),
         // `OnceCell::set`: `Err(v)` when already set.
         "set" => {
             cx.needs_result = true;
             let t = inner.clone().unwrap_or(Ty::Other("?".into()));
-            let v = Expr::name(push_local(cx, line, stmt::decl_type(&t), Some(b0), out, "value"));
+            let v = Expr::name(push_local(
+                cx,
+                line,
+                stmt::decl_type(&t),
+                Some(b0),
+                out,
+                "value",
+            ));
             let res_ty = format!("Result<Void, {}>", t.boxed());
             let res = push_local(
                 cx,
@@ -310,24 +342,50 @@ pub(super) fn lower_option_method(
                 res_ty.clone(),
                 Some(Expr::Ternary(
                     Box::new(Expr::call(recv.clone(), "isPresent", vec![])),
-                    Box::new(Expr::New { ty: "Err<>".into(), args: vec![v.clone()] }),
+                    Box::new(Expr::New {
+                        ty: "Err<>".into(),
+                        args: vec![v.clone()],
+                    }),
                     Box::new(Expr::raw("new Ok<>(null)")),
                 )),
                 out,
                 "set",
             );
-            assign_if(cx, recv_ast, &format!("{}.isEmpty()", render(&recv)), opt_of(v), line, out);
+            assign_if(
+                cx,
+                recv_ast,
+                &format!("{}.isEmpty()", render(&recv)),
+                opt_of(v),
+                line,
+                out,
+            );
             Some(Expr::name(res))
         }
-        "as_slice" | "as_mut_slice" => Some(Expr::call(Expr::call(recv, "stream", vec![]), "toList", vec![])),
+        "as_slice" | "as_mut_slice" => Some(Expr::call(
+            Expr::call(recv, "stream", vec![]),
+            "toList",
+            vec![],
+        )),
         "map_or_default" => {
             let mapped = Expr::call(recv, "map", vec![b0]);
-            Some(Expr::call(mapped, "orElse", vec![default_value_cx(cx, ret)]))
+            Some(Expr::call(
+                mapped,
+                "orElse",
+                vec![default_value_cx(cx, ret)],
+            ))
         }
         // `Some((a, b))` -> `(Some(a), Some(b))`.
         "unzip" => {
-            let Ty::Tuple(parts) = ret.strip_refs() else { return None };
-            let inner: Vec<Ty> = parts.iter().map(|p| match p { Ty::Option(t) => (**t).clone(), t => t.clone() }).collect();
+            let Ty::Tuple(parts) = ret.strip_refs() else {
+                return None;
+            };
+            let inner: Vec<Ty> = parts
+                .iter()
+                .map(|p| match p {
+                    Ty::Option(t) => (**t).clone(),
+                    t => t.clone(),
+                })
+                .collect();
             let pair = Ty::Tuple(inner.clone());
             let o = simple(cx, recv, &Ty::Option(Box::new(pair)), line, out);
             let class = crate::tuples::named(&inner).map_or("Map.Entry".to_string(), |n| n.name);
@@ -341,8 +399,22 @@ pub(super) fn lower_option_method(
         // `Optional<T> taken = o.filter(p); if (taken.isPresent()) o = Optional.empty();`
         "take_if" => {
             let ty = opt_local_ty(cx, recv_ast);
-            let n = push_local(cx, line, ty, Some(Expr::call(recv, "filter", vec![b0])), out, "taken");
-            assign_if(cx, recv_ast, &format!("{n}.isPresent()"), Expr::raw("Optional.empty()"), line, out);
+            let n = push_local(
+                cx,
+                line,
+                ty,
+                Some(Expr::call(recv, "filter", vec![b0])),
+                out,
+                "taken",
+            );
+            assign_if(
+                cx,
+                recv_ast,
+                &format!("{n}.isPresent()"),
+                Expr::raw("Optional.empty()"),
+                line,
+                out,
+            );
             Some(Expr::name(n))
         }
         // `Option<Result<T, E>>` -> `Result<Option<T>, E>`.
@@ -418,7 +490,14 @@ pub(super) fn lower_option_method(
                 _ => lambda_call(b0, &ty),
             };
             // `if (o.isEmpty()) o = Optional.of(v);`, then the value is `o.get()`.
-            assign_if(cx, recv_ast, &format!("{}.isEmpty()", render(&recv)), opt_of(value), line, out);
+            assign_if(
+                cx,
+                recv_ast,
+                &format!("{}.isEmpty()", render(&recv)),
+                opt_of(value),
+                line,
+                out,
+            );
             Some(Expr::call(recv, "get", vec![]))
         }
         "is_some_and" => {
@@ -553,7 +632,9 @@ pub(super) fn lower_result_method(
         return Some(recv);
     }
     if crate::mode::throws() {
-        return crate::lower::throws::result_method(cx, _m, recv_ast, recv, args, name, ret, line, out);
+        return crate::lower::throws::result_method(
+            cx, _m, recv_ast, recv, args, name, ret, line, out,
+        );
     }
     let types = result_types(cx, recv_ast);
     let ok_ty = types
@@ -628,7 +709,11 @@ pub(super) fn lower_result_method(
         }
         "map_or_default" => {
             let mapped = Expr::call(recv, "map", vec![b0]);
-            Some(Expr::call(mapped, "unwrap_or", vec![default_value_cx(cx, ret)]))
+            Some(Expr::call(
+                mapped,
+                "unwrap_or",
+                vec![default_value_cx(cx, ret)],
+            ))
         }
         "iter" | "iter_mut" => Some(Expr::call(Expr::call(recv, "ok", vec![]), "stream", vec![])),
         "flatten" => {
@@ -643,7 +728,9 @@ pub(super) fn lower_result_method(
             ))
         }
         "transpose" => transpose(cx, recv, ret, line, out),
-        "clone" | "as_ref" | "as_mut" | "as_deref" | "as_deref_mut" | "cloned" | "copied" => Some(recv),
+        "clone" | "as_ref" | "as_mut" | "as_deref" | "as_deref_mut" | "cloned" | "copied" => {
+            Some(recv)
+        }
         _ => None,
     }
 }

@@ -27,9 +27,11 @@ pub fn analyze(cx: &Cx, root: &SyntaxNode) -> HashMap<Function, usize> {
 }
 
 fn candidate(cx: &Cx, f: &ast::Fn) -> Option<(Function, usize)> {
-    let free = f.syntax().parent().is_some_and(|p| {
-        matches!(p.kind(), SyntaxKind::SOURCE_FILE | SyntaxKind::ITEM_LIST)
-    }) && !f.syntax().ancestors().any(|a| a.kind() == SyntaxKind::IMPL);
+    let free = f
+        .syntax()
+        .parent()
+        .is_some_and(|p| matches!(p.kind(), SyntaxKind::SOURCE_FILE | SyntaxKind::ITEM_LIST))
+        && !f.syntax().ancestors().any(|a| a.kind() == SyntaxKind::IMPL);
     let unit = f
         .ret_type()
         .and_then(|r| r.ty())
@@ -93,7 +95,8 @@ fn call_sites_ok(cx: &Cx, def: Function, idx: usize, nodes: &[SyntaxNode]) -> bo
             continue;
         }
         let call = pe.syntax().parent().and_then(ast::CallExpr::cast);
-        let Some(call) = call.filter(|c| c.expr().is_some_and(|e| e.syntax() == pe.syntax())) else {
+        let Some(call) = call.filter(|c| c.expr().is_some_and(|e| e.syntax() == pe.syntax()))
+        else {
             return false;
         };
         let stmt = call
@@ -102,7 +105,9 @@ fn call_sites_ok(cx: &Cx, def: Function, idx: usize, nodes: &[SyntaxNode]) -> bo
             .is_some_and(|p| ast::ExprStmt::can_cast(p.kind()));
         let arg = call.arg_list().and_then(|a| a.args().nth(idx));
         let place = match arg.map(|a| strip_parens(&a)) {
-            Some(ast::Expr::RefExpr(r)) if r.mut_token().is_some() => r.expr().map(|e| strip_parens(&e)),
+            Some(ast::Expr::RefExpr(r)) if r.mut_token().is_some() => {
+                r.expr().map(|e| strip_parens(&e))
+            }
             _ => None,
         };
         let plain = match place {
@@ -122,7 +127,8 @@ pub fn call_place(cx: &Cx, call: &ast::CallExpr) -> Option<ast::Expr> {
     let ast::Expr::PathExpr(pe) = call.expr()? else {
         return None;
     };
-    let Some(PathResolution::Def(ModuleDef::Function(f))) = cx.sema.resolve_path(&pe.path()?) else {
+    let Some(PathResolution::Def(ModuleDef::Function(f))) = cx.sema.resolve_path(&pe.path()?)
+    else {
         return None;
     };
     let idx = *cx.mut_returns.get(&f)?;

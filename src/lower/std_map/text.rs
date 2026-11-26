@@ -27,7 +27,10 @@ pub(super) fn fn_call(
         }
         // Bytes (a `List<Integer>` of char codes, see `as_bytes`) back to text; ASCII is valid
         // UTF-8, so the `Result` is always `Ok`.
-        "converts::from_utf8" | "converts::from_utf8_mut" | "String::from_utf8" | "String::from_utf8_lossy" => {
+        "converts::from_utf8"
+        | "converts::from_utf8_mut"
+        | "String::from_utf8"
+        | "String::from_utf8_lossy" => {
             let bytes = expr::call_args(cx, c, out).into_iter().next()?;
             lambda_params!(cx; b);
             let text = Expr::raw(format!(
@@ -395,18 +398,31 @@ pub(super) fn lower_small_method(
                 } else {
                     b0
                 };
-                Expr::Ternary(Box::new(recv), Box::new(opt_of(value)), Box::new(opt_empty(inner)))
+                Expr::Ternary(
+                    Box::new(recv),
+                    Box::new(opt_of(value)),
+                    Box::new(opt_empty(inner)),
+                )
             }
             // `c.ok_or(e)`: `Ok(())` when the condition holds.
             "ok_or" | "ok_or_else" => {
-                let Ty::Result(ok, err) = ret.strip_refs() else { return None };
+                let Ty::Result(ok, err) = ret.strip_refs() else {
+                    return None;
+                };
                 cx.needs_result = true;
-                let e = if name == "ok_or_else" { supplied(b0, err) } else { b0 };
+                let e = if name == "ok_or_else" {
+                    supplied(b0, err)
+                } else {
+                    b0
+                };
                 let targs = format!("<{}, {}>", ok.boxed(), err.boxed());
                 Expr::Ternary(
                     Box::new(recv),
                     Box::new(Expr::raw(format!("new Ok{targs}(null)"))),
-                    Box::new(Expr::New { ty: format!("Err{targs}"), args: vec![e] }),
+                    Box::new(Expr::New {
+                        ty: format!("Err{targs}"),
+                        args: vec![e],
+                    }),
                 )
             }
             _ => return None,
@@ -415,7 +431,16 @@ pub(super) fn lower_small_method(
     let c = |f: &str, a: Vec<Expr>| Expr::call(Expr::raw("Character"), f, a);
     // Exact mode keeps Rust's ASCII-only meaning through helpers; simple mode assumes ASCII text.
     let exact = !crate::mode::simple();
-    if exact && matches!(name, "to_ascii_uppercase" | "to_ascii_lowercase" | "eq_ignore_ascii_case" | "is_digit" | "to_digit") {
+    if exact
+        && matches!(
+            name,
+            "to_ascii_uppercase"
+                | "to_ascii_lowercase"
+                | "eq_ignore_ascii_case"
+                | "is_digit"
+                | "to_digit"
+        )
+    {
         super::super::fmt::file_helper(cx, ASCII_CHAR_HELPERS);
     }
     Some(match name {
@@ -450,19 +475,29 @@ pub(super) fn lower_small_method(
         ),
         "len_utf8" => {
             cx.import("java.nio.charset.StandardCharsets");
-            Expr::raw(format!("String.valueOf({}).getBytes(StandardCharsets.UTF_8).length", render(&recv)))
+            Expr::raw(format!(
+                "String.valueOf({}).getBytes(StandardCharsets.UTF_8).length",
+                render(&recv)
+            ))
         }
         "len_utf16" => Expr::raw("1"),
         // The text written into the buffer (the buffer itself isn't filled).
         "encode_utf8" => Expr::call(Expr::raw("String"), "valueOf", vec![recv]),
-        "encode_utf16" => Expr::raw(format!("new ArrayList<>(List.of((short) {}))", render(&recv))),
+        "encode_utf16" => Expr::raw(format!(
+            "new ArrayList<>(List.of((short) {}))",
+            render(&recv)
+        )),
         "is_alphanumeric" => c("isLetterOrDigit", vec![recv]),
         "is_whitespace" => c("isWhitespace", vec![recv]),
         "is_control" => c("isISOControl", vec![recv]),
         "is_ascii" => Expr::bin(recv, "<", Expr::raw("128")),
         // Simple mode assumes ASCII text, where the `Character` tests agree with Rust's.
-        "is_ascii_digit" | "is_ascii_alphabetic" | "is_ascii_alphanumeric" | "is_ascii_whitespace"
-        | "is_ascii_uppercase" | "is_ascii_lowercase"
+        "is_ascii_digit"
+        | "is_ascii_alphabetic"
+        | "is_ascii_alphanumeric"
+        | "is_ascii_whitespace"
+        | "is_ascii_uppercase"
+        | "is_ascii_lowercase"
             if crate::mode::simple() =>
         {
             let f = match name {
@@ -587,20 +622,38 @@ pub(super) fn lower_small_method(
         "to_ascii_uppercase" | "to_ascii_lowercase" => {
             let upper = name == "to_ascii_uppercase";
             if exact {
-                Expr::static_call(if upper { "ascii_upper" } else { "ascii_lower" }, vec![recv])
+                Expr::static_call(
+                    if upper { "ascii_upper" } else { "ascii_lower" },
+                    vec![recv],
+                )
             } else {
-                c(if upper { "toUpperCase" } else { "toLowerCase" }, vec![recv])
+                c(
+                    if upper { "toUpperCase" } else { "toLowerCase" },
+                    vec![recv],
+                )
             }
         }
         // The full mapping may be several chars (`ß` -> `SS`): the text of the case-mapping iterator.
         "to_uppercase" | "to_lowercase" => {
-            let f = if name == "to_uppercase" { "toUpperCase" } else { "toLowerCase" };
-            Expr::call(Expr::call(Expr::raw("String"), "valueOf", vec![recv]), f, vec![Expr::raw("Locale.ROOT")])
+            let f = if name == "to_uppercase" {
+                "toUpperCase"
+            } else {
+                "toLowerCase"
+            };
+            Expr::call(
+                Expr::call(Expr::raw("String"), "valueOf", vec![recv]),
+                f,
+                vec![Expr::raw("Locale.ROOT")],
+            )
         }
         "to_string" => Expr::call(Expr::raw("String"), "valueOf", vec![recv]),
         "eq_ignore_ascii_case" => {
             let fold = |v: Expr| {
-                if exact { Expr::static_call("ascii_lower", vec![v]) } else { c("toLowerCase", vec![v]) }
+                if exact {
+                    Expr::static_call("ascii_lower", vec![v])
+                } else {
+                    c("toLowerCase", vec![v])
+                }
             };
             Expr::bin(fold(recv), "==", fold(b0))
         }
@@ -653,12 +706,20 @@ pub(super) fn lower_str_method(
             // As statements only (`builders` checks): the popped char isn't needed.
             "pop" => {
                 let n = render(&b);
-                return Some(Expr::call(b, "setLength", vec![Expr::raw(format!("Math.max(0, {n}.length() - 1)"))]));
+                return Some(Expr::call(
+                    b,
+                    "setLength",
+                    vec![Expr::raw(format!("Math.max(0, {n}.length() - 1)"))],
+                ));
             }
             "truncate" => {
                 let n = render(&b);
                 let k = render(&b0);
-                return Some(Expr::call(b, "setLength", vec![Expr::raw(format!("Math.min({k}, {n}.length())"))]));
+                return Some(Expr::call(
+                    b,
+                    "setLength",
+                    vec![Expr::raw(format!("Math.min({k}, {n}.length())"))],
+                ));
             }
             _ => {}
         }
@@ -1038,20 +1099,32 @@ pub(super) fn lower_str_method(
         }
         // ASCII letters only (`straße` keeps its `ß`), unlike Java's case mapping; simple mode
         // assumes ASCII text and keeps Java's.
-        "to_ascii_uppercase" | "to_ascii_lowercase" | "make_ascii_uppercase" | "make_ascii_lowercase" => {
+        "to_ascii_uppercase"
+        | "to_ascii_lowercase"
+        | "make_ascii_uppercase"
+        | "make_ascii_lowercase" => {
             let upper = name.ends_with("uppercase");
             let v = if crate::mode::simple() {
-                Expr::call(recv, if upper { "toUpperCase" } else { "toLowerCase" }, vec![Expr::raw("Locale.ROOT")])
+                Expr::call(
+                    recv,
+                    if upper { "toUpperCase" } else { "toLowerCase" },
+                    vec![Expr::raw("Locale.ROOT")],
+                )
             } else {
                 super::super::fmt::file_helper(cx, ASCII_STR_HELPERS);
-                Expr::static_call(if upper { "ascii_upper" } else { "ascii_lower" }, vec![recv])
+                Expr::static_call(
+                    if upper { "ascii_upper" } else { "ascii_lower" },
+                    vec![recv],
+                )
             };
             if name.starts_with("to_") {
                 return Some(v);
             }
             return Some(expr::place_assign(cx, recv_ast, "=", v, out));
         }
-        "eq_ignore_ascii_case" if crate::mode::simple() => return Some(Expr::call(recv, "equalsIgnoreCase", vec![b0])),
+        "eq_ignore_ascii_case" if crate::mode::simple() => {
+            return Some(Expr::call(recv, "equalsIgnoreCase", vec![b0]));
+        }
         "eq_ignore_ascii_case" => {
             super::super::fmt::file_helper(cx, ASCII_STR_HELPERS);
             let lower = |e: Expr| Expr::static_call("ascii_lower", vec![e]);
@@ -1059,7 +1132,11 @@ pub(super) fn lower_str_method(
         }
         "is_ascii" => {
             lambda_params!(cx; c);
-            return Some(Expr::call(Expr::call(recv, "chars", vec![]), "allMatch", vec![Expr::raw(format!("{c} -> {c} < 128"))]));
+            return Some(Expr::call(
+                Expr::call(recv, "chars", vec![]),
+                "allMatch",
+                vec![Expr::raw(format!("{c} -> {c} < 128"))],
+            ));
         }
         "trim_ascii" | "trim_ascii_start" | "trim_ascii_end" => {
             super::super::fmt::file_helper(cx, ASCII_STR_HELPERS);
@@ -1068,7 +1145,10 @@ pub(super) fn lower_str_method(
                 "trim_ascii_start" => ("true", "false"),
                 _ => ("false", "true"),
             };
-            return Some(Expr::static_call("trim_ascii", vec![recv, Expr::raw(start), Expr::raw(end)]));
+            return Some(Expr::static_call(
+                "trim_ascii",
+                vec![recv, Expr::raw(start), Expr::raw(end)],
+            ));
         }
         // `trim_prefix` / `trim_suffix`: the text without the affix, or unchanged.
         "trim_prefix" | "trim_suffix" => {
@@ -1078,9 +1158,19 @@ pub(super) fn lower_str_method(
             let av = char_arg(av, &arg0_ty);
             let len = Expr::call(sv.clone(), "length", vec![]);
             let (test, cut) = if name == "trim_prefix" {
-                ("startsWith", Expr::call(sv.clone(), "substring", vec![plen]))
+                (
+                    "startsWith",
+                    Expr::call(sv.clone(), "substring", vec![plen]),
+                )
             } else {
-                ("endsWith", Expr::call(sv.clone(), "substring", vec![Expr::raw("0"), Expr::bin(len, "-", plen)]))
+                (
+                    "endsWith",
+                    Expr::call(
+                        sv.clone(),
+                        "substring",
+                        vec![Expr::raw("0"), Expr::bin(len, "-", plen)],
+                    ),
+                )
             };
             return Some(conditional(Expr::call(sv.clone(), test, vec![av]), cut, sv));
         }
@@ -1093,28 +1183,52 @@ pub(super) fn lower_str_method(
             let len = Expr::call(sv.clone(), "length", vec![]);
             let fits = Expr::bin(len.clone(), ">=", Expr::bin(pl.clone(), "+", sl.clone()));
             let cond = Expr::bin(
-                Expr::bin(Expr::call(sv.clone(), "startsWith", vec![char_arg(pre, &arg0_ty)]), "&&", Expr::call(sv.clone(), "endsWith", vec![char_arg(suf, &suf_ty)])),
+                Expr::bin(
+                    Expr::call(sv.clone(), "startsWith", vec![char_arg(pre, &arg0_ty)]),
+                    "&&",
+                    Expr::call(sv.clone(), "endsWith", vec![char_arg(suf, &suf_ty)]),
+                ),
                 "&&",
                 fits,
             );
             let inner = Expr::call(sv, "substring", vec![pl, Expr::bin(len, "-", sl)]);
-            return Some(conditional(cond, opt_of(inner), opt_empty(opt_inner(ret).as_ref())));
+            return Some(conditional(
+                cond,
+                opt_of(inner),
+                opt_empty(opt_inner(ret).as_ref()),
+            ));
         }
         // Char positions stand in for byte offsets (exact on ASCII text).
         "is_char_boundary" => {
             return Some(Expr::bin(b0, "<=", Expr::call(recv, "length", vec![])));
         }
         "floor_char_boundary" | "ceil_char_boundary" => {
-            return Some(Expr::call(Expr::raw("Math"), "min", vec![b0, Expr::call(recv, "length", vec![])]));
+            return Some(Expr::call(
+                Expr::raw("Math"),
+                "min",
+                vec![b0, Expr::call(recv, "length", vec![])],
+            ));
         }
         "into_string" => return Some(recv),
         // The older names of `trim_start_matches` / `trim_end_matches`.
         "trim_left_matches" | "trim_right_matches" => {
-            let to = if name == "trim_left_matches" { "trim_start_matches" } else { "trim_end_matches" };
+            let to = if name == "trim_left_matches" {
+                "trim_start_matches"
+            } else {
+                "trim_end_matches"
+            };
             return lower_str_method(cx, _m, recv_ast, recv, args, arg_asts, to, ret, line, out);
         }
-        "into_boxed_bytes" => return lower_str_method(cx, _m, recv_ast, recv, args, arg_asts, "as_bytes", ret, line, out),
-        "get_mut" => return lower_str_method(cx, _m, recv_ast, recv, args, arg_asts, "get", ret, line, out),
+        "into_boxed_bytes" => {
+            return lower_str_method(
+                cx, _m, recv_ast, recv, args, arg_asts, "as_bytes", ret, line, out,
+            );
+        }
+        "get_mut" => {
+            return lower_str_method(
+                cx, _m, recv_ast, recv, args, arg_asts, "get", ret, line, out,
+            );
+        }
         "repeat" => return Some(Expr::call(recv, "repeat", vec![b0])),
         "cmp" => return Some(Expr::call(recv, "compareTo", vec![b0])),
         // Rust yields UTF-8 bytes; Java's char codes are the same values for ASCII.

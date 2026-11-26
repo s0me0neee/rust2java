@@ -246,7 +246,11 @@ fn trimmed_buffer(cx: &Cx, m: &ast::MethodCallExpr) -> bool {
         if cx.local_of_path(&ast::Expr::PathExpr(pe.clone())) != Some(local) {
             continue;
         }
-        if pe.syntax().ancestors().any(|a| ast::ClosureExpr::can_cast(a.kind())) {
+        if pe
+            .syntax()
+            .ancestors()
+            .any(|a| ast::ClosureExpr::can_cast(a.kind()))
+        {
             return false;
         }
         let parent = pe.syntax().parent();
@@ -291,7 +295,9 @@ fn read_line_mode(
     // Simple mode: `buf = STDIN.readLine();` when the buffer is only read trimmed, so the lost
     // `\n` (and the append onto a cleared buffer) can't show.
     let as_stmt = unwrapped && unwrap_in_stmt(&e)
-        || e.syntax().parent().is_some_and(|p| ast::ExprStmt::can_cast(p.kind()));
+        || e.syntax()
+            .parent()
+            .is_some_and(|p| ast::ExprStmt::can_cast(p.kind()));
     if crate::mode::simple()
         && !to_string
         && as_stmt
@@ -834,8 +840,12 @@ pub(super) fn duration_method(cx: &mut Cx, name: &str, recv: Expr, args: &[Expr]
         "saturating_mul" => call("multipliedBy", vec![b]),
         "saturating_sub" => Expr::static_call("dur_saturating_sub", vec![recv, b]),
         "abs_diff" => Expr::call(call("minus", vec![b]), "abs", vec![]),
-        "mul_f64" | "mul_f32" => Expr::static_call("dur_of_secs", vec![Expr::bin(secs(recv.clone()), "*", b)]),
-        "div_f64" | "div_f32" => Expr::static_call("dur_of_secs", vec![Expr::bin(secs(recv.clone()), "/", b)]),
+        "mul_f64" | "mul_f32" => {
+            Expr::static_call("dur_of_secs", vec![Expr::bin(secs(recv.clone()), "*", b)])
+        }
+        "div_f64" | "div_f32" => {
+            Expr::static_call("dur_of_secs", vec![Expr::bin(secs(recv.clone()), "/", b)])
+        }
         "div_duration_f64" => Expr::bin(secs(recv.clone()), "/", secs(b)),
         "div_duration_f32" => float(Expr::bin(secs(recv.clone()), "/", secs(b))),
         _ => return None,
@@ -1122,7 +1132,9 @@ pub(crate) fn plain_lines(cx: &Cx, m: &ast::MethodCallExpr) -> bool {
                 return false;
             };
             match tp.fields().collect::<Vec<_>>().as_slice() {
-                [ast::Pat::IdentPat(_), ast::Pat::IdentPat(line)] => binding_unwrapped(cx, line, &body),
+                [ast::Pat::IdentPat(_), ast::Pat::IdentPat(line)] => {
+                    binding_unwrapped(cx, line, &body)
+                }
                 _ => false,
             }
         }
@@ -1257,7 +1269,9 @@ pub(crate) fn phantom_line_result(cx: &Cx, e: &ast::Expr) -> bool {
                     .and_then(ast::ForExpr::cast)
                     .and_then(|f| f.iterable())
                     .and_then(|it| match strip_parens(&it) {
-                        ast::Expr::MethodCallExpr(m) if method_name(&m) == "enumerate" => m.receiver(),
+                        ast::Expr::MethodCallExpr(m) if method_name(&m) == "enumerate" => {
+                            m.receiver()
+                        }
                         _ => None,
                     })
                     .is_some_and(|r| plain_lines_iterable(cx, &r)),

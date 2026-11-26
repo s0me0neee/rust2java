@@ -50,7 +50,10 @@ fn core_api_covered() {
         .map(normalize)
         .collect();
     let api = std::fs::read_to_string(root.join("tests/core_api.txt")).unwrap();
-    let missing: Vec<&str> = api.lines().filter(|k| !k.is_empty() && !called.contains(*k)).collect();
+    let missing: Vec<&str> = api
+        .lines()
+        .filter(|k| !k.is_empty() && !called.contains(*k))
+        .collect();
     let total = api.lines().filter(|k| !k.is_empty()).count();
     assert!(
         missing.is_empty(),

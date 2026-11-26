@@ -54,7 +54,10 @@ pub fn lower_stmt_list(cx: &mut Cx, list: &ast::StmtList, dest: &Dest, out: &mut
             if value_due && exits {
                 out.push(Stmt::new(
                     cx.end_line(list.syntax()),
-                    StmtKind::Throw(Expr::New { ty: "IllegalStateException".into(), args: vec![Expr::str_lit("unreachable")] }),
+                    StmtKind::Throw(Expr::New {
+                        ty: "IllegalStateException".into(),
+                        args: vec![Expr::str_lit("unreachable")],
+                    }),
                 ));
             }
         }
@@ -411,7 +414,12 @@ pub fn lower_let(cx: &mut Cx, l: &ast::LetStmt, out: &mut Vec<Stmt>) {
             };
             cx.read_only_literal = false;
             let name = cx.declare(&rust_name);
-            let in_macro = !ast::SourceFile::can_cast(l.syntax().ancestors().last().map_or(l.syntax().kind(), |r| r.kind()));
+            let in_macro = !ast::SourceFile::can_cast(
+                l.syntax()
+                    .ancestors()
+                    .last()
+                    .map_or(l.syntax().kind(), |r| r.kind()),
+            );
             if in_macro {
                 cx.macro_locals.insert(name.clone());
             } else {
@@ -496,7 +504,8 @@ fn option_ref_init(cx: &Cx, init: &ast::Expr) -> bool {
     let ast::Expr::MethodCallExpr(mc) = super::strip_parens(init) else {
         return false;
     };
-    mc.name_ref().is_some_and(|n| expr::option_ref_method(&n.text()))
+    mc.name_ref()
+        .is_some_and(|n| expr::option_ref_method(&n.text()))
         && mc
             .receiver()
             .is_some_and(|r| matches!(cx.ty(&r).strip_refs(), Ty::Option(_)))
@@ -579,17 +588,19 @@ fn lower_slot_let(
     let line = cx.line(l.syntax());
     // Throws mode: `m.get_mut(&k).ok_or(e)?` is `if (!m.containsKey(k)) throw ..;`.
     let missing = match super::strip_parens(&init) {
-        ast::Expr::TryExpr(t) if crate::mode::throws() => match t.expr().map(|e| super::strip_parens(&e)) {
-            Some(ast::Expr::MethodCallExpr(e)) => {
-                let arg = e.arg_list().and_then(|a| a.args().next());
-                match (super::iter::method_name(&e).as_str(), arg) {
-                    ("ok_or", Some(a)) => Some(a),
-                    ("ok_or_else", Some(ast::Expr::ClosureExpr(c))) => c.body(),
-                    _ => None,
+        ast::Expr::TryExpr(t) if crate::mode::throws() => {
+            match t.expr().map(|e| super::strip_parens(&e)) {
+                Some(ast::Expr::MethodCallExpr(e)) => {
+                    let arg = e.arg_list().and_then(|a| a.args().next());
+                    match (super::iter::method_name(&e).as_str(), arg) {
+                        ("ok_or", Some(a)) => Some(a),
+                        ("ok_or_else", Some(ast::Expr::ClosureExpr(c))) => c.body(),
+                        _ => None,
+                    }
                 }
+                _ => None,
             }
-            _ => None,
-        },
+        }
         _ => None,
     };
     if checked && missing.is_none() {
@@ -604,8 +615,14 @@ fn lower_slot_let(
         out.push(Stmt::new(
             line,
             StmtKind::If {
-                cond: Expr::Unary("!", Box::new(Expr::call(map.clone(), "containsKey", vec![key.clone()]))),
-                then: Block { stmts: then, close_line: line },
+                cond: Expr::Unary(
+                    "!",
+                    Box::new(Expr::call(map.clone(), "containsKey", vec![key.clone()])),
+                ),
+                then: Block {
+                    stmts: then,
+                    close_line: line,
+                },
                 els: None,
             },
         ));
@@ -649,18 +666,32 @@ fn lower_slot_let(
 // Whether a `&mut` binding may write through: assigned through, given a mutating method, or
 // passed on to a call (conservatively). Format macros only read.
 pub(super) fn written_through(cx: &Cx, ip: &ast::IdentPat) -> bool {
-    let Some(local) = cx.sema.to_def(ip) else { return true };
-    let Some(scope) = cx.enclosing_fn(ip.syntax()) else { return true };
-    for pe in cx.expanded_descendants(&scope).into_iter().filter_map(ast::PathExpr::cast) {
+    let Some(local) = cx.sema.to_def(ip) else {
+        return true;
+    };
+    let Some(scope) = cx.enclosing_fn(ip.syntax()) else {
+        return true;
+    };
+    for pe in cx
+        .expanded_descendants(&scope)
+        .into_iter()
+        .filter_map(ast::PathExpr::cast)
+    {
         let e = ast::Expr::PathExpr(pe.clone());
         if cx.local_of_path(&e) != Some(local) {
             continue;
         }
-        let Some(parent) = pe.syntax().parent() else { continue };
+        let Some(parent) = pe.syntax().parent() else {
+            continue;
+        };
         if let Some(m) = ast::MethodCallExpr::cast(parent.clone())
             && m.receiver().is_some_and(|r| r.syntax() == pe.syntax())
         {
-            let access = cx.sema.resolve_method_call(&m).and_then(|f| f.self_param(cx.db)).map(|s| s.access(cx.db));
+            let access = cx
+                .sema
+                .resolve_method_call(&m)
+                .and_then(|f| f.self_param(cx.db))
+                .map(|s| s.access(cx.db));
             if access.is_none_or(|a| a == ra_ap_hir::Access::Exclusive) {
                 return true;
             }
@@ -671,10 +702,13 @@ pub(super) fn written_through(cx: &Cx, ip: &ast::IdentPat) -> bool {
         }
         if let Some(p) = ast::PrefixExpr::cast(parent.clone())
             && p.op_kind() == Some(ast::UnaryOp::Deref)
-            && p.syntax().parent().and_then(ast::BinExpr::cast).is_some_and(|b| {
-                matches!(b.op_kind(), Some(ast::BinaryOp::Assignment { .. }))
-                    && b.lhs().is_some_and(|l| l.syntax() == p.syntax())
-            })
+            && p.syntax()
+                .parent()
+                .and_then(ast::BinExpr::cast)
+                .is_some_and(|b| {
+                    matches!(b.op_kind(), Some(ast::BinaryOp::Assignment { .. }))
+                        && b.lhs().is_some_and(|l| l.syntax() == p.syntax())
+                })
         {
             return true;
         }
@@ -867,7 +901,10 @@ pub fn lower_to_dest(cx: &mut Cx, e: &ast::Expr, dest: &Dest, out: &mut Vec<Stmt
         push_discard(out, line, v);
         out.push(Stmt::new(
             line,
-            StmtKind::Throw(Expr::New { ty: "IllegalStateException".into(), args: vec![Expr::str_lit("unreachable")] }),
+            StmtKind::Throw(Expr::New {
+                ty: "IllegalStateException".into(),
+                args: vec![Expr::str_lit("unreachable")],
+            }),
         ));
         return;
     }
@@ -1199,15 +1236,17 @@ fn lower_while(cx: &mut Cx, w: &ast::WhileExpr, out: &mut Vec<Stmt>) {
     let frame = cx.loops.pop().unwrap();
     // Simple mode: `T x = q.poll(); x != null` becomes `T x; while ((x = q.poll()) != null)`.
     if crate::mode::simple()
-        && let [Stmt {
-            kind:
-                StmtKind::Local {
-                    ty,
-                    name,
-                    init: Some(next),
-                },
-            ..
-        }] = pre.as_slice()
+        && let [
+            Stmt {
+                kind:
+                    StmtKind::Local {
+                        ty,
+                        name,
+                        init: Some(next),
+                    },
+                ..
+            },
+        ] = pre.as_slice()
         && matches!(&cond, Expr::Binary(l, "!=", r)
             if matches!(l.as_ref(), Expr::Name(n) if n == name)
                 && matches!(r.as_ref(), Expr::Raw(z) if z == "null"))

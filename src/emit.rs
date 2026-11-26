@@ -255,9 +255,10 @@ impl Printer {
                 Some(e) => {
                     let (ty, e) = match crate::mode::simple().then(|| var_local(ty, e)).flatten() {
                         Some((t, e)) => (t, self.expr_str(&e, 0)),
-                        None if ty.starts_with("Optional<") => {
-                            (ty.clone(), self.expr_str(&crate::lower::expr::unwitness_empty(e.clone()), 0))
-                        }
+                        None if ty.starts_with("Optional<") => (
+                            ty.clone(),
+                            self.expr_str(&crate::lower::expr::unwitness_empty(e.clone()), 0),
+                        ),
                         None => (ty.clone(), self.expr_str(e, 0)),
                     };
                     self.word(&format!("{ty} {name} = {e};"));

@@ -353,7 +353,9 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
             let more = if short.len() < text.len() { "…" } else { "" };
             cx.warn(
                 &node,
-                format!("Result kept as a value (not exceptions) in this file: {why}: `{short}{more}`"),
+                format!(
+                    "Result kept as a value (not exceptions) in this file: {why}: `{short}{more}`"
+                ),
             );
         }
     }
@@ -384,15 +386,24 @@ pub fn lower_unit(sema: &Semantics<'_, RootDatabase>, unit: &Unit) -> Lowered {
     };
     let mut renamed_locals: HashMap<String, Option<String>> = HashMap::new();
     for (java, rust) in &cx.renamed_locals {
-        let e = renamed_locals.entry(java.clone()).or_insert(Some(rust.clone()));
+        let e = renamed_locals
+            .entry(java.clone())
+            .or_insert(Some(rust.clone()));
         if e.as_ref() != Some(rust) {
             *e = None;
         }
     }
     Lowered {
         hints: crate::javafmt::Hints {
-            macro_locals: cx.macro_locals.difference(&cx.user_locals).cloned().collect(),
-            renamed_locals: renamed_locals.into_iter().filter_map(|(j, r)| Some((j, r?))).collect(),
+            macro_locals: cx
+                .macro_locals
+                .difference(&cx.user_locals)
+                .cloned()
+                .collect(),
+            renamed_locals: renamed_locals
+                .into_iter()
+                .filter_map(|(j, r)| Some((j, r?)))
+                .collect(),
         },
         file: jf,
         comments,

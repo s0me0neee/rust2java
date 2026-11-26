@@ -214,7 +214,11 @@ pub fn lower_method_call(cx: &mut Cx, m: &ast::MethodCallExpr, out: &mut Vec<Stm
         // A `Some`-style method needing a `Supplier<T>`: the receiver comes first, as for `self`.
         if !cx.supplier_fns.get(&f).is_none_or(|n| n.is_empty()) {
             let mut tys = vec![recv_ty];
-            tys.extend(m.arg_list().map(|a| a.args().map(|x| cx.ty(&x)).collect::<Vec<_>>()).unwrap_or_default());
+            tys.extend(
+                m.arg_list()
+                    .map(|a| a.args().map(|x| cx.ty(&x)).collect::<Vec<_>>())
+                    .unwrap_or_default(),
+            );
             args.extend(super::generics::supplier_args(cx, f, &tys, m.syntax()));
         }
         // Derived comparison impls have no Rust-named method in Java: derives emit compareTo/equals.
@@ -255,7 +259,9 @@ pub fn lower_method_call(cx: &mut Cx, m: &ast::MethodCallExpr, out: &mut Vec<Stm
 
 // `R2J_STD_CALLS=<file>` appends the key of every std function a file names, for coverage reports.
 pub fn dump_std_calls(cx: &Cx, root: &ra_ap_syntax::SyntaxNode) {
-    let Some(path) = std::env::var_os("R2J_STD_CALLS") else { return };
+    let Some(path) = std::env::var_os("R2J_STD_CALLS") else {
+        return;
+    };
     let mut keys = Vec::new();
     // Macro arguments count (`println!("{}", x.abs())`), the macro's own body doesn't (`vec!`'s `into_vec`).
     let mut nodes = Vec::new();
@@ -282,10 +288,14 @@ pub fn dump_std_calls(cx: &Cx, root: &ra_ap_syntax::SyntaxNode) {
         } else {
             None
         };
-        let Some(f) = f.filter(|&f| !is_local_fn(cx, f)) else { continue };
+        let Some(f) = f.filter(|&f| !is_local_fn(cx, f)) else {
+            continue;
+        };
         let mut key = std_fn_key(cx, f);
         let name = f.name(cx.db).as_str().to_string();
-        if let Some(AssocItemContainer::Impl(imp)) = f.as_assoc_item(cx.db).map(|a| a.container(cx.db)) {
+        if let Some(AssocItemContainer::Impl(imp)) =
+            f.as_assoc_item(cx.db).map(|a| a.container(cx.db))
+        {
             // A trait impl counts for the trait: `Chars::next` is `Iterator::next`.
             if let Some(tr) = imp.trait_(cx.db) {
                 key = format!("{}::{name}", tr.name(cx.db).as_str());
@@ -309,7 +319,11 @@ pub fn dump_std_calls(cx: &Cx, root: &ra_ap_syntax::SyntaxNode) {
         keys.push(key + "\n");
     }
     use std::io::Write;
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = file.write_all(keys.concat().as_bytes());
     }
 }

@@ -41,16 +41,26 @@ impl Shape {
 pub(crate) enum Item {
     Index,
     // `seq.get(i + offset)`, or `seq.charAt(i)` for text.
-    Elem { seq: String, offset: Option<String>, text: bool },
+    Elem {
+        seq: String,
+        offset: Option<String>,
+        text: bool,
+    },
     // `list.subList(i, i + k)`, clamped to the end for chunks.
-    Sub { list: String, k: String, chunk: bool },
+    Sub {
+        list: String,
+        k: String,
+        chunk: bool,
+    },
 }
 
 impl Item {
     pub(crate) fn at(&self, idx: &str) -> String {
         match self {
             Item::Index => idx.to_string(),
-            Item::Elem { offset: Some(k), .. } => format!("{idx} + {k}"),
+            Item::Elem {
+                offset: Some(k), ..
+            } => format!("{idx} + {k}"),
             Item::Elem { .. } | Item::Sub { .. } => idx.to_string(),
         }
     }
@@ -69,7 +79,11 @@ impl Item {
                 } else {
                     format!("{idx} + {k}")
                 };
-                Expr::call(Expr::name(list.clone()), "subList", vec![Expr::name(idx), Expr::raw(end)])
+                Expr::call(
+                    Expr::name(list.clone()),
+                    "subList",
+                    vec![Expr::name(idx), Expr::raw(end)],
+                )
             }
         }
     }
@@ -106,7 +120,10 @@ pub(super) fn shape(cx: &Cx, e: &ast::Expr) -> Option<Shape> {
     match method_name(&m).as_str() {
         "enumerate" => {
             if let Some(list) = list_receiver_of_iter(cx, &recv) {
-                return Some(Shape::Enumerate { seq: list, text: false });
+                return Some(Shape::Enumerate {
+                    seq: list,
+                    text: false,
+                });
             }
             let ast::Expr::MethodCallExpr(c) = strip_parens(&recv) else {
                 return None;
@@ -126,12 +143,14 @@ pub(super) fn shape(cx: &Cx, e: &ast::Expr) -> Option<Shape> {
             (cx.lambda_depth == 0).then_some(Shape::Pieces { src: recv, name })
         }
         "zip" => Some(Shape::Zip(side(cx, &recv)?, side(cx, &arg()?)?)),
-        "windows" if matches!(cx.ty(&recv).strip_refs(), Ty::Vec(_)) => {
-            Some(Shape::Windows { list: recv, k: arg()? })
-        }
-        "chunks" if matches!(cx.ty(&recv).strip_refs(), Ty::Vec(_)) => {
-            Some(Shape::Chunks { list: recv, k: arg()? })
-        }
+        "windows" if matches!(cx.ty(&recv).strip_refs(), Ty::Vec(_)) => Some(Shape::Windows {
+            list: recv,
+            k: arg()?,
+        }),
+        "chunks" if matches!(cx.ty(&recv).strip_refs(), Ty::Vec(_)) => Some(Shape::Chunks {
+            list: recv,
+            k: arg()?,
+        }),
         _ => None,
     }
 }
@@ -142,9 +161,15 @@ fn side(cx: &Cx, e: &ast::Expr) -> Option<Side> {
         && method_name(&m) == "skip"
     {
         let list = list_receiver_of_iter(cx, &m.receiver()?)?;
-        return Some(Side { list, skip: Some(m.arg_list()?.args().next()?) });
+        return Some(Side {
+            list,
+            skip: Some(m.arg_list()?.args().next()?),
+        });
     }
-    Some(Side { list: list_receiver_of_iter(cx, e)?, skip: None })
+    Some(Side {
+        list: list_receiver_of_iter(cx, e)?,
+        skip: None,
+    })
 }
 
 pub(super) fn lower(cx: &mut Cx, shape: &Shape, line: u32, out: &mut Vec<Stmt>) -> Indexed {
@@ -173,17 +198,35 @@ pub(super) fn lower(cx: &mut Cx, shape: &Shape, line: u32, out: &mut Vec<Stmt>) 
                 cond: format!("{{i}} < {size}"),
                 step: "{i}++".into(),
                 bound: Some(size),
-                items: vec![Item::Index, Item::Elem { seq: list, offset: None, text: false }],
+                items: vec![
+                    Item::Index,
+                    Item::Elem {
+                        seq: list,
+                        offset: None,
+                        text: false,
+                    },
+                ],
             }
         }
         Shape::Enumerate { seq: s, text } => {
             let s = seq(cx, s, out);
-            let size = if *text { format!("{s}.length()") } else { format!("{s}.size()") };
+            let size = if *text {
+                format!("{s}.length()")
+            } else {
+                format!("{s}.size()")
+            };
             Indexed {
                 cond: format!("{{i}} < {size}"),
                 step: "{i}++".into(),
                 bound: Some(size),
-                items: vec![Item::Index, Item::Elem { seq: s, offset: None, text: *text }],
+                items: vec![
+                    Item::Index,
+                    Item::Elem {
+                        seq: s,
+                        offset: None,
+                        text: *text,
+                    },
+                ],
             }
         }
         Shape::Zip(a, b) => {
@@ -196,9 +239,10 @@ pub(super) fn lower(cx: &mut Cx, shape: &Shape, line: u32, out: &mut Vec<Stmt>) 
             };
             // Neighbors of one list: `i + 1 < v.size()`.
             let (cond, bound) = match (&ka, &kb) {
-                (None, Some(k)) | (Some(k), None) if la == lb => {
-                    (format!("{{i}} + {k} < {la}.size()"), len(&la, &Some(k.clone())))
-                }
+                (None, Some(k)) | (Some(k), None) if la == lb => (
+                    format!("{{i}} + {k} < {la}.size()"),
+                    len(&la, &Some(k.clone())),
+                ),
                 _ if la == lb && ka == kb => (format!("{{i}} < {}", len(&la, &ka)), len(&la, &ka)),
                 _ => {
                     let min = format!("Math.min({}, {})", len(&la, &ka), len(&lb, &kb));
@@ -210,8 +254,16 @@ pub(super) fn lower(cx: &mut Cx, shape: &Shape, line: u32, out: &mut Vec<Stmt>) 
                 step: "{i}++".into(),
                 bound: Some(bound),
                 items: vec![
-                    Item::Elem { seq: la, offset: ka, text: false },
-                    Item::Elem { seq: lb, offset: kb, text: false },
+                    Item::Elem {
+                        seq: la,
+                        offset: ka,
+                        text: false,
+                    },
+                    Item::Elem {
+                        seq: lb,
+                        offset: kb,
+                        text: false,
+                    },
                 ],
             }
         }
@@ -220,14 +272,24 @@ pub(super) fn lower(cx: &mut Cx, shape: &Shape, line: u32, out: &mut Vec<Stmt>) 
             let k = count(cx, k, out);
             let (cond, bound) = match k.parse::<u64>() {
                 Ok(1) => (format!("{{i}} < {l}.size()"), format!("{l}.size()")),
-                Ok(n) => (format!("{{i}} + {} < {l}.size()", n - 1), format!("{l}.size() - {}", n - 1)),
-                Err(_) => (format!("{{i}} + {k} <= {l}.size()"), format!("{l}.size() - {k} + 1")),
+                Ok(n) => (
+                    format!("{{i}} + {} < {l}.size()", n - 1),
+                    format!("{l}.size() - {}", n - 1),
+                ),
+                Err(_) => (
+                    format!("{{i}} + {k} <= {l}.size()"),
+                    format!("{l}.size() - {k} + 1"),
+                ),
             };
             Indexed {
                 cond,
                 step: "{i}++".into(),
                 bound: Some(bound),
-                items: vec![Item::Sub { list: l, k, chunk: false }],
+                items: vec![Item::Sub {
+                    list: l,
+                    k,
+                    chunk: false,
+                }],
             }
         }
         Shape::Chunks { list, k } => {
@@ -237,7 +299,11 @@ pub(super) fn lower(cx: &mut Cx, shape: &Shape, line: u32, out: &mut Vec<Stmt>) 
                 cond: format!("{{i}} < {l}.size()"),
                 step: format!("{{i}} += {k}"),
                 bound: None,
-                items: vec![Item::Sub { list: l, k, chunk: true }],
+                items: vec![Item::Sub {
+                    list: l,
+                    k,
+                    chunk: true,
+                }],
             }
         }
     }
@@ -275,10 +341,11 @@ pub(super) fn fused(
         "all" => "allMatch",
         _ => return None,
     };
-    let closure_arg = |m: &ast::MethodCallExpr| match m.arg_list()?.args().next().map(|a| strip_parens(&a))? {
-        ast::Expr::ClosureExpr(c) => closure_fields(&c).map(|_| c),
-        _ => None,
-    };
+    let closure_arg =
+        |m: &ast::MethodCallExpr| match m.arg_list()?.args().next().map(|a| strip_parens(&a))? {
+            ast::Expr::ClosureExpr(c) => closure_fields(&c).map(|_| c),
+            _ => None,
+        };
     let closure = closure_arg(m)?;
     // `.filter(|(_, line)| ..)` stages before it filter the indices (outermost last).
     let mut filters = Vec::new();
@@ -294,7 +361,12 @@ pub(super) fn fused(
     let ix = lower(cx, &shape, line, out);
     let bound = ix.bound.clone()?;
     let mut stream = Expr::raw(format!("IntStream.range(0, {bound})"));
-    let stages: Vec<_> = filters.into_iter().rev().map(|c| ("filter", c)).chain([(jname, closure)]).collect();
+    let stages: Vec<_> = filters
+        .into_iter()
+        .rev()
+        .map(|c| ("filter", c))
+        .chain([(jname, closure)])
+        .collect();
     // Every stage names the index alike, after the last stage that names it at all.
     let rust_index = stages
         .iter()
@@ -336,7 +408,9 @@ fn closure_fields(c: &ast::ClosureExpr) -> Option<Vec<Option<ast::IdentPat>>> {
     tp.fields()
         .map(|f| match strip_ref(f) {
             ast::Pat::WildcardPat(_) => Some(None),
-            ast::Pat::IdentPat(ip) if ip.pat().is_none() && ip.mut_token().is_none() => Some(Some(ip)),
+            ast::Pat::IdentPat(ip) if ip.pat().is_none() && ip.mut_token().is_none() => {
+                Some(Some(ip))
+            }
             _ => None,
         })
         .collect()
@@ -393,8 +467,13 @@ pub(super) fn closure_params(cx: &mut Cx, c: &ast::ClosureExpr, items: &[Item]) 
         };
         // Format strings' inline `{x}` find it by name.
         cx.declare_as(&ip.name()?.text().to_string(), &render(&item.expr(&idx)));
-        let kind = if *text { super::ElemAliasKind::Char } else { super::ElemAliasKind::List };
-        cx.elem_aliases.insert(local, (seq.clone(), item.at(&idx), kind));
+        let kind = if *text {
+            super::ElemAliasKind::Char
+        } else {
+            super::ElemAliasKind::List
+        };
+        cx.elem_aliases
+            .insert(local, (seq.clone(), item.at(&idx), kind));
     }
     Some(idx)
 }

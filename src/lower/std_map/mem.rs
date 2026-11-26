@@ -34,10 +34,20 @@ pub(super) fn fn_call(
             if key == "mem::size_of_val" && elem.is_str() {
                 cx.import("java.nio.charset.StandardCharsets");
                 let s = expr::lower_expr(cx, &arg, out);
-                return Some(Expr::raw(format!("{}.getBytes(StandardCharsets.UTF_8).length", render(&s))));
+                return Some(Expr::raw(format!(
+                    "{}.getBytes(StandardCharsets.UTF_8).length",
+                    render(&s)
+                )));
             }
             let n = prim_size(&elem)?;
-            Some(Expr::raw(if key == "mem::size_of_val" { n * len } else { n }.to_string()))
+            Some(Expr::raw(
+                if key == "mem::size_of_val" {
+                    n * len
+                } else {
+                    n
+                }
+                .to_string(),
+            ))
         }
         // Equal for the same variant: a fieldless enum's constant, else the variant's record class.
         "mem::discriminant" => {
@@ -50,9 +60,17 @@ pub(super) fn fn_call(
                     ra_ap_hir::Adt::Enum(e) => Some(e),
                     _ => None,
                 })
-                .is_some_and(|e| e.variants(cx.db).iter().all(|v| v.kind(cx.db) == ra_ap_hir::StructKind::Unit));
+                .is_some_and(|e| {
+                    e.variants(cx.db)
+                        .iter()
+                        .all(|v| v.kind(cx.db) == ra_ap_hir::StructKind::Unit)
+                });
             let v = expr::lower_expr(cx, &arg, out);
-            Some(if unit_only { v } else { Expr::call(v, "getClass", vec![]) })
+            Some(if unit_only {
+                v
+            } else {
+                Expr::call(v, "getClass", vec![])
+            })
         }
         _ => None,
     }
@@ -67,7 +85,11 @@ fn prim_size(ty: &Ty) -> Option<u64> {
         Ty::Bool | Ty::Int(Int::I8) | Ty::Int(Int::U8) => 1,
         Ty::Int(Int::I16) | Ty::Int(Int::U16) => 2,
         Ty::Char | Ty::F32 | Ty::Int(Int::I32) | Ty::Int(Int::U32) => 4,
-        Ty::F64 | Ty::Int(Int::I64) | Ty::Int(Int::U64) | Ty::Int(Int::Isize) | Ty::Int(Int::Usize) => 8,
+        Ty::F64
+        | Ty::Int(Int::I64)
+        | Ty::Int(Int::U64)
+        | Ty::Int(Int::Isize)
+        | Ty::Int(Int::Usize) => 8,
         Ty::Int(Int::I128) | Ty::Int(Int::U128) => 16,
         _ => return None,
     })
@@ -165,4 +187,3 @@ pub(super) fn mem_replace(
     let _ = ret;
     Expr::name(tmp)
 }
-

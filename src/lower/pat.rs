@@ -196,7 +196,11 @@ fn mut_element_condition(
         if name == "first_mut" {
             Expr::raw("0")
         } else {
-            Expr::bin(Expr::call(source.clone(), "size", vec![]), "-", Expr::raw("1"))
+            Expr::bin(
+                Expr::call(source.clone(), "size", vec![]),
+                "-",
+                Expr::raw("1"),
+            )
         }
     } else {
         let value = if name == "first_mut" {
@@ -227,14 +231,29 @@ fn mut_element_condition(
         } else if name != "get_mut" || matches!(&index, Expr::Raw(r) if r == "0") {
             Expr::Unary("!", Box::new(Expr::call(source.clone(), "isEmpty", vec![])))
         } else {
-            let mut t = Expr::bin(index.clone(), "<", Expr::call(source.clone(), "size", vec![]));
+            let mut t = Expr::bin(
+                index.clone(),
+                "<",
+                Expr::call(source.clone(), "size", vec![]),
+            );
             if index_ast_negative_possible {
                 t = Expr::bin(Expr::bin(index.clone(), ">=", Expr::raw("0")), "&&", t);
             }
             t
         };
-        let kind = if map { super::ElemAliasKind::Map } else { super::ElemAliasKind::List };
-        cx.elem_aliases.insert(local, (crate::emit::render_expr(&source), crate::emit::render_expr(&index), kind));
+        let kind = if map {
+            super::ElemAliasKind::Map
+        } else {
+            super::ElemAliasKind::List
+        };
+        cx.elem_aliases.insert(
+            local,
+            (
+                crate::emit::render_expr(&source),
+                crate::emit::render_expr(&index),
+                kind,
+            ),
+        );
         return Some((test, true));
     }
     let value = if map {
@@ -425,12 +444,12 @@ fn nullable_some(
     let line = cx.line(init.syntax());
     let v = expr::lower_expr(cx, init, out);
     let bind = match p {
-        ast::Pat::TupleStructPat(tp)
-            if tp.path().is_some_and(|q| q.syntax().text() == "Some") =>
-        {
+        ast::Pat::TupleStructPat(tp) if tp.path().is_some_and(|q| q.syntax().text() == "Some") => {
             let mut fields = tp.fields();
             match (fields.next(), fields.next()) {
-                (Some(ast::Pat::IdentPat(ip)), None) if ip.pat().is_none() && !cx.binding_captured(&ip) => {
+                (Some(ast::Pat::IdentPat(ip)), None)
+                    if ip.pat().is_none() && !cx.binding_captured(&ip) =>
+                {
                     ip.name()
                 }
                 _ => None,
@@ -470,11 +489,17 @@ fn nullable_some(
                 let java = cx.declare(name.text().as_ref());
                 binds.push(Stmt::new(
                     line,
-                    StmtKind::Local { ty: elem.strip_refs().java(), name: java, init: Some(val) },
+                    StmtKind::Local {
+                        ty: elem.strip_refs().java(),
+                        name: java,
+                        init: Some(val),
+                    },
                 ));
             }
             // `Some(_)` still takes the item from an iterator.
-            None if crate::emit::render_expr(&val).contains("next(") => stmt::push_discard(binds, line, val),
+            None if crate::emit::render_expr(&val).contains("next(") => {
+                stmt::push_discard(binds, line, val)
+            }
             None => {}
         }
         return Ok(cond);
@@ -976,7 +1001,11 @@ fn lower_switch_stmt(
 }
 
 // Whether `(pattern, arm)` pairs over a value of type `ty` can be Java switch cases.
-pub(super) fn can_switch_alts(cx: &mut Cx, alts: &[(Option<ast::Pat>, &ast::MatchArm)], ty: &Ty) -> bool {
+pub(super) fn can_switch_alts(
+    cx: &mut Cx,
+    alts: &[(Option<ast::Pat>, &ast::MatchArm)],
+    ty: &Ty,
+) -> bool {
     selector_switchable(ty)
         && alts.iter().all(|(p, a)| {
             let Some(p) = p else { return false };
@@ -1179,7 +1208,9 @@ pub(super) fn chain_over(
         cx.pop_scope();
         let cond = and(conds);
         // A final `_ => {}` adds nothing: no `else { }`.
-        let empty = stmts.iter().all(|s| matches!(&s.kind, StmtKind::Block(b) if b.stmts.is_empty()));
+        let empty = stmts
+            .iter()
+            .all(|s| matches!(&s.kind, StmtKind::Block(b) if b.stmts.is_empty()));
         if cond.is_none() && empty && els.is_none() {
             continue;
         }
@@ -2162,14 +2193,19 @@ fn is_total(cx: &mut Cx, p: &ast::Pat) -> bool {
         ast::Pat::SlicePat(sp) => {
             let pats: Vec<ast::Pat> = sp.pats().collect();
             let rest = pats.iter().any(|q| matches!(q, ast::Pat::RestPat(_)));
-            let fixed = pats.iter().filter(|q| !matches!(q, ast::Pat::RestPat(_))).count();
+            let fixed = pats
+                .iter()
+                .filter(|q| !matches!(q, ast::Pat::RestPat(_)))
+                .count();
             let len = cx
                 .sema
                 .type_of_pat(p)
                 .and_then(|t| t.original.as_array(cx.db))
                 .map(|(_, n)| n);
             len.is_some_and(|n| if rest { n >= fixed } else { n == fixed })
-                && pats.iter().all(|q| matches!(q, ast::Pat::RestPat(_)) || is_total(cx, q))
+                && pats
+                    .iter()
+                    .all(|q| matches!(q, ast::Pat::RestPat(_)) || is_total(cx, q))
         }
         _ => false,
     }

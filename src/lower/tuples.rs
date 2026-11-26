@@ -14,21 +14,44 @@ use crate::ty::Ty;
 
 // Methods whose result pairs up values that weren't a tuple before (lowered as `Map.entry`).
 const PRODUCERS: &[&str] = &[
-    "enumerate", "zip", "char_indices", "partition", "split_once", "rsplit_once", "split_at",
-    "split_at_mut", "split_first", "split_last", "split_first_mut", "split_last_mut", "overflowing_add", "overflowing_sub", "overflowing_mul", "overflowing_neg",
-    "overflowing_pow", "unzip",
+    "enumerate",
+    "zip",
+    "char_indices",
+    "partition",
+    "split_once",
+    "rsplit_once",
+    "split_at",
+    "split_at_mut",
+    "split_first",
+    "split_last",
+    "split_first_mut",
+    "split_last_mut",
+    "overflowing_add",
+    "overflowing_sub",
+    "overflowing_mul",
+    "overflowing_neg",
+    "overflowing_pow",
+    "unzip",
 ];
 
 // Binding names that say nothing about what the tuple is.
 const VAGUE: &[&str] = &[
-    "tmp", "item", "it", "val", "value", "res", "result", "cur", "curr", "current", "next",
-    "prev", "top", "front", "back", "last", "first", "best", "out", "entry", "elem", "data",
-    "pair", "tuple", "x", "y", "a", "b",
+    "tmp", "item", "it", "val", "value", "res", "result", "cur", "curr", "current", "next", "prev",
+    "top", "front", "back", "last", "first", "best", "out", "entry", "elem", "data", "pair",
+    "tuple", "x", "y", "a", "b",
 ];
 
 // Names records can't use for a component (`Object` methods) or that the file already means.
-const RESERVED_FIELDS: &[&str] =
-    &["clone", "finalize", "getClass", "hashCode", "notify", "notifyAll", "toString", "wait"];
+const RESERVED_FIELDS: &[&str] = &[
+    "clone",
+    "finalize",
+    "getClass",
+    "hashCode",
+    "notify",
+    "notifyAll",
+    "toString",
+    "wait",
+];
 
 pub fn analyze(cx: &mut Cx, root: &SyntaxNode) {
     let nodes = cx.expanded_descendants(root);
@@ -43,7 +66,9 @@ pub fn analyze(cx: &mut Cx, root: &SyntaxNode) {
     for n in &nodes {
         // `(String, Cell<usize>)`: the cell is a Java array where it's stored, not an `int`.
         if let Some(tt) = ast::TupleType::cast(n.clone())
-            && tt.fields().any(|f| f.syntax().text().to_string().contains("Cell"))
+            && tt
+                .fields()
+                .any(|f| f.syntax().text().to_string().contains("Cell"))
         {
             walk(&cx.type_ref(&ast::Type::TupleType(tt)), &mut |ts| {
                 excluded.insert(key(ts));
@@ -79,9 +104,31 @@ pub fn analyze(cx: &mut Cx, root: &SyntaxNode) {
     }
     let names = Hints::collect(cx, root, &nodes);
     let mut taken: HashSet<String> = [
-        "Main", "List", "Map", "Set", "Optional", "String", "Integer", "Long", "Double", "Character",
-        "Boolean", "Object", "Math", "System", "Arrays", "Collections", "Stream", "IntStream",
-        "Entry", "Iterator", "Comparator", "Record", "Result", "Ok", "Err",
+        "Main",
+        "List",
+        "Map",
+        "Set",
+        "Optional",
+        "String",
+        "Integer",
+        "Long",
+        "Double",
+        "Character",
+        "Boolean",
+        "Object",
+        "Math",
+        "System",
+        "Arrays",
+        "Collections",
+        "Stream",
+        "IntStream",
+        "Entry",
+        "Iterator",
+        "Comparator",
+        "Record",
+        "Result",
+        "Ok",
+        "Err",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -99,7 +146,9 @@ pub fn analyze(cx: &mut Cx, root: &SyntaxNode) {
     let mut decls = Vec::new();
     for ts in order {
         let k = key(&ts);
-        let generic = ts.iter().any(|t| !t.is_nameable() || has_param(t) || t.is_unit());
+        let generic = ts
+            .iter()
+            .any(|t| !t.is_nameable() || has_param(t) || t.is_unit());
         if ts.len() < 2 || generic || excluded.contains(&k) {
             continue;
         }
@@ -130,7 +179,8 @@ pub fn analyze(cx: &mut Cx, root: &SyntaxNode) {
             .zip(&fields)
             .map(|(t, f)| format!("{} {f}", t.strip_refs().java()))
             .collect();
-        cx.file_trailer.insert(0, format!("record {name}({}) {{}}", comps.join(", ")));
+        cx.file_trailer
+            .insert(0, format!("record {name}({}) {{}}", comps.join(", ")));
     }
 }
 
@@ -162,9 +212,12 @@ fn walk(t: &Ty, f: &mut dyn FnMut(&[Ty])) {
 fn each_ty(t: &Ty, f: &mut dyn FnMut(&Ty)) {
     f(t);
     match t {
-        Ty::Vec(x) | Ty::Set { t: x, .. } | Ty::Deque(x) | Ty::Heap(x) | Ty::Option(x) | Ty::Iter(x) => {
-            each_ty(x, f)
-        }
+        Ty::Vec(x)
+        | Ty::Set { t: x, .. }
+        | Ty::Deque(x)
+        | Ty::Heap(x)
+        | Ty::Option(x)
+        | Ty::Iter(x) => each_ty(x, f),
         Ty::Map { k, v, .. } | Ty::Result(k, v) => {
             each_ty(k, f);
             each_ty(v, f);
@@ -182,7 +235,9 @@ fn each_ty(t: &Ty, f: &mut dyn FnMut(&Ty)) {
 
 fn has_param(t: &Ty) -> bool {
     let mut found = false;
-    each_ty(t, &mut |x| found |= matches!(x, Ty::Param(_) | Ty::Other(_)));
+    each_ty(t, &mut |x| {
+        found |= matches!(x, Ty::Param(_) | Ty::Other(_))
+    });
     found
 }
 
@@ -212,7 +267,11 @@ impl Hints {
                 continue;
             }
             if let Some(tp) = ast::TuplePat::cast(n.clone()) {
-                let Ty::Tuple(ts) = cx.pat_ty(&ast::Pat::TuplePat(tp.clone())).strip_refs().clone() else {
+                let Ty::Tuple(ts) = cx
+                    .pat_ty(&ast::Pat::TuplePat(tp.clone()))
+                    .strip_refs()
+                    .clone()
+                else {
                     continue;
                 };
                 let names: Vec<Option<String>> = tp.fields().map(ident_name).collect();
@@ -223,7 +282,9 @@ impl Hints {
                 continue;
             }
             if let Some(ip) = ast::IdentPat::cast(n.clone()) {
-                let Some(name) = ip.name().map(|n| n.text().to_string()) else { continue };
+                let Some(name) = ip.name().map(|n| n.text().to_string()) else {
+                    continue;
+                };
                 let ty = cx.pat_ty(&ast::Pat::IdentPat(ip));
                 h.holder(ty.strip_refs(), &name);
                 continue;
@@ -241,19 +302,28 @@ impl Hints {
         let (ts, name) = match ty {
             Ty::Tuple(ts) => (ts, name.to_string()),
             // `edges: Vec<(..)>` holds edges: one is an `Edge`.
-            Ty::Vec(x) | Ty::Set { t: x, .. } | Ty::Deque(x) | Ty::Heap(x) => match x.strip_refs() {
-                Ty::Tuple(ts) if name.len() > 3 && name.ends_with('s') && !name.ends_with("ss") => {
-                    (ts, name[..name.len() - 1].to_string())
+            Ty::Vec(x) | Ty::Set { t: x, .. } | Ty::Deque(x) | Ty::Heap(x) => {
+                match x.strip_refs() {
+                    Ty::Tuple(ts)
+                        if name.len() > 3 && name.ends_with('s') && !name.ends_with("ss") =>
+                    {
+                        (ts, name[..name.len() - 1].to_string())
+                    }
+                    _ => return,
                 }
-                _ => return,
-            },
+            }
             _ => return,
         };
         let ts: Vec<Ty> = ts.iter().map(|t| t.strip_refs().clone()).collect();
         if name.len() < 2 || VAGUE.contains(&name.as_str()) || name.starts_with('_') {
             return;
         }
-        *self.holders.entry(key(&ts)).or_default().entry(name).or_default() += 1;
+        *self
+            .holders
+            .entry(key(&ts))
+            .or_default()
+            .entry(name)
+            .or_default() += 1;
     }
 
     fn record_name(&self, k: &str) -> Option<String> {
@@ -261,7 +331,12 @@ impl Hints {
             return Some(a.clone());
         }
         let best = most_common(self.holders.get(k)?)?;
-        Some(best.split('_').filter(|s| !s.is_empty()).map(capitalize).collect())
+        Some(
+            best.split('_')
+                .filter(|s| !s.is_empty())
+                .map(capitalize)
+                .collect(),
+        )
     }
 
     fn field_names(&self, k: &str, arity: usize) -> Vec<String> {
@@ -276,11 +351,15 @@ impl Hints {
             names.iter().collect::<HashSet<_>>().len() == arity
                 && !names.iter().any(|n| RESERVED_FIELDS.contains(&n.as_str()))
         };
-        let Some(pats) = self.fields.get(k) else { return fallback() };
+        let Some(pats) = self.fields.get(k) else {
+            return fallback();
+        };
         // One pattern's names as a set (mixing `(dr, dc)` with `(r, c)` reads as neither).
         let mut complete: Vec<(Vec<String>, usize)> = Vec::new();
         for p in pats {
-            let Some(names) = p.iter().cloned().collect::<Option<Vec<String>>>() else { continue };
+            let Some(names) = p.iter().cloned().collect::<Option<Vec<String>>>() else {
+                continue;
+            };
             let names: Vec<String> = names.iter().map(|n| super::escape_keyword(n)).collect();
             if !usable(&names) {
                 continue;

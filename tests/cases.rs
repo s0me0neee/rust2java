@@ -96,12 +96,16 @@ fn differential() {
         if !simple {
             return Vec::new();
         }
-        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases").join(file))
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|l| l.split('#').next())
-            .flat_map(|l| l.split_whitespace().map(str::to_string).collect::<Vec<_>>())
-            .collect()
+        std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/cases")
+                .join(file),
+        )
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split('#').next())
+        .flat_map(|l| l.split_whitespace().map(str::to_string).collect::<Vec<_>>())
+        .collect()
     };
     let skip = list("simple-skip");
     let allowed_diffs = list("simple-diffs");

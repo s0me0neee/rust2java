@@ -289,9 +289,14 @@ pub fn into_iter_item(
 // `A: AsRef<[T]>` / `A: AsRef<str>` (inline or in the `where` clause): the list or String `A`
 // stands for, since all the function does with it is `.as_ref()`.
 pub fn as_ref_target(tp: &ra_ap_syntax::ast::TypeParam) -> Option<Ty> {
-    use ra_ap_syntax::ast::{self, AstNode, HasGenericArgs, HasGenericParams, HasName, HasTypeBounds};
+    use ra_ap_syntax::ast::{
+        self, AstNode, HasGenericArgs, HasGenericParams, HasName, HasTypeBounds,
+    };
     let name = tp.name()?.text().to_string();
-    let mut bounds: Vec<ast::TypeBound> = tp.type_bound_list().map(|l| l.bounds().collect()).unwrap_or_default();
+    let mut bounds: Vec<ast::TypeBound> = tp
+        .type_bound_list()
+        .map(|l| l.bounds().collect())
+        .unwrap_or_default();
     let owner_where = tp.syntax().ancestors().find_map(|a| {
         ast::Fn::cast(a.clone())
             .and_then(|f| f.where_clause())
@@ -299,7 +304,10 @@ pub fn as_ref_target(tp: &ra_ap_syntax::ast::TypeParam) -> Option<Ty> {
             .or_else(|| ast::Struct::cast(a).and_then(|s| s.where_clause()))
     });
     for pred in owner_where.iter().flat_map(|w| w.predicates()) {
-        if pred.ty().is_some_and(|t| t.syntax().text() == name.as_str()) {
+        if pred
+            .ty()
+            .is_some_and(|t| t.syntax().text() == name.as_str())
+        {
             bounds.extend(pred.type_bound_list().into_iter().flat_map(|l| l.bounds()));
         }
     }
@@ -307,16 +315,26 @@ pub fn as_ref_target(tp: &ra_ap_syntax::ast::TypeParam) -> Option<Ty> {
         .syntax()
         .parent()
         .and_then(ast::GenericParamList::cast)
-        .map(|l| l.type_or_const_params().filter_map(|p| Some(p.name()?.text().to_string())).collect())
+        .map(|l| {
+            l.type_or_const_params()
+                .filter_map(|p| Some(p.name()?.text().to_string()))
+                .collect()
+        })
         .unwrap_or_default();
     for b in bounds {
-        let Some(ast::Type::PathType(pt)) = b.ty() else { continue };
-        let Some(seg) = pt.path().and_then(|p| p.segment()) else { continue };
+        let Some(ast::Type::PathType(pt)) = b.ty() else {
+            continue;
+        };
+        let Some(seg) = pt.path().and_then(|p| p.segment()) else {
+            continue;
+        };
         if seg.name_ref().is_none_or(|n| n.text() != "AsRef") {
             continue;
         }
         let arg = seg.generic_arg_list()?.generic_args().next()?;
-        let ast::GenericArg::TypeArg(ta) = arg else { return None };
+        let ast::GenericArg::TypeArg(ta) = arg else {
+            return None;
+        };
         return match ta.ty()? {
             ast::Type::SliceType(s) => {
                 let elem = s.ty()?.syntax().text().to_string();
@@ -410,7 +428,10 @@ pub fn convert(sema: &Semantics<'_, RootDatabase>, from: Module, ty: &ra_ap_hir:
         && into_iter_item(sema, from, ty).is_none()
     {
         use ra_ap_hir::HasSource;
-        let as_ref = p.trait_bounds(db).iter().any(|t| t.name(db).as_str() == "AsRef");
+        let as_ref = p
+            .trait_bounds(db)
+            .iter()
+            .any(|t| t.name(db).as_str() == "AsRef");
         if as_ref
             && let Some(src) = p.merge().source(db)
             && let Some(ra_ap_syntax::ast::TypeOrConstParam::Type(tp)) = src.value.left()
@@ -499,7 +520,12 @@ pub fn convert(sema: &Semantics<'_, RootDatabase>, from: Module, ty: &ra_ap_hir:
                 // A `OnceCell` is an `Optional` written at most once.
                 "Option" | "OnceCell" => return Ty::Option(arg(0)),
                 // `[u8]::utf8_chunks` items: the valid text and the invalid bytes after it.
-                "Utf8Chunk" => return Ty::Tuple(vec![Ty::Str, Ty::Vec(Box::new(Ty::Int(crate::ty::Int::U8)))]),
+                "Utf8Chunk" => {
+                    return Ty::Tuple(vec![
+                        Ty::Str,
+                        Ty::Vec(Box::new(Ty::Int(crate::ty::Int::U8))),
+                    ]);
+                }
                 "Result" => return Ty::Result(arg(0), arg(1)),
                 "Box" | "Rc" | "Arc" | "Weak" | "RefCell" | "Cell" | "Reverse" | "Wrapping"
                 | "Ref" | "RefMut" | "Pin" | "ManuallyDrop" => {
