@@ -1420,14 +1420,8 @@ fn lower_source(
         // Matches of a string, char or char predicate: positions, pieces, or the text split there.
         (Ty::Str, "match_indices" | "rmatch_indices" | "rmatches" | "split_inclusive" | "rsplit_terminator") => {
             super::fmt::file_helper(cx, super::std_map::STR_MATCH_HELPERS);
-            let pat_ast = args[0].clone();
-            let pat_ty = cx.ty(&pat_ast);
-            let p = lower_arg(cx, &pat_ast, out);
-            let pat = match pat_ty.strip_refs() {
-                Ty::Str => p,
-                Ty::Char => Expr::call(Expr::raw("String"), "valueOf", vec![p]),
-                _ => Expr::Cast("Predicate<Character>".into(), Box::new(p)),
-            };
+            let pat = text_pattern(cx, &args[0], out)
+                .unwrap_or_else(|p| Expr::Cast("Predicate<Character>".into(), Box::new(p)));
             let s = ensure_simple(cx, recv, &recv_ty, line, out);
             let rev = Expr::raw(if name.starts_with('r') { "true" } else { "false" });
             match name {
@@ -1473,12 +1467,9 @@ fn lower_source(
         // Non-overlapping occurrences of a literal pattern, or the chars a predicate accepts.
         (Ty::Str, "matches") => {
             let pat_ast = args[0].clone();
-            let pat_ty = cx.ty(&pat_ast);
-            let p = lower_arg(cx, &pat_ast, out);
-            let pat = match pat_ty.strip_refs() {
-                Ty::Str => p,
-                Ty::Char => Expr::call(Expr::raw("String"), "valueOf", vec![p]),
-                Ty::Fn { .. } => {
+            let pat = match text_pattern(cx, &pat_ast, out) {
+                Ok(pat) => pat,
+                Err(p) if matches!(cx.ty(&pat_ast).strip_refs(), Ty::Fn { .. }) => {
                     lambda_params!(cx; c);
                     let chars = Expr::call(
                         Expr::call(recv, "chars", vec![]),
@@ -1507,12 +1498,8 @@ fn lower_source(
         // `rsplit`: the `split` pieces, last first.
         (Ty::Str, "rsplit") => {
             let pat_ast = args[0].clone();
-            let pat_ty = cx.ty(&pat_ast);
-            let p = lower_arg(cx, &pat_ast, out);
-            let pat = match pat_ty.strip_refs() {
-                Ty::Str => p,
-                Ty::Char => Expr::call(Expr::raw("String"), "valueOf", vec![p]),
-                _ => return cx.unsupported(m.syntax(), "rsplit by closure/char set"),
+            let Ok(pat) = text_pattern(cx, &pat_ast, out) else {
+                return cx.unsupported(m.syntax(), "rsplit by closure/char set");
             };
             let quoted = regex_of(cx, literal_pattern(&pat_ast), pat);
             let parts = Expr::call(recv, "split", vec![quoted, Expr::raw("-1")]);
@@ -1562,12 +1549,8 @@ fn lower_source(
         // `split_terminator`: `split` without one trailing empty piece.
         (Ty::Str, "split_terminator") if cx.lambda_depth == 0 => {
             let pat_ast = args[0].clone();
-            let pat_ty = cx.ty(&pat_ast);
-            let p = lower_arg(cx, &pat_ast, out);
-            let pat = match pat_ty.strip_refs() {
-                Ty::Str => p,
-                Ty::Char => Expr::call(Expr::raw("String"), "valueOf", vec![p]),
-                _ => return cx.unsupported(m.syntax(), "split_terminator by closure/char set"),
+            let Ok(pat) = text_pattern(cx, &pat_ast, out) else {
+                return cx.unsupported(m.syntax(), "split_terminator by closure/char set");
             };
             let quoted = regex_of(cx, literal_pattern(&pat_ast), pat);
             let parts = super::std_map::push_local(
@@ -1651,6 +1634,17 @@ fn char_set(e: &ast::Expr) -> Option<Vec<char>> {
         chars.push(c.value().ok()?);
     }
     (!chars.is_empty()).then_some(chars)
+}
+
+// A `&str` / `char` pattern as Java text, or `Err` with the lowered closure / char set.
+fn text_pattern(cx: &mut Cx, pat: &ast::Expr, out: &mut Vec<Stmt>) -> Result<Expr, Expr> {
+    let ty = cx.ty(pat);
+    let p = lower_arg(cx, pat, out);
+    match ty.strip_refs() {
+        Ty::Str => Ok(p),
+        Ty::Char => Ok(Expr::call(Expr::raw("String"), "valueOf", vec![p])),
+        _ => Err(p),
+    }
 }
 
 // The text of a string or char literal pattern (`","`, `&","`, `' '`).
