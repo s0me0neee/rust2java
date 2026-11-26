@@ -306,10 +306,9 @@ pub fn lower_let(cx: &mut Cx, l: &ast::LetStmt, out: &mut Vec<Stmt>) {
     }
     // A `&mut str` / `&mut i32` from a call that is only read (`let s = c.encode_utf8(&mut b)`)
     // is a plain value.
-    let read_only_call = l.initializer().is_some_and(|i| expr::is_call_result(&i)) && !written_through(cx, ip);
     if let Some(inner) = super::std_map::ptr::ref_mut_pat(cx, ip)
         && !l.initializer().is_some_and(|i| option_ref_init(cx, &i))
-        && !read_only_call
+        && !(l.initializer().is_some_and(|i| expr::is_call_result(&i)) && !written_through(cx, ip))
     {
         if lower_slot_let(cx, l, ip, &inner, out) {
             return;
@@ -497,14 +496,7 @@ fn option_ref_init(cx: &Cx, init: &ast::Expr) -> bool {
     let ast::Expr::MethodCallExpr(mc) = super::strip_parens(init) else {
         return false;
     };
-    let named = mc.name_ref().is_some_and(|n| {
-        matches!(
-            &*n.text(),
-            "as_mut" | "get_or_insert" | "get_or_insert_with" | "get_or_insert_default" | "insert" | "get_mut"
-                | "get_or_init"
-        )
-    });
-    named
+    mc.name_ref().is_some_and(|n| expr::option_ref_method(&n.text()))
         && mc
             .receiver()
             .is_some_and(|r| matches!(cx.ty(&r).strip_refs(), Ty::Option(_)))
@@ -659,11 +651,6 @@ fn lower_slot_let(
 pub(super) fn written_through(cx: &Cx, ip: &ast::IdentPat) -> bool {
     let Some(local) = cx.sema.to_def(ip) else { return true };
     let Some(scope) = cx.enclosing_fn(ip.syntax()) else { return true };
-    const MUTATING: &[&str] = &[
-        "push", "push_str", "insert", "insert_str", "clear", "truncate", "pop", "remove", "retain", "drain",
-        "extend", "make_ascii_uppercase", "make_ascii_lowercase", "replace_range", "split_off", "swap", "fill",
-        "sort", "reverse",
-    ];
     for pe in cx.expanded_descendants(&scope).into_iter().filter_map(ast::PathExpr::cast) {
         let e = ast::Expr::PathExpr(pe.clone());
         if cx.local_of_path(&e) != Some(local) {
@@ -673,8 +660,8 @@ pub(super) fn written_through(cx: &Cx, ip: &ast::IdentPat) -> bool {
         if let Some(m) = ast::MethodCallExpr::cast(parent.clone())
             && m.receiver().is_some_and(|r| r.syntax() == pe.syntax())
         {
-            let name = m.name_ref().map(|n| n.text().to_string()).unwrap_or_default();
-            if MUTATING.contains(&name.as_str()) || name.ends_with("_mut") {
+            let access = cx.sema.resolve_method_call(&m).and_then(|f| f.self_param(cx.db)).map(|s| s.access(cx.db));
+            if access.is_none_or(|a| a == ra_ap_hir::Access::Exclusive) {
                 return true;
             }
             continue;

@@ -952,6 +952,7 @@ static BigInteger int_next_multiple(BigInteger x, BigInteger y) { BigInteger r =
 static BigInteger int_next_pow2(BigInteger x) { return x.compareTo(BigInteger.ONE) <= 0 ? BigInteger.ONE : BigInteger.ONE.shiftLeft(x.subtract(BigInteger.ONE).bitLength()); }";
 
 // The width a value of `i` really has here (`usize` lives in a Java int).
+// Java's width, unlike `bit_width`: isize/usize are stored as `int`.
 fn storage_bits(i: Int) -> u32 {
     match i {
         Int::I8 | Int::U8 => 8,
@@ -998,12 +999,12 @@ fn int_family(
     ];
     let family = ["checked_", "overflowing_", "saturating_", "strict_", "wrapping_", "unbounded_"]
         .iter()
-        .any(|p| name.strip_prefix(p).is_some_and(|o| family_ops.contains(&o)));
-    if !single.contains(&name) && !family {
+        .find_map(|p| name.strip_prefix(p).filter(|o| family_ops.contains(o)).map(|o| (p.trim_end_matches('_'), o)));
+    if !single.contains(&name) && family.is_none() {
         return None;
     }
     cx.import("java.math.BigInteger");
-    super::super::fmt::file_helper(cx, INT_HELPERS.into());
+    super::super::fmt::file_helper(cx, INT_HELPERS);
     let a = render(&simple(cx, recv, &t, line, out));
     let args: Vec<String> = args
         .into_iter()
@@ -1113,9 +1114,7 @@ fn int_family(
         }
         _ => {}
     }
-    let (mode, op) = ["checked_", "overflowing_", "saturating_", "strict_", "wrapping_", "unbounded_"]
-        .iter()
-        .find_map(|p| name.strip_prefix(p).map(|o| (p.trim_end_matches('_'), o)))?;
+    let (mode, op) = family?;
     // Shifts: the amount, not the value, can overflow.
     if matches!(op, "shl" | "shr") {
         let wrapped = render(&wrapping_int(Expr::raw(a.clone()), Expr::raw(b.clone()), i, &format!("wrapping_{op}")));
@@ -1154,13 +1153,7 @@ fn int_family(
     let value = cast(wrap(&r, signed));
     // `MIN % -1` is 0, yet Rust reports it as overflowing (the division would).
     let in_range = if signed && matches!(op, "rem" | "rem_euclid") {
-        let min = match i.java() {
-            "byte" => "-128",
-            "short" => "-32768",
-            "long" => "Long.MIN_VALUE",
-            _ => "Integer.MIN_VALUE",
-        };
-        format!("!({a} == {min} && {b} == -1)")
+        format!("!({a} == {} && {b} == -1)", int_min(i))
     } else {
         fits(&r, signed)
     };
@@ -1921,7 +1914,7 @@ pub(super) fn lower_float_method(
     let b0 = args.first().cloned().unwrap_or_else(|| Expr::raw("0.0"));
     let b1 = args.get(1).cloned().unwrap_or_else(|| Expr::raw("0.0"));
     let one = if f32 { "1.0f" } else { "1.0" };
-    let helper = |cx: &mut Cx| crate::lower::fmt::file_helper(cx, FLOAT_HELPERS.into());
+    let helper = |cx: &mut Cx| crate::lower::fmt::file_helper(cx, FLOAT_HELPERS);
     Some(match name {
         "abs" => math("abs", vec![recv]),
         // Rust's min / max ignore a NaN operand; Java's return it. Simple mode and two literals
@@ -1931,7 +1924,7 @@ pub(super) fn lower_float_method(
             if crate::mode::simple() || (literal(&recv) && literal(&b0)) {
                 math(name, vec![recv, b0])
             } else {
-                crate::lower::fmt::file_helper(cx, FLOAT_MIN_MAX.into());
+                crate::lower::fmt::file_helper(cx, FLOAT_MIN_MAX);
                 Expr::static_call(format!("f{name}"), vec![recv, b0])
             }
         }

@@ -253,16 +253,13 @@ impl Printer {
         match &s.kind {
             StmtKind::Local { ty, name, init } => match init {
                 Some(e) => {
-                    let (ty, mut e) = match crate::mode::simple().then(|| var_local(ty, e)).flatten() {
+                    let (ty, e) = match crate::mode::simple().then(|| var_local(ty, e)).flatten() {
                         Some((t, e)) => (t, self.expr_str(&e, 0)),
+                        None if ty.starts_with("Optional<") => {
+                            (ty.clone(), self.expr_str(&crate::lower::expr::unwitness_empty(e.clone()), 0))
+                        }
                         None => (ty.clone(), self.expr_str(e, 0)),
                     };
-                    // The declared type already infers it: `Optional<T> x = Optional.empty();`.
-                    if let Some(inner) = ty.strip_prefix("Optional<").and_then(|t| t.strip_suffix('>'))
-                        && e == format!("Optional.<{inner}>empty()")
-                    {
-                        e = "Optional.empty()".into();
-                    }
                     self.word(&format!("{ty} {name} = {e};"));
                 }
                 None => self.word(&format!("{ty} {name};")),

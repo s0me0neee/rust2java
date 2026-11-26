@@ -749,7 +749,7 @@ pub(super) fn stdio_method(
 
 // `Duration` is java.time.Duration; these follow Rust where they differ (no negative results,
 // Rust's Debug text, float seconds).
-pub(crate) const DURATION_HELPERS: &str = "static String dur_debug(Duration d) { \
+const DURATION_HELPERS: &str = "static String dur_debug(Duration d) { \
 long s = d.getSeconds(); int n = d.getNano(); long whole, frac; int digits; String unit; \
 if (s > 0) { whole = s; frac = n; digits = 9; unit = \"s\"; } \
 else if (n >= 1_000_000) { whole = n / 1_000_000; frac = n % 1_000_000; digits = 6; unit = \"ms\"; } \
@@ -761,15 +761,17 @@ static double dur_secs(Duration d) { return d.getSeconds() + d.getNano() / 1e9; 
 static Duration dur_of_secs(double s) { \
 if (!(s >= 0) || Double.isInfinite(s)) throw new RuntimeException(\"cannot convert float seconds to Duration\"); \
 long secs = (long) s; return Duration.ofSeconds(secs, Math.round((s - secs) * 1e9)); } \
-static Result<Duration, String> dur_try_of_secs(double s) { \
-return s >= 0 && !Double.isInfinite(s) ? new Ok<>(dur_of_secs(s)) : new Err<>(\"cannot convert float seconds to Duration\"); } \
 static Optional<Duration> dur_checked_sub(Duration a, Duration b) { return a.compareTo(b) >= 0 ? Optional.of(a.minus(b)) : Optional.empty(); } \
 static Optional<Duration> dur_checked_div(Duration a, long n) { return n == 0 ? Optional.empty() : Optional.of(a.dividedBy(n)); } \
 static Duration dur_saturating_sub(Duration a, Duration b) { return a.compareTo(b) >= 0 ? a.minus(b) : Duration.ZERO; }";
 
-fn duration_helpers(cx: &mut Cx) {
+// Apart from the bundle: it needs the Result classes.
+const DUR_TRY_OF_SECS: &str = "static Result<Duration, String> dur_try_of_secs(double s) { \
+return s >= 0 && !Double.isInfinite(s) ? new Ok<>(dur_of_secs(s)) : new Err<>(\"cannot convert float seconds to Duration\"); }";
+
+pub(crate) fn duration_helpers(cx: &mut Cx) {
     cx.import("java.time.Duration");
-    super::super::fmt::file_helper(cx, DURATION_HELPERS.into());
+    super::super::fmt::file_helper(cx, DURATION_HELPERS);
 }
 
 // `Duration::new(..)`, `Duration::from_*(..)`.
@@ -792,6 +794,7 @@ pub(super) fn duration_fn(cx: &mut Cx, key: &str, mut args: Vec<Expr>) -> Option
         }
         "try_from_secs_f64" | "try_from_secs_f32" => {
             duration_helpers(cx);
+            super::super::fmt::file_helper(cx, DUR_TRY_OF_SECS);
             cx.needs_result = true;
             Expr::static_call("dur_try_of_secs", vec![x])
         }
@@ -805,7 +808,10 @@ pub(super) fn duration_method(cx: &mut Cx, name: &str, recv: Expr, args: &[Expr]
     let some = |e: Expr| Expr::call(Expr::raw("Optional"), "of", vec![e]);
     let secs = |e: Expr| Expr::static_call("dur_secs", vec![e]);
     let float = |e: Expr| Expr::Cast("float".into(), Box::new(e));
-    if !matches!(name, "as_secs" | "as_millis" | "as_nanos" | "is_zero") {
+    if matches!(name, "checked_sub" | "checked_div" | "saturating_sub")
+        || name.contains("_f32")
+        || name.contains("_f64")
+    {
         duration_helpers(cx);
     }
     Some(match name {

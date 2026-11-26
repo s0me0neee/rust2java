@@ -1,5 +1,15 @@
 // Rust syntax tree (+ semantics) -> JIR. One submodule per construct family.
 
+// Generated lambda parameters (`x`, or `p = "parts"`), free again for the next lambda once named.
+macro_rules! lambda_params {
+    ($cx:expr; $($v:ident $(= $base:literal)?),+) => {
+        $(let $v = $cx.fresh_param(lambda_params!(@base $v $($base)?));)+
+        $($cx.release_param(&$v);)+
+    };
+    (@base $v:ident $base:literal) => { $base };
+    (@base $v:ident) => { stringify!($v) };
+}
+
 pub mod builders;
 pub mod calls;
 pub mod expr;

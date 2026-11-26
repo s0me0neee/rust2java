@@ -316,10 +316,7 @@ pub(super) fn lower_option_method(
                 out,
                 "set",
             );
-            let mut fill = Vec::new();
-            let assign = expr::place_assign(cx, recv_ast, "=", opt_of(v), &mut fill);
-            out.extend(fill);
-            out.push(Stmt::new(line, StmtKind::Raw(format!("if ({}.isEmpty()) {};", render(&recv), render(&assign)))));
+            assign_if(cx, recv_ast, &format!("{}.isEmpty()", render(&recv)), opt_of(v), line, out);
             Some(Expr::name(res))
         }
         "as_slice" | "as_mut_slice" => Some(Expr::call(Expr::call(recv, "stream", vec![]), "toList", vec![])),
@@ -343,15 +340,9 @@ pub(super) fn lower_option_method(
         }
         // `Optional<T> taken = o.filter(p); if (taken.isPresent()) o = Optional.empty();`
         "take_if" => {
-            let ty = match opt_inner_of(cx, recv_ast) {
-                Some(t) => format!("Optional<{}>", t.boxed()),
-                None => "Optional<Object>".into(),
-            };
+            let ty = opt_local_ty(cx, recv_ast);
             let n = push_local(cx, line, ty, Some(Expr::call(recv, "filter", vec![b0])), out, "taken");
-            let mut clear = Vec::new();
-            let assign = expr::place_assign(cx, recv_ast, "=", Expr::raw("Optional.empty()"), &mut clear);
-            out.extend(clear);
-            out.push(Stmt::new(line, StmtKind::Raw(format!("if ({n}.isPresent()) {};", render(&assign)))));
+            assign_if(cx, recv_ast, &format!("{n}.isPresent()"), Expr::raw("Optional.empty()"), line, out);
             Some(Expr::name(n))
         }
         // `Option<Result<T, E>>` -> `Result<Option<T>, E>`.
@@ -396,10 +387,7 @@ pub(super) fn lower_option_method(
         }
         "replace" => {
             let p = expr::lower_expr(cx, recv_ast, out);
-            let ty = match opt_inner_of(cx, recv_ast) {
-                Some(t) => format!("Optional<{}>", t.boxed()),
-                None => "Optional<Object>".into(),
-            };
+            let ty = opt_local_ty(cx, recv_ast);
             let n = push_local(cx, line, ty, Some(p), out, "prev");
             let assign = expr::place_assign(cx, recv_ast, "=", opt_of(b0), out);
             out.push(Stmt::new(line, StmtKind::Expr(assign)));
@@ -407,10 +395,7 @@ pub(super) fn lower_option_method(
         }
         "take" => {
             let p = expr::lower_expr(cx, recv_ast, out);
-            let ty = match opt_inner_of(cx, recv_ast) {
-                Some(t) => format!("Optional<{}>", t.boxed()),
-                None => "Optional<Object>".into(),
-            };
+            let ty = opt_local_ty(cx, recv_ast);
             let n = push_local(cx, line, ty, Some(p), out, "taken");
             // The target's declared type supplies the witness here.
             let assign = expr::place_assign(cx, recv_ast, "=", Expr::raw("Optional.empty()"), out);
@@ -433,17 +418,7 @@ pub(super) fn lower_option_method(
                 _ => lambda_call(b0, &ty),
             };
             // `if (o.isEmpty()) o = Optional.of(v);`, then the value is `o.get()`.
-            let mut fill = Vec::new();
-            let assign = expr::place_assign(cx, recv_ast, "=", opt_of(value), &mut fill);
-            out.extend(fill);
-            out.push(Stmt::new(
-                line,
-                StmtKind::Raw(format!(
-                    "if ({}.isEmpty()) {};",
-                    render(&recv),
-                    render(&assign)
-                )),
-            ));
+            assign_if(cx, recv_ast, &format!("{}.isEmpty()", render(&recv)), opt_of(value), line, out);
             Some(Expr::call(recv, "get", vec![]))
         }
         "is_some_and" => {

@@ -29,8 +29,7 @@ pub(super) fn fn_call(
         // UTF-8, so the `Result` is always `Ok`.
         "converts::from_utf8" | "converts::from_utf8_mut" | "String::from_utf8" | "String::from_utf8_lossy" => {
             let bytes = expr::call_args(cx, c, out).into_iter().next()?;
-            let b = cx.fresh_param("b");
-            cx.release_param(&b);
+            lambda_params!(cx; b);
             let text = Expr::raw(format!(
                 "{}.stream().map({b} -> String.valueOf((char) (int) {b})).collect(Collectors.joining())",
                 crate::emit::render_expr(&bytes)
@@ -102,8 +101,7 @@ pub(super) fn path(cx: &mut Cx, _path: &ast::Path, def: ModuleDef) -> Option<Exp
         | "str::to_ascii_uppercase"
         | "str::to_lowercase"
         | "str::to_ascii_lowercase" => {
-            let s = cx.fresh_param("s");
-            cx.release_param(&s);
+            lambda_params!(cx; s);
             let f = if key.contains("upper") {
                 "toUpperCase"
             } else {
@@ -418,7 +416,7 @@ pub(super) fn lower_small_method(
     // Exact mode keeps Rust's ASCII-only meaning through helpers; simple mode assumes ASCII text.
     let exact = !crate::mode::simple();
     if exact && matches!(name, "to_ascii_uppercase" | "to_ascii_lowercase" | "eq_ignore_ascii_case" | "is_digit" | "to_digit") {
-        super::super::fmt::file_helper(cx, ASCII_CHAR_HELPERS.into());
+        super::super::fmt::file_helper(cx, ASCII_CHAR_HELPERS);
     }
     Some(match name {
         "is_alphabetic" | "is_uppercase" | "is_lowercase" => c(
@@ -1045,7 +1043,7 @@ pub(super) fn lower_str_method(
             let v = if crate::mode::simple() {
                 Expr::call(recv, if upper { "toUpperCase" } else { "toLowerCase" }, vec![Expr::raw("Locale.ROOT")])
             } else {
-                super::super::fmt::file_helper(cx, ASCII_STR_HELPERS.into());
+                super::super::fmt::file_helper(cx, ASCII_STR_HELPERS);
                 Expr::static_call(if upper { "ascii_upper" } else { "ascii_lower" }, vec![recv])
             };
             if name.starts_with("to_") {
@@ -1055,17 +1053,16 @@ pub(super) fn lower_str_method(
         }
         "eq_ignore_ascii_case" if crate::mode::simple() => return Some(Expr::call(recv, "equalsIgnoreCase", vec![b0])),
         "eq_ignore_ascii_case" => {
-            super::super::fmt::file_helper(cx, ASCII_STR_HELPERS.into());
+            super::super::fmt::file_helper(cx, ASCII_STR_HELPERS);
             let lower = |e: Expr| Expr::static_call("ascii_lower", vec![e]);
             return Some(Expr::call(lower(recv), "equals", vec![lower(b0)]));
         }
         "is_ascii" => {
-            let c = cx.fresh_param("c");
-            cx.release_param(&c);
+            lambda_params!(cx; c);
             return Some(Expr::call(Expr::call(recv, "chars", vec![]), "allMatch", vec![Expr::raw(format!("{c} -> {c} < 128"))]));
         }
         "trim_ascii" | "trim_ascii_start" | "trim_ascii_end" => {
-            super::super::fmt::file_helper(cx, ASCII_STR_HELPERS.into());
+            super::super::fmt::file_helper(cx, ASCII_STR_HELPERS);
             let (start, end) = match name {
                 "trim_ascii" => ("true", "true"),
                 "trim_ascii_start" => ("true", "false"),
@@ -1140,10 +1137,7 @@ pub(super) fn lower_str_method(
         "split_at" | "split_at_mut" | "split_at_checked" | "split_at_mut_checked" => {
             let s = simple(cx, recv, &Ty::Str, line, out);
             let i = simple(cx, b0, &Ty::Int(Int::Usize), line, out);
-            let pair_ty = match ret.strip_refs() {
-                Ty::Option(t) => (**t).clone(),
-                t => t.clone(),
-            };
+            let pair_ty = super::opt_inner(ret).unwrap_or_else(|| ret.strip_refs().clone());
             let a = Expr::call(s.clone(), "substring", vec![Expr::raw("0"), i.clone()]);
             let b = Expr::call(s.clone(), "substring", vec![i.clone()]);
             let pair = expr::tuple_expr(cx, &pair_ty, vec![a, b]);

@@ -1033,7 +1033,9 @@ pub fn lower_iter_method(
         return Some(Expr::raw("null"));
     }
     // A range's own methods read its bounds: `(a..=b).end()` is `b`.
-    if matches!(name.as_str(), "is_empty" | "start" | "end" | "into_inner")
+    let range_method = key.starts_with("Range");
+    if range_method
+        && matches!(name.as_str(), "is_empty" | "start" | "end" | "into_inner")
         && let Some((start, end, inclusive)) = range_parts(cx, &recv_ast)
     {
         let line = cx.line(m.syntax());
@@ -1054,7 +1056,8 @@ pub fn lower_iter_method(
         };
     }
     // `(a..b).contains(&x)`: two comparisons.
-    if name == "contains"
+    if range_method
+        && name == "contains"
         && let Some((r_start, r_end, inclusive)) = range_parts(cx, &recv_ast)
         && let Some(x) = arg_exprs(m).first()
     {
@@ -1275,13 +1278,13 @@ fn lower_source(
             Expr::raw(format!("IntStream.rangeClosed(0, {vs}.size() - {n}).mapToObj({i} -> {vs}.subList({i}, {i} + {n}))"))
         }
         (Ty::Vec(_), "rchunks" | "rchunks_mut" | "rchunks_exact" | "rchunks_exact_mut") => {
-            super::fmt::file_helper(cx, super::std_map::coll::SLICE_VIEW_HELPERS.into());
+            super::fmt::file_helper(cx, super::std_map::coll::SLICE_VIEW_HELPERS);
             let k = lower_arg(cx, &args[0], out);
             let exact = Expr::raw(if name.contains("exact") { "true" } else { "false" });
             Expr::call(Expr::static_call("rchunks", vec![recv, k, exact]), "stream", vec![])
         }
         (Ty::Vec(_), "chunk_by" | "chunk_by_mut") => {
-            super::fmt::file_helper(cx, super::std_map::coll::SLICE_VIEW_HELPERS.into());
+            super::fmt::file_helper(cx, super::std_map::coll::SLICE_VIEW_HELPERS);
             let f = lower_arg(cx, &args[0], out);
             Expr::call(Expr::static_call("chunk_by", vec![recv, f]), "stream", vec![])
         }
@@ -1289,7 +1292,7 @@ fn lower_source(
         // `split_inclusive`, and their `_mut` forms.
         (Ty::Vec(_), "split" | "split_mut" | "splitn" | "splitn_mut" | "rsplit" | "rsplit_mut" | "rsplitn" | "rsplitn_mut"
             | "split_inclusive" | "split_inclusive_mut") => {
-            super::fmt::file_helper(cx, super::std_map::coll::SLICE_VIEW_HELPERS.into());
+            super::fmt::file_helper(cx, super::std_map::coll::SLICE_VIEW_HELPERS);
             let base = name.trim_end_matches("_mut");
             let (n, p) = if base.ends_with('n') {
                 (lower_arg(cx, &args[0], out), lower_arg(cx, &args[1], out))
@@ -1302,18 +1305,17 @@ fn lower_source(
         }
         // `[u8]::escape_ascii` yields the bytes of the escaped text.
         (Ty::Vec(_), "escape_ascii") => {
-            super::fmt::file_helper(cx, super::std_map::coll::BYTES_HELPERS.into());
+            super::fmt::file_helper(cx, super::std_map::coll::BYTES_HELPERS);
             Expr::call(Expr::call(Expr::static_call("esc_ascii", vec![recv]), "chars", vec![]), "boxed", vec![])
         }
         (Ty::Vec(_), "utf8_chunks") => {
-            super::fmt::file_helper(cx, super::std_map::coll::BYTES_HELPERS.into());
+            super::fmt::file_helper(cx, super::std_map::coll::BYTES_HELPERS);
             let chunks = Expr::call(Expr::static_call("utf8_chunks", vec![recv]), "stream", vec![]);
             // Simple mode names the pair type: rebuild each entry as that record.
             let parts = [Ty::Str, Ty::Vec(Box::new(Ty::Int(Int::U8)))];
             match crate::tuples::named(&parts) {
                 Some(n) => {
-                    let e = cx.fresh_param("e");
-                    cx.release_param(&e);
+                    lambda_params!(cx; e);
                     Expr::call(chunks, "map", vec![Expr::raw(format!("{e} -> new {}({e}.getKey(), {e}.getValue())", n.name))])
                 }
                 None => chunks,
@@ -1400,26 +1402,24 @@ fn lower_source(
         }
         // `escape_*` iterate the chars of the escaped text.
         (Ty::Char | Ty::Str, "escape_debug" | "escape_default" | "escape_unicode") => {
-            super::fmt::file_helper(cx, super::std_map::ESC_HELPER.into());
+            super::fmt::file_helper(cx, super::std_map::ESC_HELPER);
             let text = if recv_ty.strip_refs() == &Ty::Char {
                 Expr::call(Expr::raw("String"), "valueOf", vec![recv])
             } else {
                 recv
             };
             let mode = match name { "escape_debug" => "'d'", "escape_default" => "'e'", _ => "'u'" };
-            let c = cx.fresh_param("c");
-            cx.release_param(&c);
+            lambda_params!(cx; c);
             let escaped = Expr::static_call("esc", vec![text, Expr::raw(mode)]);
             Expr::call(Expr::call(escaped, "chars", vec![]), "mapToObj", vec![Expr::raw(format!("{c} -> (char) {c}"))])
         }
         (Ty::Str, "encode_utf16") => {
-            let c = cx.fresh_param("c");
-            cx.release_param(&c);
+            lambda_params!(cx; c);
             Expr::call(Expr::call(recv, "chars", vec![]), "mapToObj", vec![Expr::raw(format!("{c} -> (short) {c}"))])
         }
         // Matches of a string, char or char predicate: positions, pieces, or the text split there.
         (Ty::Str, "match_indices" | "rmatch_indices" | "rmatches" | "split_inclusive" | "rsplit_terminator") => {
-            super::fmt::file_helper(cx, super::std_map::STR_MATCH_HELPERS.into());
+            super::fmt::file_helper(cx, super::std_map::STR_MATCH_HELPERS);
             let pat_ast = args[0].clone();
             let pat_ty = cx.ty(&pat_ast);
             let p = lower_arg(cx, &pat_ast, out);
@@ -1450,8 +1450,7 @@ fn lower_source(
                     ))
                 }
                 _ => {
-                    let mm = cx.fresh_param("m");
-                    cx.release_param(&mm);
+                    lambda_params!(cx; mm = "m");
                     let piece = Expr::raw(format!("{}.substring({mm}[0], {mm}[1])", render(&s)));
                     let item = if name == "rmatches" {
                         piece
@@ -1480,8 +1479,7 @@ fn lower_source(
                 Ty::Str => p,
                 Ty::Char => Expr::call(Expr::raw("String"), "valueOf", vec![p]),
                 Ty::Fn { .. } => {
-                    let c = cx.fresh_param("c");
-                    cx.release_param(&c);
+                    lambda_params!(cx; c);
                     let chars = Expr::call(
                         Expr::call(recv, "chars", vec![]),
                         "mapToObj",
@@ -1499,8 +1497,7 @@ fn lower_source(
                 "matcher",
                 vec![recv],
             );
-            let r = cx.fresh_param("r");
-            cx.release_param(&r);
+            lambda_params!(cx; r);
             Expr::call(
                 Expr::call(matcher, "results", vec![]),
                 "map",
@@ -1981,6 +1978,35 @@ pub(crate) const IS_SORTED: &str = "static <T> boolean is_sorted(List<T> v, BiPr
 for (int i = 1; i < v.size(); i++) if (!le.test(v.get(i - 1), v.get(i))) return false; \
 return true; }";
 
+// `is_sorted`'s `<=` on `t`; typed parameters, since an empty `Vec::new()` source is a `List<Object>`.
+pub(crate) fn sorted_le(cx: &mut Cx, t: &Ty) -> Expr {
+        lambda_params!(cx; x, y);
+    let b = t.boxed();
+    Expr::raw(match t.strip_refs() {
+        t if t.is_primitive() => format!("({b} {x}, {b} {y}) -> {x} <= {y}"),
+        t => format!("({b} {x}, {b} {y}) -> {} <= 0", super::std_map::coll::compare_call(cx, t, &x, &y)),
+    })
+}
+
+// Display of a char iterator (case maps, escapes) or of `escape_ascii`'s ASCII bytes: the text.
+pub(crate) fn char_iter_text(cx: &mut Cx, stream: Expr, item: &Ty) -> Expr {
+    let to_text = if item.strip_refs() == &Ty::Char {
+        "String::valueOf".to_string()
+    } else {
+        lambda_params!(cx; b);
+        format!("{b} -> String.valueOf((char) (int) {b})")
+    };
+    Expr::call(Expr::call(stream, "map", vec![Expr::raw(to_text)]), "collect", vec![Expr::raw("Collectors.joining()")])
+}
+
+// The type a key closure returns (`|p| p.1`).
+pub(crate) fn closure_body_ty(cx: &Cx, e: &ast::Expr) -> Option<Ty> {
+    match strip_parens(e) {
+        ast::Expr::ClosureExpr(c) => c.body().map(|b| cx.ty(&b)),
+        _ => None,
+    }
+}
+
 // `try_fold` stops at the first `None` / `Err` the closure returns.
 const TRY_FOLD_OPT: &str = "static <T, B> Optional<B> try_fold_some(Stream<T> s, B init, BiFunction<B, T, Optional<B>> f) { \
 B acc = init; \
@@ -1998,9 +2024,7 @@ return new Ok<>(null); }";
 
 // `(x, y) -> ..` comparing two items as `partial_cmp` would: an Integer, or null for NaN.
 fn partial_cmp_fn(cx: &mut Cx, item: &Ty) -> String {
-    let (x, y) = (cx.fresh_param("x"), cx.fresh_param("y"));
-    cx.release_param(&x);
-    cx.release_param(&y);
+        lambda_params!(cx; x, y);
     let body = match item.strip_refs() {
         Ty::F64 => format!("{x}.isNaN() || {y}.isNaN() ? null : Double.compare({x}, {y})"),
         Ty::F32 => format!("{x}.isNaN() || {y}.isNaN() ? null : Float.compare({x}, {y})"),
@@ -2256,8 +2280,7 @@ fn lower_adaptor_core(
                 out,
                 "seen",
             );
-            let x = cx.fresh_param("x");
-            cx.release_param(&x);
+            lambda_params!(cx; x);
             call(
                 "filter",
                 vec![Expr::raw(format!(
@@ -2332,8 +2355,7 @@ fn lower_adaptor_core(
         // `(Vec, Vec)` is a `Map.Entry` of two lists.
         "partition" => {
             let f = lower_arg(cx, &args[0], out);
-            let p = cx.fresh_param("parts");
-            cx.release_param(&p);
+            lambda_params!(cx; p = "parts");
             let parts = format!(
                 "Collectors.collectingAndThen(Collectors.partitioningBy({}), {p} -> Map.entry({p}.get(true), {p}.get(false)))",
                 render(&f)
@@ -2341,8 +2363,7 @@ fn lower_adaptor_core(
             call("collect", vec![Expr::raw(parts)])
         }
         "unzip" => {
-            let e = cx.fresh_param("e");
-            cx.release_param(&e);
+            lambda_params!(cx; e);
             let side = |get: &str| {
                 format!(
                     "Collectors.mapping({e} -> {e}.{get}(), Collectors.toCollection(ArrayList::new))"
@@ -2383,7 +2404,7 @@ fn lower_adaptor_core(
         "cmp" | "partial_cmp" | "lt" | "le" | "gt" | "ge" => {
             let other_ty = cx.ty(&args[0]);
             let other = into_stream(lower_arg(cx, &args[0], out), &other_ty);
-            super::fmt::file_helper(cx, LEX_CMP.into());
+            super::fmt::file_helper(cx, LEX_CMP);
             let c = partial_cmp_fn(cx, &item);
             let r = Expr::static_call(
                 "lex_cmp",
@@ -2421,32 +2442,18 @@ fn lower_adaptor_core(
             None => cx.unsupported(m.syntax(), "size_hint() of this iterator"),
         },
         "is_sorted" | "is_sorted_by" | "is_sorted_by_key" => {
-            super::fmt::file_helper(cx, IS_SORTED.into());
-            let (x, y) = (cx.fresh_param("x"), cx.fresh_param("y"));
-            cx.release_param(&x);
-            cx.release_param(&y);
-            // Typed parameters: an empty `Vec::new()` source is a `List<Object>`.
-            let le = |cx: &mut Cx, t: &Ty| {
-                let b = t.boxed();
-                match t.strip_refs() {
-                    t if t.is_primitive() => format!("({b} {x}, {b} {y}) -> {x} <= {y}"),
-                    t => format!("({b} {x}, {b} {y}) -> {} <= 0", super::std_map::coll::compare_call(cx, t, &x, &y)),
-                }
-            };
+            super::fmt::file_helper(cx, IS_SORTED);
             let (items, test) = match name {
-                "is_sorted" => (call("toList", vec![]), Expr::raw(le(cx, &item))),
+                "is_sorted" => (call("toList", vec![]), sorted_le(cx, &item)),
                 "is_sorted_by" => (call("toList", vec![]), lower_arg(cx, &args[0], out)),
                 _ => {
-                    let key = match strip_parens(&args[0]) {
-                        ast::Expr::ClosureExpr(c) => c.body().map(|b| cx.ty(&b)),
-                        _ => None,
-                    };
-                    let Some(key) = key else {
+                    let Some(key) = closure_body_ty(cx, &args[0]) else {
                         return cx.unsupported(m.syntax(), "is_sorted_by_key without a closure");
                     };
+                    let le = sorted_le(cx, &key);
                     let f = lower_arg(cx, &args[0], out);
                     let keys = Expr::call(call(&format!("<{}>map", key.boxed()), vec![f]), "toList", vec![]);
-                    (keys, Expr::raw(le(cx, &key)))
+                    (keys, le)
                 }
             };
             Expr::static_call("is_sorted", vec![items, test])
@@ -2462,7 +2469,7 @@ fn lower_adaptor_core(
                 }
                 _ => return cx.unsupported(m.syntax(), "try_fold() returning this type"),
             };
-            super::fmt::file_helper(cx, helper.into());
+            super::fmt::file_helper(cx, helper);
             Expr::static_call(java, vec![src.clone(), init, f])
         }
         "try_for_each" => {
@@ -2470,7 +2477,7 @@ fn lower_adaptor_core(
                 return cx.unsupported(m.syntax(), "try_for_each() returning this type");
             }
             cx.needs_result = true;
-            super::fmt::file_helper(cx, TRY_FOR_EACH.into());
+            super::fmt::file_helper(cx, TRY_FOR_EACH);
             let f = lower_arg(cx, &args[0], out);
             Expr::static_call("try_for_each", vec![src.clone(), f])
         }
@@ -2488,21 +2495,7 @@ fn lower_adaptor_core(
         "copied" | "cloned" | "into_iter" | "iter" | "by_ref" | "peekable" | "fuse" => src,
         "count" | "len" => Expr::Cast("int".into(), Box::new(call("count", vec![]))),
         // `c.to_uppercase().to_string()`: the Display text of a char iterator.
-        "to_string" if item.strip_refs() == &Ty::Char => Expr::call(
-            call("map", vec![Expr::raw("String::valueOf")]),
-            "collect",
-            vec![Expr::raw("Collectors.joining()")],
-        ),
-        // `escape_ascii().to_string()`: its bytes are ASCII text.
-        "to_string" if item.strip_refs() == &Ty::Int(Int::U8) => {
-            let b = cx.fresh_param("b");
-            cx.release_param(&b);
-            Expr::call(
-                call("map", vec![Expr::raw(format!("{b} -> String.valueOf((char) (int) {b})"))]),
-                "collect",
-                vec![Expr::raw("Collectors.joining()")],
-            )
-        }
+        "to_string" if matches!(item.strip_refs(), Ty::Char | Ty::Int(Int::U8)) => char_iter_text(cx, src, &item),
         "sum" | "product" => lower_sum_product(cx, m.syntax(), name == "product", src, ret_ty),
         "min" | "max" => {
             if item.is_primitive() || item.is_str() || name == "min" {
@@ -2703,8 +2696,7 @@ fn to_stream_fn(cx: &mut Cx, ty: &Ty) -> Option<Expr> {
         Ty::Option(_) => Expr::raw("Optional::stream"),
         // A Result iterates its Ok value.
         Ty::Result(..) => {
-            let r = cx.fresh_param("r");
-            cx.release_param(&r);
+            lambda_params!(cx; r);
             Expr::raw(format!("{r} -> {r}.ok().stream()"))
         }
         Ty::Iter(_) => {
@@ -3035,8 +3027,7 @@ fn lower_pulled(
                 "({it}.hasNext() ? Optional.<{t}>of({it}.next()) : Optional.<{t}>empty())"
             )),
             "peek" => {
-                let x = cx.fresh_param("x");
-                cx.release_param(&x);
+                lambda_params!(cx; x);
                 Expr::raw(format!(
                     "({it}.hasNext() ? Optional.<{t}>of({it}.next()).map({x} -> {it}.previous()) : Optional.<{t}>empty())"
                 ))

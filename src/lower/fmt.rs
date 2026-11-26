@@ -895,27 +895,15 @@ fn format_one(
     // Only the char iterators of case maps and escapes, and `escape_ascii`'s bytes, implement
     // Display: their text.
     if spec.kind.is_empty()
-        && matches!(ty.strip_refs(), Ty::Iter(t) if **t == Ty::Char || **t == Ty::Int(crate::ty::Int::U8))
+        && let Ty::Iter(t) = ty.strip_refs()
+        && matches!(**t, Ty::Char | Ty::Int(crate::ty::Int::U8))
     {
-        let to_text = if matches!(ty.strip_refs(), Ty::Iter(t) if **t == Ty::Char) {
-            "String::valueOf".to_string()
-        } else {
-            let b = cx.fresh_param("b");
-            cx.release_param(&b);
-            format!("{b} -> String.valueOf((char) (int) {b})")
-        };
-        let text = Expr::call(
-            Expr::call(v, "map", vec![Expr::raw(to_text)]),
-            "collect",
-            vec![Expr::raw("Collectors.joining()")],
-        );
+        let text = super::iter::char_iter_text(cx, v, t);
         return format_one(cx, node, text, &Ty::Str, spec, counts, out);
     }
     // `Duration` has only Debug: Rust's `1.5s` / `250ms` / `42ns`.
     if super::expr::is_duration(ty) {
-        cx.import("java.time.Duration");
-        file_helper(cx, super::std_map::DURATION_HELPERS.into());
-        let text = Expr::static_call("dur_debug", vec![v]);
+        let text = debug(cx, v, ty);
         let spec = Spec { kind: String::new(), ..spec.clone() };
         return format_one(cx, node, text, &Ty::Str, &spec, counts, out);
     }
@@ -1197,7 +1185,7 @@ pub fn display(cx: &mut Cx, _node: &SyntaxNode, v: Expr, ty: &Ty, _out: &mut Vec
             display_float(cx, Expr::raw("0.0"), false);
             file_helper(
                 cx,
-                "static String display_any(Object o) { return o instanceof Double d ? display_float(d) : String.valueOf(o); }".into(),
+                "static String display_any(Object o) { return o instanceof Double d ? display_float(d) : String.valueOf(o); }",
             );
             Expr::static_call("display_any", vec![v])
         }
@@ -1386,9 +1374,9 @@ pub fn std_error_display(cx: &mut Cx, v: Expr, ty: &Ty) -> Option<Expr> {
 }
 
 // Adds a static helper method to this file's trailer line once.
-pub(crate) fn file_helper(cx: &mut Cx, decl: String) {
-    if !cx.file_trailer.contains(&decl) {
-        cx.file_trailer.insert(0, decl);
+pub(crate) fn file_helper(cx: &mut Cx, decl: &str) {
+    if !cx.file_trailer.iter().any(|t| t == decl) {
+        cx.file_trailer.insert(0, decl.to_string());
     }
 }
 
@@ -1403,7 +1391,7 @@ pub(crate) fn display_float(cx: &mut Cx, v: Expr, f32: bool) -> Expr {
     };
     file_helper(
         cx,
-        format!(
+        &format!(
             "static String display_float({t} x) {{ if ({cls}.isNaN(x)) return \"NaN\"; if ({cls}.isInfinite(x)) return x > 0 ? \"inf\" : \"-inf\"; \
              if (x == 0) return 1 / x < 0 ? \"-0\" : \"0\"; return {big}.stripTrailingZeros().toPlainString(); }}"
         ),
@@ -1619,7 +1607,7 @@ fn debug_quote(cx: &mut Cx, value: Expr, quote: char) -> Expr {
     let helper = "static String debug_str(String s, char q) { StringBuilder b = new StringBuilder().append(q); \
                   s.codePoints().forEach(c -> b.append(c == q ? \"\\\\\" + q : c == '\\\\' ? \"\\\\\\\\\" : c == '\\n' ? \"\\\\n\" : c == '\\r' ? \"\\\\r\" : c == '\\t' ? \"\\\\t\" : c == 0 ? \"\\\\0\" \
                   : Character.isISOControl(c) ? \"\\\\u{\" + Integer.toHexString(c) + \"}\" : Character.toString(c))); return b.append(q).toString(); }";
-    file_helper(cx, helper.to_string());
+    file_helper(cx, helper);
     let value = if quote == '\'' {
         Expr::call(Expr::raw("String"), "valueOf", vec![value])
     } else {
@@ -1660,7 +1648,7 @@ fn debug_pretty(cx: &mut Cx, compact: Expr) -> Expr {
         r#"if (c == ',') { b.append(",\n").append("    ".repeat(depth)); if (i + 1 < s.length() && s.charAt(i + 1) == ' ') i++; continue; } "#,
         r#"b.append(c); } return b.toString(); }"#,
     );
-    file_helper(cx, helper.to_string());
+    file_helper(cx, helper);
     Expr::static_call("debug_pretty", vec![compact])
 }
 
@@ -1691,7 +1679,7 @@ fn debug_any(cx: &mut Cx, v: Expr) -> Expr {
         r#"try { return (String) o.getClass().getMethod("debug").invoke(o); } catch (ReflectiveOperationException e) { return String.valueOf(o); } }"#,
     );
     let helper = helper.replacen("if (o instanceof Map<?, ?> m)", &format!("{records}if (o instanceof Map<?, ?> m)"), 1);
-    file_helper(cx, helper);
+    file_helper(cx, &helper);
     Expr::static_call("debug_any", vec![v])
 }
 
@@ -1702,7 +1690,7 @@ fn sci_float(cx: &mut Cx, v: Expr, f32: bool, precision: Option<Expr>) -> Expr {
     let t = if f32 { "float" } else { "double" };
     file_helper(
         cx,
-        format!(
+        &format!(
             "static String sci_float({t} x, int p) {{ if (Double.isNaN(x)) return \"NaN\"; if (Double.isInfinite(x)) return x > 0 ? \"inf\" : \"-inf\"; \
              String sign = x < 0 || 1 / x < 0 ? \"-\" : \"\"; BigDecimal d = p < 0 ? new BigDecimal(String.valueOf(Math.abs(x))).stripTrailingZeros() : new BigDecimal(Math.abs(x)); \
              if (d.signum() == 0) return sign + (p > 0 ? \"0.\" + \"0\".repeat(p) : \"0\") + \"e0\"; int e = d.precision() - d.scale() - 1; \
@@ -1722,7 +1710,7 @@ fn debug_float(cx: &mut Cx, v: Expr, f32: bool) -> Expr {
     let t = if f32 { "float" } else { "double" };
     file_helper(
         cx,
-        format!(
+        &format!(
             "static String debug_float({t} x) {{ String s = String.valueOf(x); if (s.equals(\"NaN\") || s.equals(\"-0.0\")) return s; \
              if (s.endsWith(\"Infinity\")) return s.startsWith(\"-\") ? \"-inf\" : \"inf\"; double a = Math.abs(x); \
              if (a >= 1e16 || a > 0 && a < 1e-4) return s.replace(\"E\", \"e\").replace(\".0e\", \"e\"); \
@@ -1745,8 +1733,7 @@ fn debug_operand(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
 pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
     match ty.strip_refs() {
         t if super::expr::is_duration(t) => {
-            cx.import("java.time.Duration");
-            file_helper(cx, super::std_map::DURATION_HELPERS.into());
+            super::std_map::io::duration_helpers(cx);
             Expr::static_call("dur_debug", vec![v])
         }
         Ty::Unit => Expr::str_lit("()"),

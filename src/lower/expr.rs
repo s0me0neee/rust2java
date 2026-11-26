@@ -485,7 +485,7 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
         };
         let l = lower_expr(cx, &lhs, out);
         let r = lower_expr(cx, &rhs, out);
-        super::fmt::file_helper(cx, GENERIC_ARITH.into());
+        super::fmt::file_helper(cx, GENERIC_ARITH);
         return Expr::static_call("arith", vec![l, Expr::raw(format!("'{sym}'")), r]);
     }
     let l = lower_expr(cx, &lhs, out);
@@ -765,6 +765,14 @@ fn op_trait_method(a: ast::ArithOp) -> &'static str {
     }
 }
 
+// Option methods whose `&mut` result points into the Option itself.
+pub(super) fn option_ref_method(name: &str) -> bool {
+    matches!(
+        name,
+        "as_mut" | "get_or_insert" | "get_or_insert_with" | "get_or_insert_default" | "insert" | "get_mut" | "get_or_init"
+    )
+}
+
 // A `&mut` binding aliasing an `Option` place: `if let Some(ref mut x) = o`,
 // `if let Some(x) = o.as_mut()`, or `let x = o.get_or_insert(v)`.
 fn option_ref_place(cx: &mut Cx, inner: &ast::Expr, out: &mut Vec<Stmt>) -> Option<(Expr, Ty)> {
@@ -789,11 +797,8 @@ fn option_ref_place(cx: &mut Cx, inner: &ast::Expr, out: &mut Vec<Stmt>) -> Opti
         None
     })?;
     let target_ast = match &init {
-        ast::Expr::MethodCallExpr(mc) => match mc.name_ref()?.text().to_string().as_str() {
-            "as_mut" | "get_or_insert" | "get_or_insert_with" | "get_or_insert_default" | "insert" | "get_mut"
-            | "get_or_init" => mc.receiver()?,
-            _ => return None,
-        },
+        ast::Expr::MethodCallExpr(mc) if option_ref_method(&mc.name_ref()?.text()) => mc.receiver()?,
+        ast::Expr::MethodCallExpr(_) => return None,
         e if ip.ref_token().is_some() && ip.mut_token().is_some() => e.clone(),
         _ => return None,
     };
@@ -1178,20 +1183,20 @@ fn closure_param(cx: &Cx, e: &ast::Expr) -> bool {
     let Some(ip) = cx.local_of_path(e).and_then(|l| l.primary_source(cx.db).into_ident_pat()) else {
         return false;
     };
-    let from_call = ip
+    let in_closure = ip
         .syntax()
-        .ancestors()
-        .find_map(ast::LetStmt::cast)
-        .and_then(|l| l.initializer())
-        .is_some_and(|i| is_call_result(&i));
-    if from_call && !super::stmt::written_through(cx, &ip) {
-        return true;
-    }
-    ip.syntax()
         .ancestors()
         .find_map(ast::Param::cast)
         .and_then(|p| p.syntax().parent()?.parent())
-        .is_some_and(|n| ast::ClosureExpr::can_cast(n.kind()))
+        .is_some_and(|n| ast::ClosureExpr::can_cast(n.kind()));
+    in_closure
+        || ip
+            .syntax()
+            .ancestors()
+            .find_map(ast::LetStmt::cast)
+            .and_then(|l| l.initializer())
+            .is_some_and(|i| is_call_result(&i))
+            && !super::stmt::written_through(cx, &ip)
 }
 
 // A value produced by a call (`f()?`, `m.get_mut(k).unwrap()`), not a place Java could share.
@@ -1259,22 +1264,21 @@ fn lower_prefix(cx: &mut Cx, p: &ast::PrefixExpr, out: &mut Vec<Stmt>) -> Expr {
                 return Expr::raw(format!("{}[0]", crate::emit::render_expr(&v)));
             }
             // Cells (`n[0]`) and iter_mut aliases (`v.get(i)`) were resolved when lowering `inner`.
-            let resolved = cx.cell_path(&inner).is_some()
-                || cx.handle_path(&inner).is_some()
-                || cx
-                    .local_of_path(&inner)
-                    .is_some_and(|l| cx.returned_params.contains(&l))
-                || cx
-                    .local_of_path(&inner)
-                    .is_some_and(|l| cx.elem_aliases.contains_key(&l))
-                || closure_param(cx, &inner);
+            let resolved = |cx: &Cx| {
+                cx.cell_path(&inner).is_some()
+                    || cx.handle_path(&inner).is_some()
+                    || cx
+                        .local_of_path(&inner)
+                        .is_some_and(|l| cx.returned_params.contains(&l) || cx.elem_aliases.contains_key(&l))
+                    || closure_param(cx, &inner)
+            };
             if let Ty::Ref {
                 mutable: true,
                 inner: t,
             } = &ty
                 && (t.is_primitive() || t.is_str())
-                && !resolved
                 && !is_call_result(&inner)
+                && !resolved(cx)
             {
                 return cx.unsupported(p.syntax(), "deref of a `&mut` primitive/String (cell)");
             }

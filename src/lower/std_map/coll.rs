@@ -286,8 +286,7 @@ fn clone_elems(cx: &mut Cx, m: &ast::MethodCallExpr, recv: Expr, elem: &Ty) -> E
     if !struct_elems {
         return clone_list(cx, recv, elem);
     }
-    let item = cx.fresh_param("item");
-    cx.release_param(&item);
+    lambda_params!(cx; item);
     let copied = Expr::call(
         Expr::call(recv, "stream", vec![]),
         "map",
@@ -1244,6 +1243,11 @@ pub(super) fn lower_vec_method(
     let b0 = args.first().cloned().unwrap_or_else(|| Expr::raw("0"));
     let b1 = args.get(1).cloned().unwrap_or_else(|| Expr::raw("0"));
     let witness = opt_inner(ret);
+    // `split_off` takes an index on a `Vec`, a range on a slice binding.
+    let range_arg = match arg_asts.first().map(strip_parens) {
+        Some(ast::Expr::RangeExpr(r)) => Some(r),
+        _ => None,
+    };
     match name {
         "len" => Some(Expr::call(recv, "size", vec![])),
         "is_empty" => Some(Expr::call(recv, "isEmpty", vec![])),
@@ -1294,7 +1298,7 @@ pub(super) fn lower_vec_method(
             vec![recv, b0, b1],
         )),
         "clear" => Some(Expr::call(recv, "clear", vec![])),
-        "split_off" if !matches!(arg_asts.first().map(strip_parens), Some(ast::Expr::RangeExpr(_))) => {
+        "split_off" if range_arg.is_none() => {
             let p = simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out);
             let n = simple(cx, b0, &Ty::Int(Int::Usize), line, out);
             let (ps, ns) = (render(&p), render(&n));
@@ -1585,11 +1589,10 @@ pub(super) fn lower_vec_method(
                 "select_nth_unstable" => Expr::raw("null"),
                 "select_nth_unstable_by" => Expr::Cast(format!("Comparator<{}>", elem.boxed()), Box::new(b1.clone())),
                 _ => {
-                    let key = arg_asts.get(1).and_then(|a| match strip_parens(a) {
-                        ast::Expr::ClosureExpr(c) => c.body().map(|b| cx.ty(&b)),
-                        _ => None,
-                    });
-                    let key = key.unwrap_or(Ty::Other("?".into()));
+                    let key = arg_asts
+                        .get(1)
+                        .and_then(|a| crate::lower::iter::closure_body_ty(cx, a))
+                        .unwrap_or(Ty::Other("?".into()));
                     let f = Expr::Cast(format!("Function<{}, {}>", elem.boxed(), key.boxed()), Box::new(b1.clone()));
                     Expr::raw(format!("Comparator.comparing({})", render(&f)))
                 }
@@ -1613,10 +1616,7 @@ pub(super) fn lower_vec_method(
                 "subList",
                 vec![i.clone(), Expr::call(recv.clone(), "size", vec![])],
             );
-            let pair_ty = match ret.strip_refs() {
-                Ty::Option(t) => (**t).clone(),
-                t => t.clone(),
-            };
+            let pair_ty = opt_inner(ret).unwrap_or_else(|| ret.strip_refs().clone());
             let pair = expr::tuple_expr(cx, &pair_ty, vec![a, b]);
             if !name.ends_with("_checked") {
                 return Some(pair);
@@ -1635,10 +1635,7 @@ pub(super) fn lower_vec_method(
             let vs = render(&v);
             let sub = |a: String, b: String| Expr::raw(format!("{vs}.subList({a}, {b})"));
             let len = format!("{vs}.size()");
-            let inner = match ret.strip_refs() {
-                Ty::Option(t) => (**t).clone(),
-                t => t.clone(),
-            };
+            let inner = opt_inner(ret).unwrap_or_else(|| ret.strip_refs().clone());
             let (cond, value) = match name.trim_end_matches("_mut") {
                 "first_chunk" => (format!("{len} >= {n}"), sub("0".into(), n.clone())),
                 "last_chunk" => (format!("{len} >= {n}"), sub(format!("{len} - {n}"), len.clone())),
@@ -1652,13 +1649,13 @@ pub(super) fn lower_vec_method(
                 ),
                 "as_array" | "as_mut_array" => (format!("{len} == {n}"), v.clone()),
                 "as_chunks" => {
-                    super::super::fmt::file_helper(cx, SLICE_VIEW_HELPERS.into());
+                    super::super::fmt::file_helper(cx, SLICE_VIEW_HELPERS);
                     let chunks = Expr::static_call("chunks_of", vec![v.clone(), Expr::raw("0"), Expr::raw(n.clone())]);
                     let rest = sub(format!("{len} - {len} % {n}"), len.clone());
                     return Some(expr::tuple_expr(cx, ret, vec![chunks, rest]));
                 }
                 _ => {
-                    super::super::fmt::file_helper(cx, SLICE_VIEW_HELPERS.into());
+                    super::super::fmt::file_helper(cx, SLICE_VIEW_HELPERS);
                     let head = sub("0".into(), format!("{len} % {n}"));
                     let chunks = Expr::static_call("chunks_of", vec![v.clone(), Expr::raw(format!("{len} % {n}")), Expr::raw(n.clone())]);
                     return Some(expr::tuple_expr(cx, ret, vec![head, chunks]));
@@ -1681,16 +1678,12 @@ pub(super) fn lower_vec_method(
                 "taken",
             );
             let rest = if first { format!("{vs}.subList(1, {vs}.size())") } else { format!("{vs}.subList(0, {vs}.size() - 1)") };
-            let mut shrink = Vec::new();
-            let assign = expr::place_assign(cx, _recv_ast, "=", Expr::raw(rest), &mut shrink);
-            out.extend(shrink);
-            push_raw(out, line, format!("if (!{vs}.isEmpty()) {};", render(&assign)));
+            assign_if(cx, _recv_ast, &format!("!{vs}.isEmpty()"), Expr::raw(rest), line, out);
             Some(Expr::name(taken))
         }
         // `s.split_off(..k)` / `s.split_off(k..)` on a slice binding (a `Vec`'s takes an index).
-        "split_off" | "split_off_mut" if matches!(arg_asts.first().map(strip_parens), Some(ast::Expr::RangeExpr(_))) => {
+        "split_off" | "split_off_mut" if let Some(r) = range_arg => {
             use ast::RangeItem;
-            let Some(ast::Expr::RangeExpr(r)) = arg_asts.first().map(strip_parens) else { return None };
             let v = simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out);
             let vs = render(&v);
             let (bound, front) = match (r.start(), r.end()) {
@@ -1712,10 +1705,7 @@ pub(super) fn lower_vec_method(
                 out,
                 "taken",
             );
-            let mut shrink = Vec::new();
-            let assign = expr::place_assign(cx, _recv_ast, "=", Expr::raw(kept), &mut shrink);
-            out.extend(shrink);
-            push_raw(out, line, format!("if ({taken}.isPresent()) {};", render(&assign)));
+            assign_if(cx, _recv_ast, &format!("{taken}.isPresent()"), Expr::raw(kept), line, out);
             Some(Expr::name(taken))
         }
         // `[i, j]` distinct and in range: the items (shared objects, so writes reach the list).
@@ -1723,8 +1713,7 @@ pub(super) fn lower_vec_method(
             cx.needs_result = true;
             let v = render(&simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out));
             let idx = render(&simple(cx, b0, &Ty::Vec(Box::new(Ty::Int(Int::Usize))), line, out));
-            let i = cx.fresh_param("i");
-            cx.release_param(&i);
+            lambda_params!(cx; i);
             let ok_ty = match ret.strip_refs() {
                 Ty::Result(ok, _) => ok.boxed(),
                 _ => "Object".into(),
@@ -1736,11 +1725,11 @@ pub(super) fn lower_vec_method(
         // A writable view of `[[T; N]]` as `[T]`.
         "as_flattened" | "as_flattened_mut" => {
             cx.import("java.util.AbstractList");
-            super::super::fmt::file_helper(cx, SLICE_VIEW_HELPERS.into());
+            super::super::fmt::file_helper(cx, SLICE_VIEW_HELPERS);
             Some(Expr::static_call("flat_view", vec![recv]))
         }
         "strip_prefix" | "strip_suffix" | "strip_circumfix" | "trim_prefix" | "trim_suffix" => {
-            super::super::fmt::file_helper(cx, SLICE_EDIT_HELPERS.into());
+            super::super::fmt::file_helper(cx, SLICE_EDIT_HELPERS);
             let none = Expr::raw("List.of()");
             let (pre, suf) = match name {
                 "strip_prefix" | "trim_prefix" => (b0.clone(), none),
@@ -1755,41 +1744,28 @@ pub(super) fn lower_vec_method(
             Some(Expr::static_call("slice_strip", vec![recv, pre, suf]))
         }
         "is_sorted" | "is_sorted_by" | "is_sorted_by_key" => {
-            super::super::fmt::file_helper(cx, crate::lower::iter::IS_SORTED.into());
-            let (x, y) = (cx.fresh_param("x"), cx.fresh_param("y"));
-            cx.release_param(&x);
-            cx.release_param(&y);
-            let le = |cx: &mut Cx, t: &Ty| {
-                let b = t.boxed();
-                match t.strip_refs() {
-                    t if t.is_primitive() => format!("({b} {x}, {b} {y}) -> {x} <= {y}"),
-                    t => format!("({b} {x}, {b} {y}) -> {} <= 0", compare_call(cx, t, &x, &y)),
-                }
-            };
+            use crate::lower::iter::{closure_body_ty, sorted_le};
+            super::super::fmt::file_helper(cx, crate::lower::iter::IS_SORTED);
             Some(match name {
-                "is_sorted" => Expr::static_call("is_sorted", vec![recv, Expr::raw(le(cx, elem))]),
+                "is_sorted" => Expr::static_call("is_sorted", vec![recv, sorted_le(cx, elem)]),
                 "is_sorted_by" => Expr::static_call("is_sorted", vec![recv, b0]),
                 _ => {
-                    let key = arg_asts.first().and_then(|a| match strip_parens(a) {
-                        ast::Expr::ClosureExpr(c) => c.body().map(|b| cx.ty(&b)),
-                        _ => None,
-                    });
-                    let key = key.unwrap_or(Ty::Other("?".into()));
+                    let key = arg_asts.first().and_then(|a| closure_body_ty(cx, a)).unwrap_or(Ty::Other("?".into()));
                     let keys = Expr::call(
                         Expr::call(Expr::call(recv, "stream", vec![]), &format!("<{}>map", key.boxed()), vec![b0]),
                         "toList",
                         vec![],
                     );
-                    Expr::static_call("is_sorted", vec![keys, Expr::raw(le(cx, &key))])
+                    Expr::static_call("is_sorted", vec![keys, sorted_le(cx, &key)])
                 }
             })
         }
         "fill_with" | "swap_with_slice" => {
-            super::super::fmt::file_helper(cx, SLICE_EDIT_HELPERS.into());
+            super::super::fmt::file_helper(cx, SLICE_EDIT_HELPERS);
             Some(Expr::static_call(name, vec![recv, b0]))
         }
         "copy_within" => {
-            super::super::fmt::file_helper(cx, SLICE_EDIT_HELPERS.into());
+            super::super::fmt::file_helper(cx, SLICE_EDIT_HELPERS);
             let Some(ast::Expr::RangeExpr(r)) = arg_asts.first().map(strip_parens) else {
                 return Some(cx.unsupported(m.syntax(), "copy_within without a range literal"));
             };
@@ -1807,21 +1783,19 @@ pub(super) fn lower_vec_method(
         }
         // `[[1], [2, 3]].connect(&0)`: the lists with a separator item (or items) between them.
         "connect" | "join" if matches!(elem.strip_refs(), Ty::Vec(_)) => {
-            super::super::fmt::file_helper(cx, SLICE_EDIT_HELPERS.into());
+            super::super::fmt::file_helper(cx, SLICE_EDIT_HELPERS);
             Some(Expr::static_call("slice_join", vec![recv, b0]))
         }
         "connect" => lower_vec_method(cx, m, _recv_ast, recv, elem, args, arg_asts, "join", ret, line, out),
         "into_vec" => Some(recv),
         // `[u8]` as ASCII text.
         "is_ascii" => {
-            let b = cx.fresh_param("b");
-            cx.release_param(&b);
+            lambda_params!(cx; b);
             Some(Expr::call(Expr::call(recv, "stream", vec![]), "allMatch", vec![Expr::raw(format!("{b} -> {b} < 128"))]))
         }
         "eq_ignore_ascii_case" | "to_ascii_uppercase" | "to_ascii_lowercase" | "make_ascii_uppercase" | "make_ascii_lowercase" => {
-            super::super::fmt::file_helper(cx, super::text::ASCII_CHAR_HELPERS.into());
-            let b = cx.fresh_param("b");
-            cx.release_param(&b);
+            super::super::fmt::file_helper(cx, super::text::ASCII_CHAR_HELPERS);
+            lambda_params!(cx; b);
             let f = if name.ends_with("uppercase") { "ascii_upper" } else { "ascii_lower" };
             Some(match name {
                 "eq_ignore_ascii_case" => {
@@ -1839,7 +1813,7 @@ pub(super) fn lower_vec_method(
             })
         }
         "trim_ascii" | "trim_ascii_start" | "trim_ascii_end" => {
-            super::super::fmt::file_helper(cx, BYTES_HELPERS.into());
+            super::super::fmt::file_helper(cx, BYTES_HELPERS);
             let (s, e) = match name {
                 "trim_ascii" => ("true", "true"),
                 "trim_ascii_start" => ("true", "false"),
@@ -1863,10 +1837,7 @@ pub(super) fn lower_vec_method(
                 size
             };
             let rest = Expr::call(recv.clone(), "subList", vec![start, end]);
-            let pair_ty = match ret.strip_refs() {
-                Ty::Option(t) => (**t).clone(),
-                t => t.clone(),
-            };
+            let pair_ty = opt_inner(ret).unwrap_or_else(|| ret.strip_refs().clone());
             let pair = expr::tuple_expr(cx, &pair_ty, vec![item, rest]);
             Some(optional(
                 Expr::Unary("!", Box::new(Expr::call(recv, "isEmpty", vec![]))),

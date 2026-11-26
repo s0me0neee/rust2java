@@ -25,7 +25,6 @@ use mem::{mem_replace, mem_swap, ref_inner};
 use num::{conditional, lower_float_method, lower_int_method, lower_ordering_method};
 pub(crate) use option::guarded_some;
 use option::{lower_option_method, lower_result_method};
-pub(crate) use io::DURATION_HELPERS;
 pub(crate) use text::{ESC_HELPER, STR_MATCH_HELPERS};
 use text::{lower_small_method, lower_str_method};
 
@@ -114,6 +113,20 @@ pub(crate) fn push_local(
 
 fn push_raw(out: &mut Vec<Stmt>, line: u32, text: String) {
     out.push(Stmt::new(line, StmtKind::Raw(text)));
+}
+
+// `if (cond) place = value;`: a conditional write back to the receiver's place.
+fn assign_if(cx: &mut Cx, place: &ast::Expr, cond: &str, value: Expr, line: u32, out: &mut Vec<Stmt>) {
+    let assign = expr::place_assign(cx, place, "=", value, out);
+    push_raw(out, line, format!("if ({cond}) {};", render(&assign)));
+}
+
+// `Optional<T>` for a local holding the receiver Option's value.
+fn opt_local_ty(cx: &Cx, recv: &ast::Expr) -> String {
+    match option::opt_inner_of(cx, recv) {
+        Some(t) => format!("Optional<{}>", t.boxed()),
+        None => "Optional<Object>".into(),
+    }
 }
 
 // Re-evaluating `e` must be safe and cheap; otherwise bind it to a temporary on this line.
@@ -319,9 +332,11 @@ fn iter_fn(
 ) -> Option<Expr> {
     let fn_name = key.rsplit("::").next().unwrap_or(key);
     // `Sum::sum(it)` / `Product::product(it)`: the iterator's own `sum()` / `product()`.
-    let first_iter = c.arg_list().and_then(|l| l.args().next()).filter(|a| matches!(cx.ty(a), Ty::Iter(_)));
-    if matches!(fn_name, "sum" | "product") && let Some(a) = first_iter {
-        let aty = cx.ty(&a);
+    if matches!(fn_name, "sum" | "product")
+        && let Some(a) = c.arg_list().and_then(|l| l.args().next())
+        && let aty = cx.ty(&a)
+        && matches!(aty, Ty::Iter(_))
+    {
         let src = super::iter::into_stream(expr::lower_expr(cx, &a, out), &aty);
         return Some(super::iter::lower_sum_product(cx, c.syntax(), fn_name == "product", src, ret));
     }
@@ -347,8 +362,7 @@ fn iter_fn(
             let (ia, ib) = (cx.fresh("a"), cx.fresh("b"));
             push_raw(out, line, format!("Iterator<{}> {ia} = {}.iterator();", match item.as_ref() { Ty::Tuple(p) => p[0].boxed(), _ => "Object".into() }, render(&a)));
             push_raw(out, line, format!("Iterator<{}> {ib} = {}.iterator();", match item.as_ref() { Ty::Tuple(p) => p[1].boxed(), _ => "Object".into() }, render(&b)));
-            let x = cx.fresh_param("x");
-            cx.release_param(&x);
+            lambda_params!(cx; x);
             let pair = expr::tuple_expr(cx, item, vec![Expr::raw(format!("{ia}.next()")), Expr::raw(format!("{ib}.next()"))]);
             Expr::raw(format!(
                 "Stream.generate(() -> 0).takeWhile({x} -> {ia}.hasNext() && {ib}.hasNext()).map({x} -> {})",
@@ -425,8 +439,7 @@ fn iter_fn(
         "successors::successors" => {
             let mut args = expr::call_args(cx, c, out).into_iter();
             let (first, f) = (args.next()?, args.next()?);
-            let o = cx.fresh_param("o");
-            cx.release_param(&o);
+            lambda_params!(cx; o);
             let step = Expr::Lambda {
                 params: vec![o.clone()],
                 body: LambdaBody::Expr(Box::new(Expr::call(Expr::name(o), "flatMap", vec![f]))),
@@ -1126,8 +1139,7 @@ pub fn lower_std_path(cx: &mut Cx, path: &ast::Path, def: ModuleDef) -> Expr {
     if (matches!(last, "Reverse" | "Wrapping") && matches!(def, ModuleDef::Adt(_)))
         || (last == "identity" && matches!(def, ModuleDef::Function(_)))
     {
-        let x = cx.fresh_param("x");
-        cx.release_param(&x);
+        lambda_params!(cx; x);
         return Expr::Lambda {
             params: vec![x.clone()],
             body: LambdaBody::Expr(Box::new(Expr::name(x))),
@@ -1378,17 +1390,7 @@ pub fn lower_std_method(
         // `a.clone_from(&b)` is `a = b.clone()`.
         (_, "clone_from") => args.first().cloned().map(|b| match &t {
             Ty::Vec(elem) => coll::clone_list(cx, b, elem),
-            Ty::Adt { .. } => Expr::call(b, "clone", vec![]),
-            Ty::Map { ordered, .. } | Ty::Set { ordered, .. } => {
-                let class = match (&t, ordered) {
-                    (Ty::Map { .. }, true) => "TreeMap<>",
-                    (Ty::Map { .. }, false) => "HashMap<>",
-                    (_, true) => "TreeSet<>",
-                    _ => "HashSet<>",
-                };
-                Expr::New { ty: class.into(), args: vec![b] }
-            }
-            _ => b,
+            _ => clone_expr(b, &t),
         }),
         _ => None,
     };
