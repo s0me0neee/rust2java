@@ -23,7 +23,6 @@ pub struct Project {
 }
 
 pub struct Unit {
-    pub krate: Crate,
     pub package: String,
     pub module: Module,
     pub file_id: EditionedFileId,
@@ -148,7 +147,6 @@ impl Project {
                     module_class_name(db, module)
                 };
                 units.push(Unit {
-                    krate,
                     package: package.clone(),
                     module,
                     file_id,
