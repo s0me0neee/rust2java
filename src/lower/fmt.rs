@@ -901,6 +901,14 @@ fn format_one(
         );
         return format_one(cx, node, text, &Ty::Str, spec, counts, out);
     }
+    // `Duration` has only Debug: Rust's `1.5s` / `250ms` / `42ns`.
+    if super::expr::is_duration(ty) {
+        cx.import("java.time.Duration");
+        file_helper(cx, super::std_map::DURATION_HELPERS.into());
+        let text = Expr::static_call("dur_debug", vec![v]);
+        let spec = Spec { kind: String::new(), ..spec.clone() };
+        return format_one(cx, node, text, &Ty::Str, &spec, counts, out);
+    }
     // A `FpCategory` is its variant name, which `{:?}` prints as is.
     if matches!(ty.strip_refs(), Ty::Other(n) if n.contains("FpCategory")) {
         let spec = Spec { kind: String::new(), ..spec.clone() };
@@ -1405,7 +1413,7 @@ pub fn debug_supported(ty: &Ty) -> bool {
         | Ty::Ordering
         | Ty::Param(_)
         | Ty::Adt { .. } => true,
-        Ty::Other(_) => std_error_name(ty).is_some(),
+        Ty::Other(_) => std_error_name(ty).is_some() || super::expr::is_duration(ty),
         Ty::Vec(t) | Ty::Set { t, .. } | Ty::Deque(t) | Ty::Option(t) => debug_supported(t),
         Ty::Map { k, v, .. } => debug_supported(k) && debug_supported(v),
         // A std error payload (e.g. `ParseIntError`) has no Rust-shaped Debug; print its text.
@@ -1726,6 +1734,11 @@ fn debug_operand(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
 // `{:?}`: Rust Debug as a Java expression.
 pub fn debug(cx: &mut Cx, v: Expr, ty: &Ty) -> Expr {
     match ty.strip_refs() {
+        t if super::expr::is_duration(t) => {
+            cx.import("java.time.Duration");
+            file_helper(cx, super::std_map::DURATION_HELPERS.into());
+            Expr::static_call("dur_debug", vec![v])
+        }
         Ty::Unit => Expr::str_lit("()"),
         Ty::Str => debug_quote(cx, v, '"'),
         Ty::Char => debug_quote(cx, v, '\''),

@@ -552,6 +552,9 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
             if let Ty::Adt { .. } = lt.strip_refs() {
                 return Expr::call(l, op_trait_method(a), vec![r]);
             }
+            if is_duration(&lt) {
+                return duration_op(cx, a, l, r, b.syntax());
+            }
             if matches!(rt.strip_refs(), Ty::Adt { .. }) {
                 // `impl Mul<V2> for f64` would need a free function; keep it explicit.
                 return cx.unsupported(b.syntax(), "a user type on the right of an operator");
@@ -911,7 +914,31 @@ fn lower_assign(
         let m = format!("{}_assign", op_trait_method(a));
         return Expr::call(place, m, vec![r]);
     }
+    // `d += x` on an immutable java.time.Duration: `d = d.plus(x)`.
+    if let Some(a) = op
+        && is_duration(&lt)
+    {
+        let cur = lower_expr(cx, lhs, out);
+        let v = duration_op(cx, a, cur, r, lhs.syntax());
+        return place_assign(cx, lhs, "=", v, out);
+    }
     place_assign(cx, lhs, sym, r, out)
+}
+
+pub(super) fn is_duration(t: &Ty) -> bool {
+    matches!(t.strip_refs(), Ty::Other(n) if n == "Duration")
+}
+
+// `Duration` arithmetic: + and - with another Duration, * and / by an integer.
+fn duration_op(cx: &mut Cx, a: ast::ArithOp, l: Expr, r: Expr, node: &ra_ap_syntax::SyntaxNode) -> Expr {
+    let m = match a {
+        ast::ArithOp::Add => "plus",
+        ast::ArithOp::Sub => "minus",
+        ast::ArithOp::Mul => "multipliedBy",
+        ast::ArithOp::Div => "dividedBy",
+        _ => return cx.unsupported(node, "this operator on a Duration"),
+    };
+    Expr::call(l, m, vec![r])
 }
 
 // Assignment to a Rust place expression. Index places use `set`/`put`.

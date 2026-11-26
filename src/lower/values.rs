@@ -118,6 +118,10 @@ fn copy_needs_clone<'db>(cx: &mut Cx<'_, 'db>, t: &ra_ap_hir::Type<'db>) -> bool
     if !t.is_copy(cx.db) {
         return false;
     }
+    // Only crate types are changed in place; std ones (`Duration`) are immutable Java values.
+    if t.as_adt().is_some_and(|a| !a.module(cx.db).krate(cx.db).origin(cx.db).is_local()) {
+        return false;
+    }
     if cx.mutated.is_none() {
         cx.mutated = Some(mutated_types(cx));
     }

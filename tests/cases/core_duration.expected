@@ -1,0 +1,16 @@
+2.5s 750ms 1.5ms 42ns
+120s 3600s 3.000000001s
+0ns 0ns 90s
+1.25s 500ms
+true true
+2 2500 2500000 2500000000
+2.5 0.75 false
+500 500000 500000000
+Some(3.25s) None Some(1.75s)
+Some(7.5s) Some(625ms) None
+3.25s 0ns 1.5s
+1.75s 1.75s
+3.75s 1.5s 1.25s 250ms
+3.3333333333333335 0.3
+1s 2s 500ms 1s
+true true Some(2.5s)

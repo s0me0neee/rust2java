@@ -25,6 +25,7 @@ use mem::{mem_replace, mem_swap, ref_inner};
 use num::{conditional, lower_float_method, lower_int_method, lower_ordering_method};
 pub(crate) use option::guarded_some;
 use option::{lower_option_method, lower_result_method};
+pub(crate) use io::DURATION_HELPERS;
 pub(crate) use text::{ESC_HELPER, STR_MATCH_HELPERS};
 use text::{lower_small_method, lower_str_method};
 
@@ -548,17 +549,11 @@ pub fn lower_std_fn_call(cx: &mut Cx, c: &ast::CallExpr, key: &str, out: &mut Ve
             return Expr::call(Expr::raw("Optional"), "ofNullable", vec![call]);
         }
         "Instant::now" => return Expr::raw("System.nanoTime()"),
-        "Duration::from_secs" => {
+        k if k.starts_with("Duration::") => {
             let args = expr::call_args(cx, c, out);
-            return Expr::call(Expr::raw("Duration"), "ofSeconds", args);
-        }
-        "Duration::from_millis" => {
-            let args = expr::call_args(cx, c, out);
-            return Expr::call(Expr::raw("Duration"), "ofMillis", args);
-        }
-        "Duration::from_nanos" => {
-            let args = expr::call_args(cx, c, out);
-            return Expr::call(Expr::raw("Duration"), "ofNanos", args);
+            if let Some(e) = io::duration_fn(cx, k, args) {
+                return e;
+            }
         }
         "process::id" => return Expr::raw("(int) ProcessHandle.current().pid()"),
         _ => {}
@@ -1002,6 +997,17 @@ pub fn lower_std_path(cx: &mut Cx, path: &ast::Path, def: ModuleDef) -> Expr {
             }
             return Expr::raw("Optional.empty()");
         }
+        "ZERO" | "MAX" | "SECOND" | "MILLISECOND" | "MICROSECOND" | "NANOSECOND" if text.contains("Duration") => {
+            cx.import("java.time.Duration");
+            return Expr::raw(match last {
+                "ZERO" => "Duration.ZERO",
+                "MAX" => "Duration.ofSeconds(Long.MAX_VALUE, 999_999_999)",
+                "SECOND" => "Duration.ofSeconds(1)",
+                "MILLISECOND" => "Duration.ofMillis(1)",
+                "MICROSECOND" => "Duration.ofNanos(1000)",
+                _ => "Duration.ofNanos(1)",
+            });
+        }
         // A `FpCategory` is its variant name (see `f64::classify`).
         "Nan" | "Infinite" | "Zero" | "Subnormal" | "Normal" if text.contains("FpCategory") => {
             return Expr::str_lit(last);
@@ -1322,7 +1328,9 @@ pub fn lower_std_method(
             vec![Expr::bin(Expr::raw("System.nanoTime()"), "-", recv)],
         );
     }
-    if let Some(e) = duration_method(cx, &name, recv.clone(), &args) {
+    if key.starts_with("Duration::")
+        && let Some(e) = duration_method(cx, &name, recv.clone(), &args)
+    {
         return e;
     }
 

@@ -747,14 +747,91 @@ pub(super) fn stdio_method(
     }
 }
 
-pub(super) fn duration_method(cx: &mut Cx, name: &str, recv: Expr, args: &[Expr]) -> Option<Expr> {
-    let _ = (cx, args);
+// `Duration` is java.time.Duration; these follow Rust where they differ (no negative results,
+// Rust's Debug text, float seconds).
+pub(crate) const DURATION_HELPERS: &str = "static String dur_debug(Duration d) { \
+long s = d.getSeconds(); int n = d.getNano(); long whole, frac; int digits; String unit; \
+if (s > 0) { whole = s; frac = n; digits = 9; unit = \"s\"; } \
+else if (n >= 1_000_000) { whole = n / 1_000_000; frac = n % 1_000_000; digits = 6; unit = \"ms\"; } \
+else if (n >= 1_000) { whole = n / 1_000; frac = n % 1_000; digits = 3; unit = \"µs\"; } \
+else return n + \"ns\"; \
+String f = frac == 0 ? \"\" : (\".\" + String.format(\"%0\" + digits + \"d\", frac)).replaceAll(\"0+$\", \"\"); \
+return whole + f + unit; } \
+static double dur_secs(Duration d) { return d.getSeconds() + d.getNano() / 1e9; } \
+static Duration dur_of_secs(double s) { \
+if (!(s >= 0) || Double.isInfinite(s)) throw new RuntimeException(\"cannot convert float seconds to Duration\"); \
+long secs = (long) s; return Duration.ofSeconds(secs, Math.round((s - secs) * 1e9)); } \
+static Result<Duration, String> dur_try_of_secs(double s) { \
+return s >= 0 && !Double.isInfinite(s) ? new Ok<>(dur_of_secs(s)) : new Err<>(\"cannot convert float seconds to Duration\"); } \
+static Optional<Duration> dur_checked_sub(Duration a, Duration b) { return a.compareTo(b) >= 0 ? Optional.of(a.minus(b)) : Optional.empty(); } \
+static Optional<Duration> dur_checked_div(Duration a, long n) { return n == 0 ? Optional.empty() : Optional.of(a.dividedBy(n)); } \
+static Duration dur_saturating_sub(Duration a, Duration b) { return a.compareTo(b) >= 0 ? a.minus(b) : Duration.ZERO; }";
+
+fn duration_helpers(cx: &mut Cx) {
+    cx.import("java.time.Duration");
+    super::super::fmt::file_helper(cx, DURATION_HELPERS.into());
+}
+
+// `Duration::new(..)`, `Duration::from_*(..)`.
+pub(super) fn duration_fn(cx: &mut Cx, key: &str, mut args: Vec<Expr>) -> Option<Expr> {
+    let name = key.strip_prefix("Duration::")?;
+    cx.import("java.time.Duration");
+    let d = |m: &str, a: Vec<Expr>| Expr::call(Expr::raw("Duration"), m, a);
+    let x = args.first().cloned().unwrap_or_else(|| Expr::raw("0"));
     Some(match name {
-        "as_secs" => Expr::call(recv, "toSeconds", vec![]),
-        "as_millis" => Expr::call(recv, "toMillis", vec![]),
-        "as_nanos" => Expr::call(recv, "toNanos", vec![]),
-        "as_secs_f64" => Expr::bin(Expr::call(recv, "toNanos", vec![]), "/", Expr::raw("1e9")),
-        "as_millis_f64" => Expr::bin(Expr::call(recv, "toNanos", vec![]), "/", Expr::raw("1e6")),
+        "new" => d("ofSeconds", std::mem::take(&mut args)),
+        "from_secs" => d("ofSeconds", vec![x]),
+        "from_millis" => d("ofMillis", vec![x]),
+        "from_micros" => d("ofNanos", vec![Expr::bin(x, "*", Expr::raw("1000L"))]),
+        "from_nanos" | "from_nanos_u128" => d("ofNanos", vec![x]),
+        "from_mins" => d("ofMinutes", vec![x]),
+        "from_hours" => d("ofHours", vec![x]),
+        "from_secs_f64" | "from_secs_f32" => {
+            duration_helpers(cx);
+            Expr::static_call("dur_of_secs", vec![x])
+        }
+        "try_from_secs_f64" | "try_from_secs_f32" => {
+            duration_helpers(cx);
+            cx.needs_result = true;
+            Expr::static_call("dur_try_of_secs", vec![x])
+        }
+        _ => return None,
+    })
+}
+
+pub(super) fn duration_method(cx: &mut Cx, name: &str, recv: Expr, args: &[Expr]) -> Option<Expr> {
+    let b = args.first().cloned().unwrap_or_else(|| Expr::raw("0"));
+    let call = |m: &str, a: Vec<Expr>| Expr::call(recv.clone(), m, a);
+    let some = |e: Expr| Expr::call(Expr::raw("Optional"), "of", vec![e]);
+    let secs = |e: Expr| Expr::static_call("dur_secs", vec![e]);
+    let float = |e: Expr| Expr::Cast("float".into(), Box::new(e));
+    if !matches!(name, "as_secs" | "as_millis" | "as_nanos" | "is_zero") {
+        duration_helpers(cx);
+    }
+    Some(match name {
+        "as_secs" => call("toSeconds", vec![]),
+        "as_millis" => call("toMillis", vec![]),
+        "as_micros" => Expr::bin(call("toNanos", vec![]), "/", Expr::raw("1000")),
+        "as_nanos" => call("toNanos", vec![]),
+        "as_secs_f64" => secs(recv.clone()),
+        "as_secs_f32" => float(secs(recv.clone())),
+        "as_millis_f64" => Expr::bin(secs(recv.clone()), "*", Expr::raw("1e3")),
+        "subsec_millis" => Expr::bin(call("getNano", vec![]), "/", Expr::raw("1_000_000")),
+        "subsec_micros" => Expr::bin(call("getNano", vec![]), "/", Expr::raw("1_000")),
+        "subsec_nanos" => call("getNano", vec![]),
+        "is_zero" => call("isZero", vec![]),
+        "checked_add" => some(call("plus", vec![b])),
+        "checked_mul" => some(call("multipliedBy", vec![b])),
+        "checked_sub" => Expr::static_call("dur_checked_sub", vec![recv, b]),
+        "checked_div" => Expr::static_call("dur_checked_div", vec![recv, b]),
+        "saturating_add" => call("plus", vec![b]),
+        "saturating_mul" => call("multipliedBy", vec![b]),
+        "saturating_sub" => Expr::static_call("dur_saturating_sub", vec![recv, b]),
+        "abs_diff" => Expr::call(call("minus", vec![b]), "abs", vec![]),
+        "mul_f64" | "mul_f32" => Expr::static_call("dur_of_secs", vec![Expr::bin(secs(recv.clone()), "*", b)]),
+        "div_f64" | "div_f32" => Expr::static_call("dur_of_secs", vec![Expr::bin(secs(recv.clone()), "/", b)]),
+        "div_duration_f64" => Expr::bin(secs(recv.clone()), "/", secs(b)),
+        "div_duration_f32" => float(Expr::bin(secs(recv.clone()), "/", secs(b))),
         _ => return None,
     })
 }
