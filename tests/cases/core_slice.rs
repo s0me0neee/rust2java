@@ -24,6 +24,9 @@ fn main() {
     println!("{:?} {:?}", v.splitn(2, |x| x % 2 == 0).collect::<Vec<_>>(), v.rsplitn(2, |x| x % 2 == 0).collect::<Vec<_>>());
     println!("{:?}", v.split_inclusive(|x| x % 3 == 0).collect::<Vec<_>>());
     println!("{:?} {:?}", v.split_at_checked(2), v.split_at_checked(8).is_none());
+    let whole: &[i32] = &v;
+    let mut spare = v.clone();
+    println!("{} {:?}", whole.is_empty(), spare.split_at_mut_checked(3).map(|(a, b)| a.len() * 10 + b.len()));
 
     // ends, prefixes, affixes
     println!("{} {} {}", v.is_empty(), v.ends_with(&[6, 7]), v.ends_with(&[5]));

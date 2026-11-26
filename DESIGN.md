@@ -646,6 +646,13 @@ New lowering code should only be needed for structural constructs.
 
 The sample is `tests/corpus/`: 55 AoC / Exercism / Codeforces-style programs written without regard to what the transpiler supports, run one at a time by `tests/corpus/run.sh` (outside `cargo test`). Today: 55/55 in exact mode; 55/55 in simple mode (14 print `{:?}` text differently).
 
+**Everyday core API.** `tests/core_api.txt` lists the 779 stable methods and functions of the everyday core: the primitives (integer widths folded into one entry per signedness, floats into one), `str`, slices and arrays, `Option`/`Result`, the iterator traits, the comparison / conversion / `Clone` / `Default` traits, `Cell`/`RefCell`/`OnceCell`, ranges, `Duration`, `Wrapping`, and the `iter`/`mem`/`cmp`/`char`/`convert` functions. Unsafe and raw-memory items (pointers, allocators, `MaybeUninit`, `unchecked_*`, `align_to`, `as_bytes_mut`) have no Java meaning and are left out. `tests/core_coverage.rs` requires every listed item to be called by a `tests/cases` / `tests/simple` program, so each is checked against rustc (exact mode byte for byte; simple mode compiles and runs). `R2J_STD_CALLS=<file>` makes the transpiler append the std items a file calls; `python3 tests/core_api.py > tests/core_api.txt` regenerates the list from the local std docs. Limits these tests document:
+- Java keeps no borrow flags: `RefCell::try_borrow(_mut)` always succeeds.
+- A `&mut` to a value Java can't share (a primitive or `String` element, a `&mut str` view) is read-only; a write through it is reported, not lost. Slice views are `subList`s and do write through.
+- A range stored in a variable is a one-shot stream: `contains`/`start`/`end`/`is_empty`/`into_inner` read its bounds only when they are literals or immutable locals. `size_hint` is modelled for fresh iterator chains, not partly consumed ones.
+- Transcendental float results can differ from the platform libm in the last bit, and Java prints `f64::from_bits(1)` as `4.9E-324` rather than `5e-324`.
+- Exact mode keeps Rust's ASCII-only meaning of `to_ascii_*case`, `eq_ignore_ascii_case`, `is_digit`/`to_digit` and `f64::min`/`max` with NaN through small helpers; simple mode uses Java's `Character`/`Math` methods and assumes ASCII text without NaN.
+
 ---
 
 ## 20. Risks
