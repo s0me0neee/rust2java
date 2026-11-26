@@ -90,4 +90,12 @@ fn main() {
     // Wrapping
     let w = Wrapping(0b1011u8);
     println!("{} {}", w.reverse_bits(), (Wrapping(250u8) + Wrapping(10)).0);
+    let mut a = Wrapping(250u8);
+    a += Wrapping(10);
+    let mut b = Wrapping(200u8);
+    b <<= 1;
+    let mut ws = vec![Wrapping(3u8)];
+    ws[0] -= Wrapping(5);
+    let x = 5u8;
+    println!("{} {} {} {} {} {}", a, b, ws[0], -Wrapping(1u8), !x, !Wrapping(5u8));
 }

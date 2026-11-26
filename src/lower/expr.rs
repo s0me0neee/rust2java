@@ -570,12 +570,11 @@ fn lower_bin(cx: &mut Cx, b: &ast::BinExpr, out: &mut Vec<Stmt>) -> Expr {
                 l
             };
             let v = Expr::bin(l, sym, r);
-            let ty = cx.ty(&ast::Expr::BinExpr(b.clone()));
             // `Wrapping<u8>` wraps at 256; a Java int would not.
-            if ty == Ty::Int(crate::ty::Int::U8) && erased_wrapper(cx, &lhs) == Some("Wrapping") {
-                return Expr::bin(v, "&", Expr::raw("0xFF"));
+            if wrapping_u8(cx, &lhs) {
+                return mask_u8(v);
             }
-            narrow_if_needed(v, &ty)
+            narrow_if_needed(v, &cx.ty(&ast::Expr::BinExpr(b.clone())))
         }
         BinaryOp::Assignment { .. } => unreachable!(),
     }
@@ -964,6 +963,14 @@ fn lower_assign(
         let v = duration_op(cx, a, cur, r, lhs.syntax());
         return place_assign(cx, lhs, "=", v, out);
     }
+    // `Wrapping<u8>` is a Java int, so `+=` would carry it past 255.
+    if let Some(a) = op
+        && wrapping_u8(cx, lhs)
+    {
+        let cur = lower_expr(cx, lhs, out);
+        let v = mask_u8(Expr::bin(cur, arith_symbol(a, &lt), r));
+        return place_assign(cx, lhs, "=", v, out);
+    }
     place_assign(cx, lhs, sym, r, out)
 }
 
@@ -1209,6 +1216,15 @@ pub fn place_assign(
     }
 }
 
+fn wrapping_u8(cx: &Cx, e: &ast::Expr) -> bool {
+    cx.ty(e).strip_refs() == &Ty::Int(crate::ty::Int::U8)
+        && erased_wrapper(cx, e) == Some("Wrapping")
+}
+
+fn mask_u8(v: Expr) -> Expr {
+    Expr::bin(v, "&", Expr::raw("0xFF"))
+}
+
 // `Wrapping` / `Reverse` from std, which Java erases to the value they hold.
 pub(super) fn erased_wrapper(cx: &Cx, e: &ast::Expr) -> Option<&'static str> {
     let adt = cx
@@ -1287,6 +1303,8 @@ fn lower_prefix(cx: &mut Cx, p: &ast::PrefixExpr, out: &mut Vec<Stmt>) -> Expr {
         Some(ast::UnaryOp::Neg) => {
             if let Ty::Adt { .. } = ty.strip_refs() {
                 Expr::call(v, "neg", vec![])
+            } else if wrapping_u8(cx, &inner) {
+                mask_u8(Expr::Unary("-", Box::new(v)))
             } else {
                 Expr::Unary("-", Box::new(v))
             }
@@ -1304,6 +1322,9 @@ fn lower_prefix(cx: &mut Cx, p: &ast::PrefixExpr, out: &mut Vec<Stmt>) -> Expr {
                 Expr::Unary("!", Box::new(v))
             } else if matches!(ty.strip_refs(), Ty::Adt { .. }) {
                 Expr::call(v, "not", vec![])
+            } else if ty.strip_refs() == &Ty::Int(crate::ty::Int::U8) {
+                // A `u8` is a Java int: `~5` is -6, not 250.
+                mask_u8(Expr::Unary("~", Box::new(v)))
             } else {
                 Expr::Unary("~", Box::new(v))
             }
