@@ -25,6 +25,7 @@ use mem::{mem_replace, mem_swap, ref_inner};
 use num::{conditional, lower_float_method, lower_int_method, lower_ordering_method};
 pub(crate) use option::guarded_some;
 use option::{lower_option_method, lower_result_method};
+pub(crate) use text::{ESC_HELPER, STR_MATCH_HELPERS};
 use text::{lower_small_method, lower_str_method};
 
 pub use coll::{
@@ -352,6 +353,20 @@ fn iter_fn(
                 "Stream.generate(() -> 0).takeWhile({x} -> {ia}.hasNext() && {ib}.hasNext()).map({x} -> {})",
                 render(&pair)
             ))
+        }
+        // UTF-16 units back to chars; a lone surrogate is an error holding its code.
+        _ if fn_name == "decode_utf16" => {
+            cx.needs_result = true;
+            let src = streams(cx, out).into_iter().next()?;
+            let (u, ch) = (cx.fresh_param("u"), cx.fresh("ch"));
+            cx.release_param(&u);
+            Expr::call(
+                src,
+                &format!("<{t}>map"),
+                vec![Expr::raw(format!(
+                    "{u} -> {{ char {ch} = (char) ((Number) {u}).intValue(); return Character.isSurrogate({ch}) ? new Err<>((int) {ch}) : new Ok<>({ch}); }}"
+                ))],
+            )
         }
         // Lazy and called once.
         _ if fn_name == "once_with" => {

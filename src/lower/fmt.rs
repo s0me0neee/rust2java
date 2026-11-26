@@ -892,6 +892,15 @@ fn format_one(
     counts: &Counts,
     out: &mut Vec<Stmt>,
 ) -> Expr {
+    // Only the char iterators of case maps and escapes implement Display: their text.
+    if spec.kind.is_empty() && matches!(ty.strip_refs(), Ty::Iter(t) if **t == Ty::Char) {
+        let text = Expr::call(
+            Expr::call(v, "map", vec![Expr::raw("String::valueOf")]),
+            "collect",
+            vec![Expr::raw("Collectors.joining()")],
+        );
+        return format_one(cx, node, text, &Ty::Str, spec, counts, out);
+    }
     // A `FpCategory` is its variant name, which `{:?}` prints as is.
     if matches!(ty.strip_refs(), Ty::Other(n) if n.contains("FpCategory")) {
         let spec = Spec { kind: String::new(), ..spec.clone() };

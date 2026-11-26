@@ -27,7 +27,7 @@ pub(super) fn fn_call(
         }
         // Bytes (a `List<Integer>` of char codes, see `as_bytes`) back to text; ASCII is valid
         // UTF-8, so the `Result` is always `Ok`.
-        "converts::from_utf8" | "String::from_utf8" | "String::from_utf8_lossy" => {
+        "converts::from_utf8" | "converts::from_utf8_mut" | "String::from_utf8" | "String::from_utf8_lossy" => {
             let bytes = expr::call_args(cx, c, out).into_iter().next()?;
             let b = cx.fresh_param("b");
             cx.release_param(&b);
@@ -322,6 +322,53 @@ pub(super) fn method(
 
 // ---- bool / char -----------------------------------------------------------------------------
 
+// Text helpers following Rust's definitions, each emitted only where used: ASCII-only case maps
+// and digits for chars, the same for strings plus trimming, pattern matches (a String, or a char
+// predicate) as `{start, end}` pairs, and the `escape_*` forms.
+pub(crate) const ASCII_CHAR_HELPERS: &str = "static char ascii_upper(char c) { return c >= 'a' && c <= 'z' ? (char) (c - 32) : c; } \
+static char ascii_lower(char c) { return c >= 'A' && c <= 'Z' ? (char) (c + 32) : c; } \
+static int ascii_upper(int c) { return c >= 'a' && c <= 'z' ? c - 32 : c; } \
+static int ascii_lower(int c) { return c >= 'A' && c <= 'Z' ? c + 32 : c; } \
+static int ascii_digit(int c, int radix) { return c < 128 ? Character.digit(c, radix) : -1; }";
+
+pub(crate) const ASCII_STR_HELPERS: &str = "static String ascii_upper(String s) { \
+StringBuilder b = new StringBuilder(s.length()); for (char c : s.toCharArray()) b.append(c >= 'a' && c <= 'z' ? (char) (c - 32) : c); return b.toString(); } \
+static String ascii_lower(String s) { \
+StringBuilder b = new StringBuilder(s.length()); for (char c : s.toCharArray()) b.append(c >= 'A' && c <= 'Z' ? (char) (c + 32) : c); return b.toString(); } \
+static String trim_ascii(String s, boolean start, boolean end) { \
+int a = 0, z = s.length(); while (start && a < z && \" \\t\\n\\f\\r\".indexOf(s.charAt(a)) >= 0) a++; \
+while (end && z > a && \" \\t\\n\\f\\r\".indexOf(s.charAt(z - 1)) >= 0) z--; return s.substring(a, z); }";
+
+pub(crate) const STR_MATCH_HELPERS: &str = "@SuppressWarnings(\"unchecked\") static List<int[]> str_matches(String s, Object pat, boolean rev) { \
+List<int[]> out = new ArrayList<>(); \
+if (pat instanceof String p) { \
+if (!rev) { int i = 0; while ((i = s.indexOf(p, i)) >= 0) { out.add(new int[] {i, i + p.length()}); i += Math.max(1, p.length()); } } \
+else { int i = s.length(); while (i >= 0 && (i = s.lastIndexOf(p, i - p.length())) >= 0) { out.add(new int[] {i, i + p.length()}); if (p.isEmpty()) i--; } } } \
+else { Predicate<Character> f = (Predicate<Character>) pat; \
+for (int k = 0; k < s.length(); k++) { int i = rev ? s.length() - 1 - k : k; if (f.test(s.charAt(i))) out.add(new int[] {i, i + 1}); } } \
+return out; } \
+static List<String> str_split(String s, Object pat, boolean inclusive) { \
+List<String> out = new ArrayList<>(); int start = 0; \
+for (int[] m : str_matches(s, pat, false)) { out.add(s.substring(start, inclusive ? m[1] : m[0])); start = m[1]; } \
+if (!inclusive || start < s.length()) out.add(s.substring(start)); return out; }";
+
+pub(crate) const ESC_HELPER: &str = "static String esc(String s, char mode) { \
+StringBuilder b = new StringBuilder(); \
+for (char c : s.toCharArray()) { \
+if (mode == 'u') { b.append(\"\\\\u{\").append(Integer.toHexString(c)).append('}'); continue; } \
+switch (c) { \
+case '\\t' -> b.append(\"\\\\t\"); case '\\r' -> b.append(\"\\\\r\"); case '\\n' -> b.append(\"\\\\n\"); \
+case '\\\\' -> b.append(\"\\\\\\\\\"); case '\\'' -> b.append(\"\\\\'\"); case '\"' -> b.append(\"\\\\\\\"\"); \
+default -> { \
+int t = Character.getType(c); \
+boolean hidden = Character.isISOControl(c) || t == Character.FORMAT || t == Character.UNASSIGNED || t == Character.SURROGATE \
+|| t == Character.PRIVATE_USE || t == Character.LINE_SEPARATOR || t == Character.PARAGRAPH_SEPARATOR \
+|| t == Character.NON_SPACING_MARK || t == Character.ENCLOSING_MARK || (t == Character.SPACE_SEPARATOR && c != ' '); \
+if (mode == 'd' && c == 0) b.append(\"\\\\0\"); \
+else if (mode == 'e' ? c >= 0x20 && c <= 0x7e : !hidden) b.append(c); \
+else b.append(\"\\\\u{\").append(Integer.toHexString(c)).append('}'); } } } \
+return b.toString(); }";
+
 pub(super) fn lower_small_method(
     cx: &mut Cx,
     recv: Expr,
@@ -368,6 +415,11 @@ pub(super) fn lower_small_method(
         });
     }
     let c = |f: &str, a: Vec<Expr>| Expr::call(Expr::raw("Character"), f, a);
+    // Exact mode keeps Rust's ASCII-only meaning through helpers; simple mode assumes ASCII text.
+    let exact = !crate::mode::simple();
+    if exact && matches!(name, "to_ascii_uppercase" | "to_ascii_lowercase" | "eq_ignore_ascii_case" | "is_digit" | "to_digit") {
+        super::super::fmt::file_helper(cx, ASCII_CHAR_HELPERS.into());
+    }
     Some(match name {
         "is_alphabetic" | "is_uppercase" | "is_lowercase" => c(
             if name == "is_alphabetic" {
@@ -379,7 +431,33 @@ pub(super) fn lower_small_method(
             },
             vec![recv],
         ),
-        "is_numeric" => c("isDigit", vec![recv]),
+        // Unicode's numeric categories (Nd, Nl, No), like Rust.
+        "is_numeric" if !exact => c("isDigit", vec![recv]),
+        "is_numeric" => {
+            let t = Expr::call(Expr::raw("Character"), "getType", vec![recv]);
+            Expr::raw(format!(
+                "switch ({}) {{ case Character.DECIMAL_DIGIT_NUMBER, Character.LETTER_NUMBER, Character.OTHER_NUMBER -> true; default -> false; }}",
+                render(&t)
+            ))
+        }
+        "is_ascii_control" => Expr::bin(
+            Expr::bin(recv.clone(), "<", Expr::raw("32")),
+            "||",
+            Expr::bin(recv, "==", Expr::raw("127")),
+        ),
+        "is_ascii_graphic" => Expr::bin(
+            Expr::bin(recv.clone(), ">=", Expr::raw("33")),
+            "&&",
+            Expr::bin(recv, "<=", Expr::raw("126")),
+        ),
+        "len_utf8" => {
+            cx.import("java.nio.charset.StandardCharsets");
+            Expr::raw(format!("String.valueOf({}).getBytes(StandardCharsets.UTF_8).length", render(&recv)))
+        }
+        "len_utf16" => Expr::raw("1"),
+        // The text written into the buffer (the buffer itself isn't filled).
+        "encode_utf8" => Expr::call(Expr::raw("String"), "valueOf", vec![recv]),
+        "encode_utf16" => Expr::raw(format!("new ArrayList<>(List.of((short) {}))", render(&recv))),
         "is_alphanumeric" => c("isLetterOrDigit", vec![recv]),
         "is_whitespace" => c("isWhitespace", vec![recv]),
         "is_control" => c("isISOControl", vec![recv]),
@@ -483,13 +561,22 @@ pub(super) fn lower_small_method(
             );
             Expr::bin(Expr::bin(d, "||", l), "||", u)
         }
+        // Only ASCII digits and letters count (Java's `digit` accepts any Unicode digit).
         "is_digit" => Expr::bin(
-            Expr::call(Expr::raw("Character"), "digit", vec![recv, b0]),
+            if exact {
+                Expr::static_call("ascii_digit", vec![recv, b0])
+            } else {
+                Expr::call(Expr::raw("Character"), "digit", vec![recv, b0])
+            },
             ">=",
             Expr::raw("0"),
         ),
         "to_digit" => {
-            let d = Expr::call(Expr::raw("Character"), "digit", vec![recv, b0]);
+            let d = if exact {
+                Expr::static_call("ascii_digit", vec![recv, b0])
+            } else {
+                Expr::call(Expr::raw("Character"), "digit", vec![recv, b0])
+            };
             let n = cx.fresh("digit");
             push_raw(out, line, format!("int {n} = {};", render(&d)));
             conditional(
@@ -498,14 +585,27 @@ pub(super) fn lower_small_method(
                 opt_empty(opt_inner(ret).as_ref()),
             )
         }
-        "to_ascii_uppercase" | "to_uppercase" => c("toUpperCase", vec![recv]),
-        "to_ascii_lowercase" | "to_lowercase" => c("toLowerCase", vec![recv]),
+        // ASCII letters only: `é` stays `é`.
+        "to_ascii_uppercase" | "to_ascii_lowercase" => {
+            let upper = name == "to_ascii_uppercase";
+            if exact {
+                Expr::static_call(if upper { "ascii_upper" } else { "ascii_lower" }, vec![recv])
+            } else {
+                c(if upper { "toUpperCase" } else { "toLowerCase" }, vec![recv])
+            }
+        }
+        // The full mapping may be several chars (`ß` -> `SS`): the text of the case-mapping iterator.
+        "to_uppercase" | "to_lowercase" => {
+            let f = if name == "to_uppercase" { "toUpperCase" } else { "toLowerCase" };
+            Expr::call(Expr::call(Expr::raw("String"), "valueOf", vec![recv]), f, vec![Expr::raw("Locale.ROOT")])
+        }
         "to_string" => Expr::call(Expr::raw("String"), "valueOf", vec![recv]),
-        "eq_ignore_ascii_case" => Expr::bin(
-            c("toLowerCase", vec![recv]),
-            "==",
-            c("toLowerCase", vec![b0]),
-        ),
+        "eq_ignore_ascii_case" => {
+            let fold = |v: Expr| {
+                if exact { Expr::static_call("ascii_lower", vec![v]) } else { c("toLowerCase", vec![v]) }
+            };
+            Expr::bin(fold(recv), "==", fold(b0))
+        }
         "cmp" => Expr::call(Expr::raw("Character"), "compare", vec![recv, b0]),
         "partial_cmp" => opt_of(Expr::call(
             Expr::raw("Character"),
@@ -924,22 +1024,101 @@ pub(super) fn lower_str_method(
         }
         "trim_start" => return Some(Expr::call(recv, "stripLeading", vec![])),
         "trim_end" => return Some(Expr::call(recv, "stripTrailing", vec![])),
-        "to_uppercase" | "to_ascii_uppercase" => {
+        "to_uppercase" => {
             return Some(Expr::call(
                 recv,
                 "toUpperCase",
                 vec![Expr::raw("Locale.ROOT")],
             ));
         }
-        "to_lowercase" | "to_ascii_lowercase" => {
+        "to_lowercase" => {
             return Some(Expr::call(
                 recv,
                 "toLowerCase",
                 vec![Expr::raw("Locale.ROOT")],
             ));
         }
+        // ASCII letters only (`straße` keeps its `ß`), unlike Java's case mapping; simple mode
+        // assumes ASCII text and keeps Java's.
+        "to_ascii_uppercase" | "to_ascii_lowercase" | "make_ascii_uppercase" | "make_ascii_lowercase" => {
+            let upper = name.ends_with("uppercase");
+            let v = if crate::mode::simple() {
+                Expr::call(recv, if upper { "toUpperCase" } else { "toLowerCase" }, vec![Expr::raw("Locale.ROOT")])
+            } else {
+                super::super::fmt::file_helper(cx, ASCII_STR_HELPERS.into());
+                Expr::static_call(if upper { "ascii_upper" } else { "ascii_lower" }, vec![recv])
+            };
+            if name.starts_with("to_") {
+                return Some(v);
+            }
+            return Some(expr::place_assign(cx, recv_ast, "=", v, out));
+        }
+        "eq_ignore_ascii_case" if crate::mode::simple() => return Some(Expr::call(recv, "equalsIgnoreCase", vec![b0])),
+        "eq_ignore_ascii_case" => {
+            super::super::fmt::file_helper(cx, ASCII_STR_HELPERS.into());
+            let lower = |e: Expr| Expr::static_call("ascii_lower", vec![e]);
+            return Some(Expr::call(lower(recv), "equals", vec![lower(b0)]));
+        }
+        "is_ascii" => {
+            let c = cx.fresh_param("c");
+            cx.release_param(&c);
+            return Some(Expr::call(Expr::call(recv, "chars", vec![]), "allMatch", vec![Expr::raw(format!("{c} -> {c} < 128"))]));
+        }
+        "trim_ascii" | "trim_ascii_start" | "trim_ascii_end" => {
+            super::super::fmt::file_helper(cx, ASCII_STR_HELPERS.into());
+            let (start, end) = match name {
+                "trim_ascii" => ("true", "true"),
+                "trim_ascii_start" => ("true", "false"),
+                _ => ("false", "true"),
+            };
+            return Some(Expr::static_call("trim_ascii", vec![recv, Expr::raw(start), Expr::raw(end)]));
+        }
+        // `trim_prefix` / `trim_suffix`: the text without the affix, or unchanged.
+        "trim_prefix" | "trim_suffix" => {
+            let sv = simple(cx, recv, &Ty::Str, line, out);
+            let av = simple(cx, b0, &arg0_ty, line, out);
+            let plen = pattern_len(&av, &arg0_ty);
+            let av = char_arg(av, &arg0_ty);
+            let len = Expr::call(sv.clone(), "length", vec![]);
+            let (test, cut) = if name == "trim_prefix" {
+                ("startsWith", Expr::call(sv.clone(), "substring", vec![plen]))
+            } else {
+                ("endsWith", Expr::call(sv.clone(), "substring", vec![Expr::raw("0"), Expr::bin(len, "-", plen)]))
+            };
+            return Some(conditional(Expr::call(sv.clone(), test, vec![av]), cut, sv));
+        }
+        "strip_circumfix" => {
+            let sv = simple(cx, recv, &Ty::Str, line, out);
+            let pre = simple(cx, b0, &arg0_ty, line, out);
+            let suf_ty = arg_asts.get(1).map(|a| cx.ty(a)).unwrap_or(Ty::Str);
+            let suf = simple(cx, b1, &suf_ty, line, out);
+            let (pl, sl) = (pattern_len(&pre, &arg0_ty), pattern_len(&suf, &suf_ty));
+            let len = Expr::call(sv.clone(), "length", vec![]);
+            let fits = Expr::bin(len.clone(), ">=", Expr::bin(pl.clone(), "+", sl.clone()));
+            let cond = Expr::bin(
+                Expr::bin(Expr::call(sv.clone(), "startsWith", vec![char_arg(pre, &arg0_ty)]), "&&", Expr::call(sv.clone(), "endsWith", vec![char_arg(suf, &suf_ty)])),
+                "&&",
+                fits,
+            );
+            let inner = Expr::call(sv, "substring", vec![pl, Expr::bin(len, "-", sl)]);
+            return Some(conditional(cond, opt_of(inner), opt_empty(opt_inner(ret).as_ref())));
+        }
+        // Char positions stand in for byte offsets (exact on ASCII text).
+        "is_char_boundary" => {
+            return Some(Expr::bin(b0, "<=", Expr::call(recv, "length", vec![])));
+        }
+        "floor_char_boundary" | "ceil_char_boundary" => {
+            return Some(Expr::call(Expr::raw("Math"), "min", vec![b0, Expr::call(recv, "length", vec![])]));
+        }
+        "into_string" => return Some(recv),
+        // The older names of `trim_start_matches` / `trim_end_matches`.
+        "trim_left_matches" | "trim_right_matches" => {
+            let to = if name == "trim_left_matches" { "trim_start_matches" } else { "trim_end_matches" };
+            return lower_str_method(cx, _m, recv_ast, recv, args, arg_asts, to, ret, line, out);
+        }
+        "into_boxed_bytes" => return lower_str_method(cx, _m, recv_ast, recv, args, arg_asts, "as_bytes", ret, line, out),
+        "get_mut" => return lower_str_method(cx, _m, recv_ast, recv, args, arg_asts, "get", ret, line, out),
         "repeat" => return Some(Expr::call(recv, "repeat", vec![b0])),
-        "eq_ignore_ascii_case" => return Some(Expr::call(recv, "equalsIgnoreCase", vec![b0])),
         "cmp" => return Some(Expr::call(recv, "compareTo", vec![b0])),
         // Rust yields UTF-8 bytes; Java's char codes are the same values for ASCII.
         "as_bytes" => {
@@ -958,11 +1137,21 @@ pub(super) fn lower_str_method(
             }
             return None;
         }
-        "split_at" => {
+        "split_at" | "split_at_mut" | "split_at_checked" | "split_at_mut_checked" => {
+            let s = simple(cx, recv, &Ty::Str, line, out);
             let i = simple(cx, b0, &Ty::Int(Int::Usize), line, out);
-            let a = Expr::call(recv.clone(), "substring", vec![Expr::raw("0"), i.clone()]);
-            let b = Expr::call(recv, "substring", vec![i]);
-            return Some(Expr::call(Expr::raw("Map"), "entry", vec![a, b]));
+            let pair_ty = match ret.strip_refs() {
+                Ty::Option(t) => (**t).clone(),
+                t => t.clone(),
+            };
+            let a = Expr::call(s.clone(), "substring", vec![Expr::raw("0"), i.clone()]);
+            let b = Expr::call(s.clone(), "substring", vec![i.clone()]);
+            let pair = expr::tuple_expr(cx, &pair_ty, vec![a, b]);
+            if !name.ends_with("_checked") {
+                return Some(pair);
+            }
+            let ok = Expr::bin(i, "<=", Expr::call(s, "length", vec![]));
+            return Some(conditional(ok, opt_of(pair), opt_empty(Some(&pair_ty))));
         }
         "strip_prefix" | "strip_suffix" => {
             let test = if name == "strip_prefix" {

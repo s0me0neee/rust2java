@@ -304,8 +304,12 @@ pub fn lower_let(cx: &mut Cx, l: &ast::LetStmt, out: &mut Vec<Stmt>) {
         lower_handle_let(cx, l, ip, &rust_name, &inner, out);
         return;
     }
+    // A `&mut str` / `&mut i32` from a call that is only read (`let s = c.encode_utf8(&mut b)`)
+    // is a plain value.
+    let read_only_call = l.initializer().is_some_and(|i| expr::is_call_result(&i)) && !written_through(cx, ip);
     if let Some(inner) = super::std_map::ptr::ref_mut_pat(cx, ip)
         && !l.initializer().is_some_and(|i| option_ref_init(cx, &i))
+        && !read_only_call
     {
         if lower_slot_let(cx, l, ip, &inner, out) {
             return;
@@ -648,6 +652,53 @@ fn lower_slot_let(
         (render(&map), render(&key), super::ElemAliasKind::Map),
     );
     true
+}
+
+// Whether a `&mut` binding may write through: assigned through, given a mutating method, or
+// passed on to a call (conservatively). Format macros only read.
+fn written_through(cx: &Cx, ip: &ast::IdentPat) -> bool {
+    let Some(local) = cx.sema.to_def(ip) else { return true };
+    let Some(scope) = cx.enclosing_fn(ip.syntax()) else { return true };
+    const MUTATING: &[&str] = &[
+        "push", "push_str", "insert", "insert_str", "clear", "truncate", "pop", "remove", "retain", "drain",
+        "extend", "make_ascii_uppercase", "make_ascii_lowercase", "replace_range", "split_off", "swap", "fill",
+        "sort", "reverse",
+    ];
+    for pe in cx.expanded_descendants(&scope).into_iter().filter_map(ast::PathExpr::cast) {
+        let e = ast::Expr::PathExpr(pe.clone());
+        if cx.local_of_path(&e) != Some(local) {
+            continue;
+        }
+        let Some(parent) = pe.syntax().parent() else { continue };
+        if let Some(m) = ast::MethodCallExpr::cast(parent.clone())
+            && m.receiver().is_some_and(|r| r.syntax() == pe.syntax())
+        {
+            let name = m.name_ref().map(|n| n.text().to_string()).unwrap_or_default();
+            if MUTATING.contains(&name.as_str()) || name.ends_with("_mut") {
+                return true;
+            }
+            continue;
+        }
+        if ast::ArgList::can_cast(parent.kind()) {
+            return true;
+        }
+        if let Some(p) = ast::PrefixExpr::cast(parent.clone())
+            && p.op_kind() == Some(ast::UnaryOp::Deref)
+            && p.syntax().parent().and_then(ast::BinExpr::cast).is_some_and(|b| {
+                matches!(b.op_kind(), Some(ast::BinaryOp::Assignment { .. }))
+                    && b.lhs().is_some_and(|l| l.syntax() == p.syntax())
+            })
+        {
+            return true;
+        }
+        if let Some(b) = ast::BinExpr::cast(parent)
+            && matches!(b.op_kind(), Some(ast::BinaryOp::Assignment { .. }))
+            && b.lhs().is_some_and(|l| l.syntax() == pe.syntax())
+        {
+            return true;
+        }
+    }
+    false
 }
 
 // `let r = &mut x;` names the array `x` lives in, like a `&mut` parameter.

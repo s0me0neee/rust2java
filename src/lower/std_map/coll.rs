@@ -2087,6 +2087,13 @@ pub fn lower_repeat(
     };
     if crate::lower::is_cell_value_ty(&elem_ty) || matches!(elem_ty.strip_refs(), Ty::Option(_)) {
         let x = expr::lower_expr(cx, elem, out);
+        // `[0u16; 2]`: an int literal would make the list `List<Integer>`.
+        let x = match elem_ty.strip_refs() {
+            Ty::Int(i) if matches!(i.java(), "short" | "byte") && !matches!(x, Expr::Cast(..)) => {
+                Expr::Cast(i.java().into(), Box::new(x))
+            }
+            _ => x,
+        };
         let copies = Expr::call(Expr::raw("Collections"), "nCopies", vec![n, x]);
         return Expr::New {
             ty: "ArrayList<>".into(),

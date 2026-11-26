@@ -1327,6 +1327,79 @@ fn lower_source(
                 vec![Expr::raw(format!("{w} -> !{w}.isEmpty()"))],
             )
         }
+        // `escape_*` iterate the chars of the escaped text.
+        (Ty::Char | Ty::Str, "escape_debug" | "escape_default" | "escape_unicode") => {
+            super::fmt::file_helper(cx, super::std_map::ESC_HELPER.into());
+            let text = if recv_ty.strip_refs() == &Ty::Char {
+                Expr::call(Expr::raw("String"), "valueOf", vec![recv])
+            } else {
+                recv
+            };
+            let mode = match name { "escape_debug" => "'d'", "escape_default" => "'e'", _ => "'u'" };
+            let c = cx.fresh_param("c");
+            cx.release_param(&c);
+            let escaped = Expr::static_call("esc", vec![text, Expr::raw(mode)]);
+            Expr::call(Expr::call(escaped, "chars", vec![]), "mapToObj", vec![Expr::raw(format!("{c} -> (char) {c}"))])
+        }
+        (Ty::Str, "encode_utf16") => {
+            let c = cx.fresh_param("c");
+            cx.release_param(&c);
+            Expr::call(Expr::call(recv, "chars", vec![]), "mapToObj", vec![Expr::raw(format!("{c} -> (short) {c}"))])
+        }
+        // Matches of a string, char or char predicate: positions, pieces, or the text split there.
+        (Ty::Str, "match_indices" | "rmatch_indices" | "rmatches" | "split_inclusive" | "rsplit_terminator") => {
+            super::fmt::file_helper(cx, super::std_map::STR_MATCH_HELPERS.into());
+            let pat_ast = args[0].clone();
+            let pat_ty = cx.ty(&pat_ast);
+            let p = lower_arg(cx, &pat_ast, out);
+            let pat = match pat_ty.strip_refs() {
+                Ty::Str => p,
+                Ty::Char => Expr::call(Expr::raw("String"), "valueOf", vec![p]),
+                _ => Expr::Cast("Predicate<Character>".into(), Box::new(p)),
+            };
+            let s = ensure_simple(cx, recv, &recv_ty, line, out);
+            let rev = Expr::raw(if name.starts_with('r') { "true" } else { "false" });
+            match name {
+                "split_inclusive" => Expr::call(
+                    Expr::static_call("str_split", vec![s, pat, Expr::raw("true")]),
+                    "stream",
+                    vec![],
+                ),
+                "rsplit_terminator" => {
+                    let parts = super::std_map::push_local(
+                        cx,
+                        line,
+                        "List<String>".into(),
+                        Some(Expr::static_call("str_split", vec![s, pat, Expr::raw("false")])),
+                        out,
+                        "parts",
+                    );
+                    Expr::raw(format!(
+                        "({parts}.getLast().isEmpty() ? {parts}.subList(0, {parts}.size() - 1) : {parts}).reversed().stream()"
+                    ))
+                }
+                _ => {
+                    let mm = cx.fresh_param("m");
+                    cx.release_param(&mm);
+                    let piece = Expr::raw(format!("{}.substring({mm}[0], {mm}[1])", render(&s)));
+                    let item = if name == "rmatches" {
+                        piece
+                    } else {
+                        let item_ty = match cx.ty(&ast::Expr::MethodCallExpr(m.clone())) {
+                            Ty::Iter(t) => *t,
+                            t => t,
+                        };
+                        expr::tuple_expr(cx, &item_ty, vec![Expr::raw(format!("{mm}[0]")), piece])
+                    };
+                    let found = Expr::static_call("str_matches", vec![s, pat, rev]);
+                    Expr::call(
+                        Expr::call(found, "stream", vec![]),
+                        "map",
+                        vec![Expr::Lambda { params: vec![mm], body: LambdaBody::Expr(Box::new(item)) }],
+                    )
+                }
+            }
+        }
         // Non-overlapping occurrences of a literal pattern, or the chars a predicate accepts.
         (Ty::Str, "matches") => {
             let pat_ast = args[0].clone();
@@ -2343,6 +2416,12 @@ fn lower_adaptor_core(
         }
         "copied" | "cloned" | "into_iter" | "iter" | "by_ref" | "peekable" | "fuse" => src,
         "count" | "len" => Expr::Cast("int".into(), Box::new(call("count", vec![]))),
+        // `c.to_uppercase().to_string()`: the Display text of a char iterator.
+        "to_string" if item.strip_refs() == &Ty::Char => Expr::call(
+            call("map", vec![Expr::raw("String::valueOf")]),
+            "collect",
+            vec![Expr::raw("Collectors.joining()")],
+        ),
         "sum" | "product" => lower_sum_product(cx, m.syntax(), name == "product", src, ret_ty),
         "min" | "max" => {
             if item.is_primitive() || item.is_str() || name == "min" {

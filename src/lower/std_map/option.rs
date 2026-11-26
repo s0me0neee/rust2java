@@ -755,6 +755,7 @@ pub(super) fn is_unwrapped_source(cx: &Cx, recv_ast: &ast::Expr) -> bool {
             (text.ends_with("from_str_radix") && super::text::direct_parse(cx, recv_ast).is_some())
                 || text.ends_with("read_to_string")
                 || text.ends_with("from_utf8")
+                || text.ends_with("from_utf8_mut")
                 || text.ends_with("fs::write")
                 || text.ends_with("write")
                 || text.ends_with("File::open")

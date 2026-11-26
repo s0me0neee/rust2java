@@ -20,6 +20,7 @@ ptr_box_rec ptr_cell ptr_cell_more ptr_option_cells ptr_tree short_fmtd_debug
 short_iter_collect short_opt_chain short_opt_seq short_txt_to_digit std_collections
 std_mem std_option std_str std_vec text_conv text_edge_cases text_fnvalues text_methods
 text_split text_views_builders core_option_result core_iter_more core_cells_mem core_int_ops
+core_char_str
 
 # Unsigned values past the signed range print (and compare) as Java's signed types.
 coll_ord_keys fmt_unsigned_debug iter_custom_impls iter_pulled_rest num_conversions
