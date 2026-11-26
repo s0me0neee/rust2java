@@ -1172,11 +1172,21 @@ pub(super) fn erased_wrapper(cx: &Cx, e: &ast::Expr) -> Option<&'static str> {
     }
 }
 
-// A closure's own parameter (`take_if(|x| *x > 10)`): the lambda receives the value, so reads are fine.
+// A closure's own parameter (`take_if(|x| *x > 10)`), or a never-written binding out of a call's
+// result (`let (_, mid, _) = v.select_nth_unstable(i)`): it holds the value, so reads are fine.
 fn closure_param(cx: &Cx, e: &ast::Expr) -> bool {
     let Some(ip) = cx.local_of_path(e).and_then(|l| l.primary_source(cx.db).into_ident_pat()) else {
         return false;
     };
+    let from_call = ip
+        .syntax()
+        .ancestors()
+        .find_map(ast::LetStmt::cast)
+        .and_then(|l| l.initializer())
+        .is_some_and(|i| is_call_result(&i));
+    if from_call && !super::stmt::written_through(cx, &ip) {
+        return true;
+    }
     ip.syntax()
         .ancestors()
         .find_map(ast::Param::cast)

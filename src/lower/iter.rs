@@ -1087,9 +1087,10 @@ pub fn lower_iter_method(
         );
     }
     // `v.chunks_exact(k).remainder()`: the last `len % k` elements.
+    // `rchunks_exact`: the first `len % k`.
     if name == "remainder"
         && let ast::Expr::MethodCallExpr(chunks) = strip_parens(&recv_ast)
-        && method_name(&chunks) == "chunks_exact"
+        && matches!(method_name(&chunks).as_str(), "chunks_exact" | "rchunks_exact")
         && let (Some(v), Some(k)) = (chunks.receiver(), arg_exprs(&chunks).first().cloned())
     {
         let line = cx.line(m.syntax());
@@ -1099,6 +1100,9 @@ pub fn lower_iter_method(
         let k = lower_arg(cx, &k, out);
         let k = ensure_simple(cx, k, &Ty::Int(Int::Usize), line, out);
         let (vs, ks) = (render(&v), render(&k));
+        if method_name(&chunks) == "rchunks_exact" {
+            return Some(Expr::raw(format!("{vs}.subList(0, {vs}.size() % {ks})")));
+        }
         return Some(Expr::raw(format!(
             "{vs}.subList({vs}.size() - {vs}.size() % {ks}, {vs}.size())"
         )));
@@ -1247,6 +1251,73 @@ fn lower_source(
                 StmtKind::Expr(Expr::call(part, "clear", vec![])),
             ));
             Expr::call(Expr::name(tmp), "stream", vec![])
+        }
+        // `subList` views write through, so the `_mut` forms are the same.
+        (Ty::Vec(_), "chunks_mut" | "chunks_exact_mut") => {
+            let name = name.trim_end_matches("_mut");
+            let v = ensure_simple(cx, recv.clone(), &recv_ty, line, out);
+            let k = lower_arg(cx, &args[0], out);
+            let k = ensure_simple(cx, k, &Ty::Int(Int::Usize), line, out);
+            let i = cx.fresh("i");
+            let (vs, ks) = (render(&v), render(&k));
+            let count = if name == "chunks" { format!("({vs}.size() + {ks} - 1) / {ks}") } else { format!("{vs}.size() / {ks}") };
+            Expr::raw(format!(
+                "IntStream.range(0, {count}).mapToObj({i} -> {vs}.subList({i} * {ks}, Math.min({i} * {ks} + {ks}, {vs}.size())))"
+            ))
+        }
+        (Ty::Vec(_), "array_windows") => {
+            let Some(n) = super::std_map::coll::const_arg(m) else {
+                return cx.unsupported(m.syntax(), "array_windows without a `::<N>` length");
+            };
+            let v = ensure_simple(cx, recv.clone(), &recv_ty, line, out);
+            let i = cx.fresh("i");
+            let vs = render(&v);
+            Expr::raw(format!("IntStream.rangeClosed(0, {vs}.size() - {n}).mapToObj({i} -> {vs}.subList({i}, {i} + {n}))"))
+        }
+        (Ty::Vec(_), "rchunks" | "rchunks_mut" | "rchunks_exact" | "rchunks_exact_mut") => {
+            super::fmt::file_helper(cx, super::std_map::coll::SLICE_VIEW_HELPERS.into());
+            let k = lower_arg(cx, &args[0], out);
+            let exact = Expr::raw(if name.contains("exact") { "true" } else { "false" });
+            Expr::call(Expr::static_call("rchunks", vec![recv, k, exact]), "stream", vec![])
+        }
+        (Ty::Vec(_), "chunk_by" | "chunk_by_mut") => {
+            super::fmt::file_helper(cx, super::std_map::coll::SLICE_VIEW_HELPERS.into());
+            let f = lower_arg(cx, &args[0], out);
+            Expr::call(Expr::static_call("chunk_by", vec![recv, f]), "stream", vec![])
+        }
+        // Splits at the items a predicate picks: `split`, `splitn`, `rsplit`, `rsplitn`,
+        // `split_inclusive`, and their `_mut` forms.
+        (Ty::Vec(_), "split" | "split_mut" | "splitn" | "splitn_mut" | "rsplit" | "rsplit_mut" | "rsplitn" | "rsplitn_mut"
+            | "split_inclusive" | "split_inclusive_mut") => {
+            super::fmt::file_helper(cx, super::std_map::coll::SLICE_VIEW_HELPERS.into());
+            let base = name.trim_end_matches("_mut");
+            let (n, p) = if base.ends_with('n') {
+                (lower_arg(cx, &args[0], out), lower_arg(cx, &args[1], out))
+            } else {
+                (Expr::raw("-1"), lower_arg(cx, &args[0], out))
+            };
+            let rev = Expr::raw(if base.starts_with('r') { "true" } else { "false" });
+            let inclusive = Expr::raw(if base == "split_inclusive" { "true" } else { "false" });
+            Expr::call(Expr::static_call("slice_split", vec![recv, p, n, rev, inclusive]), "stream", vec![])
+        }
+        // `[u8]::escape_ascii` yields the bytes of the escaped text.
+        (Ty::Vec(_), "escape_ascii") => {
+            super::fmt::file_helper(cx, super::std_map::coll::BYTES_HELPERS.into());
+            Expr::call(Expr::call(Expr::static_call("esc_ascii", vec![recv]), "chars", vec![]), "boxed", vec![])
+        }
+        (Ty::Vec(_), "utf8_chunks") => {
+            super::fmt::file_helper(cx, super::std_map::coll::BYTES_HELPERS.into());
+            let chunks = Expr::call(Expr::static_call("utf8_chunks", vec![recv]), "stream", vec![]);
+            // Simple mode names the pair type: rebuild each entry as that record.
+            let parts = [Ty::Str, Ty::Vec(Box::new(Ty::Int(Int::U8)))];
+            match crate::tuples::named(&parts) {
+                Some(n) => {
+                    let e = cx.fresh_param("e");
+                    cx.release_param(&e);
+                    Expr::call(chunks, "map", vec![Expr::raw(format!("{e} -> new {}({e}.getKey(), {e}.getValue())", n.name))])
+                }
+                None => chunks,
+            }
         }
         (Ty::Vec(_), "windows" | "chunks" | "chunks_exact") => {
             let v = ensure_simple(cx, recv.clone(), &recv_ty, line, out);
@@ -1906,7 +1977,7 @@ int n = Math.min(a.size(), b.size()); \
 for (int i = 0; i < n; i++) { Integer r = c.apply(a.get(i), b.get(i)); if (r == null || r != 0) return r; } \
 return Integer.compare(a.size(), b.size()); }";
 
-const IS_SORTED: &str = "static <T> boolean is_sorted(List<T> v, BiPredicate<T, T> le) { \
+pub(crate) const IS_SORTED: &str = "static <T> boolean is_sorted(List<T> v, BiPredicate<T, T> le) { \
 for (int i = 1; i < v.size(); i++) if (!le.test(v.get(i - 1), v.get(i))) return false; \
 return true; }";
 
@@ -2422,6 +2493,16 @@ fn lower_adaptor_core(
             "collect",
             vec![Expr::raw("Collectors.joining()")],
         ),
+        // `escape_ascii().to_string()`: its bytes are ASCII text.
+        "to_string" if item.strip_refs() == &Ty::Int(Int::U8) => {
+            let b = cx.fresh_param("b");
+            cx.release_param(&b);
+            Expr::call(
+                call("map", vec![Expr::raw(format!("{b} -> String.valueOf((char) (int) {b})"))]),
+                "collect",
+                vec![Expr::raw("Collectors.joining()")],
+            )
+        }
         "sum" | "product" => lower_sum_product(cx, m.syntax(), name == "product", src, ret_ty),
         "min" | "max" => {
             if item.is_primitive() || item.is_str() || name == "min" {

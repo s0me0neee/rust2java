@@ -656,7 +656,7 @@ fn lower_slot_let(
 
 // Whether a `&mut` binding may write through: assigned through, given a mutating method, or
 // passed on to a call (conservatively). Format macros only read.
-fn written_through(cx: &Cx, ip: &ast::IdentPat) -> bool {
+pub(super) fn written_through(cx: &Cx, ip: &ast::IdentPat) -> bool {
     let Some(local) = cx.sema.to_def(ip) else { return true };
     let Some(scope) = cx.enclosing_fn(ip.syntax()) else { return true };
     const MUTATING: &[&str] = &[

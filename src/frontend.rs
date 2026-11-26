@@ -498,6 +498,8 @@ pub fn convert(sema: &Semantics<'_, RootDatabase>, from: Module, ty: &ra_ap_hir:
                 "BinaryHeap" => return Ty::Heap(arg(0)),
                 // A `OnceCell` is an `Optional` written at most once.
                 "Option" | "OnceCell" => return Ty::Option(arg(0)),
+                // `[u8]::utf8_chunks` items: the valid text and the invalid bytes after it.
+                "Utf8Chunk" => return Ty::Tuple(vec![Ty::Str, Ty::Vec(Box::new(Ty::Int(crate::ty::Int::U8)))]),
                 "Result" => return Ty::Result(arg(0), arg(1)),
                 "Box" | "Rc" | "Arc" | "Weak" | "RefCell" | "Cell" | "Reverse" | "Wrapping"
                 | "Ref" | "RefMut" | "Pin" | "ManuallyDrop" => {

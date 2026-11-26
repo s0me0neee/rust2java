@@ -892,10 +892,20 @@ fn format_one(
     counts: &Counts,
     out: &mut Vec<Stmt>,
 ) -> Expr {
-    // Only the char iterators of case maps and escapes implement Display: their text.
-    if spec.kind.is_empty() && matches!(ty.strip_refs(), Ty::Iter(t) if **t == Ty::Char) {
+    // Only the char iterators of case maps and escapes, and `escape_ascii`'s bytes, implement
+    // Display: their text.
+    if spec.kind.is_empty()
+        && matches!(ty.strip_refs(), Ty::Iter(t) if **t == Ty::Char || **t == Ty::Int(crate::ty::Int::U8))
+    {
+        let to_text = if matches!(ty.strip_refs(), Ty::Iter(t) if **t == Ty::Char) {
+            "String::valueOf".to_string()
+        } else {
+            let b = cx.fresh_param("b");
+            cx.release_param(&b);
+            format!("{b} -> String.valueOf((char) (int) {b})")
+        };
         let text = Expr::call(
-            Expr::call(v, "map", vec![Expr::raw("String::valueOf")]),
+            Expr::call(v, "map", vec![Expr::raw(to_text)]),
             "collect",
             vec![Expr::raw("Collectors.joining()")],
         );

@@ -1333,6 +1333,14 @@ pub fn lower_std_method(
     {
         return e;
     }
+    if let Some(i) = match key {
+        "Utf8Chunk::valid" => Some(0),
+        "Utf8Chunk::invalid" => Some(1),
+        _ => None,
+    } {
+        let parts = [Ty::Str, Ty::Vec(Box::new(Ty::Int(Int::U8)))];
+        return Expr::call(recv, crate::tuples::accessor(&parts, i), vec![]);
+    }
 
     // `impl Deref for W { type Target = T; }`: method calls forward to `w.deref()`.
     let t = recv_ty.strip_refs().clone();

@@ -1155,6 +1155,79 @@ pub fn lower_entry_assign(
 
 // ---- Vec / slices ----------------------------------------------------------------------------
 
+// Slice views are `subList`s, so writes through them reach the list like Rust's `&mut [T]`.
+pub(crate) const SLICE_VIEW_HELPERS: &str = "static <T> List<List<T>> slice_split(List<T> v, Predicate<T> p, int n, boolean rev, boolean inclusive) { \
+List<List<T>> out = new ArrayList<>(); if (n == 0) return out; \
+if (inclusive) { int start = 0; for (int i = 0; i < v.size(); i++) if (p.test(v.get(i))) { out.add(v.subList(start, i + 1)); start = i + 1; } \
+if (start < v.size()) out.add(v.subList(start, v.size())); return out; } \
+if (!rev) { int start = 0; for (int i = 0; i < v.size() && (n < 0 || out.size() < n - 1); i++) if (p.test(v.get(i))) { out.add(v.subList(start, i)); start = i + 1; } \
+out.add(v.subList(start, v.size())); return out; } \
+int end = v.size(); for (int i = v.size() - 1; i >= 0 && (n < 0 || out.size() < n - 1); i--) if (p.test(v.get(i))) { out.add(v.subList(i + 1, end)); end = i; } \
+out.add(v.subList(0, end)); return out; } \
+static <T> List<List<T>> rchunks(List<T> v, int k, boolean exact) { \
+List<List<T>> out = new ArrayList<>(); int end = v.size(); for (; end >= k; end -= k) out.add(v.subList(end - k, end)); \
+if (!exact && end > 0) out.add(v.subList(0, end)); return out; } \
+static <T> List<List<T>> chunks_of(List<T> v, int from, int k) { \
+List<List<T>> out = new ArrayList<>(); for (int i = from; i + k <= v.size(); i += k) out.add(v.subList(i, i + k)); return out; } \
+static <T> List<List<T>> chunk_by(List<T> v, BiPredicate<T, T> same) { \
+List<List<T>> out = new ArrayList<>(); int start = 0; \
+for (int i = 1; i <= v.size(); i++) if (i == v.size() || !same.test(v.get(i - 1), v.get(i))) { if (i > start) out.add(v.subList(start, i)); start = i; } return out; } \
+static <T> List<T> flat_view(List<List<T>> v) { int k = v.isEmpty() ? 0 : v.get(0).size(); return new AbstractList<T>() { \
+public T get(int i) { return v.get(i / k).get(i % k); } public T set(int i, T x) { return v.get(i / k).set(i % k, x); } \
+public int size() { return v.size() * k; } }; }";
+
+pub(crate) const SLICE_EDIT_HELPERS: &str = "static <T> void fill_with(List<T> v, Supplier<T> f) { for (int i = 0; i < v.size(); i++) v.set(i, f.get()); } \
+static <T> void copy_within(List<T> v, int from, int to, int dest) { List<T> part = new ArrayList<>(v.subList(from, to)); for (int k = 0; k < part.size(); k++) v.set(dest + k, part.get(k)); } \
+static <T> void swap_with_slice(List<T> a, List<T> b) { for (int i = 0; i < a.size(); i++) { T t = a.get(i); a.set(i, b.get(i)); b.set(i, t); } } \
+@SuppressWarnings(\"unchecked\") static <T> List<T> slice_join(List<List<T>> v, Object sep) { \
+List<T> out = new ArrayList<>(); for (int i = 0; i < v.size(); i++) { \
+if (i > 0) { if (sep instanceof List<?> s) out.addAll((List<T>) s); else out.add((T) sep); } out.addAll(v.get(i)); } return out; } \
+static <T> Optional<List<T>> slice_strip(List<T> v, List<T> pre, List<T> suf) { \
+int p = pre.size(), s = suf.size(); \
+if (v.size() < p + s || !v.subList(0, p).equals(pre) || !v.subList(v.size() - s, v.size()).equals(suf)) return Optional.empty(); \
+return Optional.of(v.subList(p, v.size() - s)); }";
+
+pub(crate) const BYTES_HELPERS: &str = "static List<Integer> trim_ascii_bytes(List<Integer> b, boolean start, boolean end) { \
+int a = 0, z = b.size(); while (start && a < z && \" \\t\\n\\f\\r\".indexOf(b.get(a)) >= 0) a++; \
+while (end && z > a && \" \\t\\n\\f\\r\".indexOf(b.get(z - 1)) >= 0) z--; return b.subList(a, z); } \
+static String esc_ascii(List<Integer> b) { StringBuilder s = new StringBuilder(); \
+for (int x : b) { int c = x & 0xFF; switch (c) { \
+case '\\t' -> s.append(\"\\\\t\"); case '\\r' -> s.append(\"\\\\r\"); case '\\n' -> s.append(\"\\\\n\"); \
+case '\\\\' -> s.append(\"\\\\\\\\\"); case '\\'' -> s.append(\"\\\\'\"); case '\"' -> s.append(\"\\\\\\\"\"); \
+default -> { if (c >= 0x20 && c < 0x7f) s.append((char) c); else s.append(String.format(\"\\\\x%02x\", c)); } } } return s.toString(); } \
+static List<Map.Entry<String, List<Integer>>> utf8_chunks(List<Integer> b) { \
+List<Map.Entry<String, List<Integer>>> out = new ArrayList<>(); byte[] a = new byte[b.size()]; for (int k = 0; k < a.length; k++) a[k] = (byte) (int) b.get(k); \
+int i = 0, n = a.length; while (i < n) { int start = i, bad = 0; \
+while (i < n) { int c = a[i] & 0xFF; int len = c < 0x80 ? 1 : c >= 0xC2 && c <= 0xDF ? 2 : c >= 0xE0 && c <= 0xEF ? 3 : c >= 0xF0 && c <= 0xF4 ? 4 : 0; \
+int j = 1; boolean ok = len > 0; \
+for (; ok && j < len; j++) { if (i + j >= n) { ok = false; break; } int cc = a[i + j] & 0xFF, lo = 0x80, hi = 0xBF; \
+if (j == 1) { if (c == 0xE0) lo = 0xA0; if (c == 0xED) hi = 0x9F; if (c == 0xF0) lo = 0x90; if (c == 0xF4) hi = 0x8F; } \
+if (cc < lo || cc > hi) { ok = false; break; } } \
+if (ok) { i += len; } else { bad = Math.max(1, j); break; } } \
+String valid = new String(a, start, i - start, java.nio.charset.StandardCharsets.UTF_8); \
+out.add(Map.entry(valid, new ArrayList<>(b.subList(i, Math.min(n, i + bad))))); i = Math.min(n, i + bad); } return out; }";
+
+// `a..b` / `a..=b` / `..` over list `v`, as Java `[from, to)` bounds.
+fn range_ends(cx: &mut Cx, r: &ast::RangeExpr, v: &Expr, out: &mut Vec<Stmt>) -> (Expr, Expr) {
+    use ast::RangeItem;
+    let from = r.start().map(|s| expr::lower_expr(cx, &s, out)).unwrap_or_else(|| Expr::raw("0"));
+    let to = match r.end() {
+        Some(e) => {
+            let e = expr::lower_expr(cx, &e, out);
+            if r.op_kind() == Some(ast::RangeOp::Inclusive) { Expr::bin(e, "+", Expr::raw("1")) } else { e }
+        }
+        None => Expr::call(v.clone(), "size", vec![]),
+    };
+    (from, to)
+}
+
+// `N` of a const-generic slice method: `v.first_chunk::<2>()`.
+pub(crate) fn const_arg(m: &ast::MethodCallExpr) -> Option<String> {
+    use ra_ap_syntax::ast::HasGenericArgs;
+    let arg = m.generic_arg_list()?.generic_args().next()?;
+    Some(arg.syntax().text().to_string().trim_matches(|c| c == '{' || c == '}' || c == ' ').to_string())
+}
+
 pub(super) fn lower_vec_method(
     cx: &mut Cx,
     m: &ast::MethodCallExpr,
@@ -1221,7 +1294,7 @@ pub(super) fn lower_vec_method(
             vec![recv, b0, b1],
         )),
         "clear" => Some(Expr::call(recv, "clear", vec![])),
-        "split_off" => {
+        "split_off" if !matches!(arg_asts.first().map(strip_parens), Some(ast::Expr::RangeExpr(_))) => {
             let p = simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out);
             let n = simple(cx, b0, &Ty::Int(Int::Usize), line, out);
             let (ps, ns) = (render(&p), render(&n));
@@ -1287,7 +1360,8 @@ pub(super) fn lower_vec_method(
             Some(Expr::call(recv, "sort", vec![Expr::raw(cmp)]))
         }
         "sort_by" | "sort_unstable_by" => Some(Expr::call(recv, "sort", vec![b0])),
-        "sort_by_key" | "sort_unstable_by_key" => {
+        // Caching the keys only saves work; the order is `sort_by_key`'s.
+        "sort_by_key" | "sort_unstable_by_key" | "sort_by_cached_key" => {
             let key_ty = match arg_asts.first() {
                 Some(ast::Expr::ClosureExpr(c)) => c.body().map(|b| cx.ty(&b)),
                 _ => None,
@@ -1331,7 +1405,6 @@ pub(super) fn lower_vec_method(
             let f = Expr::call(Expr::raw("Comparator"), cmp, vec![typed_lambda(b0, elem)]);
             Some(Expr::call(recv, "sort", vec![f]))
         }
-        "sort_by_cached_key" => Some(Expr::call(Expr::raw("Comparator"), "comparing", vec![b0])),
         "reverse" => Some(Expr::call(Expr::raw("Collections"), "reverse", vec![recv])),
         "contains" => Some(Expr::call(recv, "contains", vec![b0])),
         // Slice prefix/suffix: the same-length sublist compared with `equals`.
@@ -1504,22 +1577,279 @@ pub(super) fn lower_vec_method(
         {
             Some(Expr::call(recv, "sort", vec![Expr::raw("null")]))
         }
-        // The slice is partitioned by the predicate, so the point is the length of its true prefix.
+        // Sorted in full, then `(left, nth, right)` with the halves as views.
+        "select_nth_unstable" | "select_nth_unstable_by" | "select_nth_unstable_by_key" => {
+            let v = simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out);
+            let i = simple(cx, b0, &Ty::Int(Int::Usize), line, out);
+            let cmp = match name {
+                "select_nth_unstable" => Expr::raw("null"),
+                "select_nth_unstable_by" => Expr::Cast(format!("Comparator<{}>", elem.boxed()), Box::new(b1.clone())),
+                _ => {
+                    let key = arg_asts.get(1).and_then(|a| match strip_parens(a) {
+                        ast::Expr::ClosureExpr(c) => c.body().map(|b| cx.ty(&b)),
+                        _ => None,
+                    });
+                    let key = key.unwrap_or(Ty::Other("?".into()));
+                    let f = Expr::Cast(format!("Function<{}, {}>", elem.boxed(), key.boxed()), Box::new(b1.clone()));
+                    Expr::raw(format!("Comparator.comparing({})", render(&f)))
+                }
+            };
+            push_raw(out, line, format!("{}.sort({});", render(&v), render(&cmp)));
+            let (vs, is) = (render(&v), render(&i));
+            let parts = vec![
+                Expr::raw(format!("{vs}.subList(0, {is})")),
+                Expr::raw(format!("{vs}.get({is})")),
+                Expr::raw(format!("{vs}.subList({is} + 1, {vs}.size())")),
+            ];
+            Some(expr::tuple_expr(cx, ret, parts))
+        }
         // `subList` views write through, like the two `&mut` halves.
-        "split_at" | "split_at_mut" => {
+        "split_at" | "split_at_mut" | "split_at_checked" | "split_at_mut_checked" => {
             let recv = simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out);
             let i = simple(cx, b0, &Ty::Int(Int::Usize), line, out);
             let a = Expr::call(recv.clone(), "subList", vec![Expr::raw("0"), i.clone()]);
             let b = Expr::call(
                 recv.clone(),
                 "subList",
-                vec![i, Expr::call(recv, "size", vec![])],
+                vec![i.clone(), Expr::call(recv.clone(), "size", vec![])],
             );
-            Some(Expr::call(Expr::raw("Map"), "entry", vec![a, b]))
+            let pair_ty = match ret.strip_refs() {
+                Ty::Option(t) => (**t).clone(),
+                t => t.clone(),
+            };
+            let pair = expr::tuple_expr(cx, &pair_ty, vec![a, b]);
+            if !name.ends_with("_checked") {
+                return Some(pair);
+            }
+            let ok = Expr::bin(i, "<=", Expr::call(recv, "size", vec![]));
+            Some(conditional(ok, opt_of(pair), opt_empty(Some(&pair_ty))))
         }
-        "split_first" | "split_last" => {
+        // Const-generic views: `first_chunk::<N>()`, `as_array::<N>()`, `as_chunks::<N>()`.
+        "first_chunk" | "first_chunk_mut" | "last_chunk" | "last_chunk_mut" | "split_first_chunk"
+        | "split_first_chunk_mut" | "split_last_chunk" | "split_last_chunk_mut" | "as_array" | "as_mut_array"
+        | "as_chunks" | "as_chunks_mut" | "as_rchunks" | "as_rchunks_mut" => {
+            let Some(n) = const_arg(m) else {
+                return Some(cx.unsupported(m.syntax(), &format!("`{name}` without a `::<N>` length")));
+            };
+            let v = simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out);
+            let vs = render(&v);
+            let sub = |a: String, b: String| Expr::raw(format!("{vs}.subList({a}, {b})"));
+            let len = format!("{vs}.size()");
+            let inner = match ret.strip_refs() {
+                Ty::Option(t) => (**t).clone(),
+                t => t.clone(),
+            };
+            let (cond, value) = match name.trim_end_matches("_mut") {
+                "first_chunk" => (format!("{len} >= {n}"), sub("0".into(), n.clone())),
+                "last_chunk" => (format!("{len} >= {n}"), sub(format!("{len} - {n}"), len.clone())),
+                "split_first_chunk" => (
+                    format!("{len} >= {n}"),
+                    expr::tuple_expr(cx, &inner, vec![sub("0".into(), n.clone()), sub(n.clone(), len.clone())]),
+                ),
+                "split_last_chunk" => (
+                    format!("{len} >= {n}"),
+                    expr::tuple_expr(cx, &inner, vec![sub("0".into(), format!("{len} - {n}")), sub(format!("{len} - {n}"), len.clone())]),
+                ),
+                "as_array" | "as_mut_array" => (format!("{len} == {n}"), v.clone()),
+                "as_chunks" => {
+                    super::super::fmt::file_helper(cx, SLICE_VIEW_HELPERS.into());
+                    let chunks = Expr::static_call("chunks_of", vec![v.clone(), Expr::raw("0"), Expr::raw(n.clone())]);
+                    let rest = sub(format!("{len} - {len} % {n}"), len.clone());
+                    return Some(expr::tuple_expr(cx, ret, vec![chunks, rest]));
+                }
+                _ => {
+                    super::super::fmt::file_helper(cx, SLICE_VIEW_HELPERS.into());
+                    let head = sub("0".into(), format!("{len} % {n}"));
+                    let chunks = Expr::static_call("chunks_of", vec![v.clone(), Expr::raw(format!("{len} % {n}")), Expr::raw(n.clone())]);
+                    return Some(expr::tuple_expr(cx, ret, vec![head, chunks]));
+                }
+            };
+            Some(conditional(Expr::raw(cond), opt_of(value), opt_empty(Some(&inner))))
+        }
+        // `s.split_off_first()` on a `&[T]` binding: the item, and `s` shrinks past it.
+        "split_off_first" | "split_off_first_mut" | "split_off_last" | "split_off_last_mut" => {
+            let v = simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out);
+            let vs = render(&v);
+            let first = name.starts_with("split_off_first");
+            let item = if first { format!("{vs}.getFirst()") } else { format!("{vs}.getLast()") };
+            let taken = push_local(
+                cx,
+                line,
+                format!("Optional<{}>", elem.boxed()),
+                Some(Expr::raw(format!("{vs}.isEmpty() ? Optional.empty() : Optional.of({item})"))),
+                out,
+                "taken",
+            );
+            let rest = if first { format!("{vs}.subList(1, {vs}.size())") } else { format!("{vs}.subList(0, {vs}.size() - 1)") };
+            let mut shrink = Vec::new();
+            let assign = expr::place_assign(cx, _recv_ast, "=", Expr::raw(rest), &mut shrink);
+            out.extend(shrink);
+            push_raw(out, line, format!("if (!{vs}.isEmpty()) {};", render(&assign)));
+            Some(Expr::name(taken))
+        }
+        // `s.split_off(..k)` / `s.split_off(k..)` on a slice binding (a `Vec`'s takes an index).
+        "split_off" | "split_off_mut" if matches!(arg_asts.first().map(strip_parens), Some(ast::Expr::RangeExpr(_))) => {
+            use ast::RangeItem;
+            let Some(ast::Expr::RangeExpr(r)) = arg_asts.first().map(strip_parens) else { return None };
+            let v = simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out);
+            let vs = render(&v);
+            let (bound, front) = match (r.start(), r.end()) {
+                (None, Some(e)) => (expr::lower_expr(cx, &e, out), true),
+                (Some(s), None) => (expr::lower_expr(cx, &s, out), false),
+                _ => return Some(cx.unsupported(m.syntax(), "split_off with a two-sided range")),
+            };
+            let k = render(&simple(cx, bound, &Ty::Int(Int::Usize), line, out));
+            let (removed, kept) = if front {
+                (format!("{vs}.subList(0, {k})"), format!("{vs}.subList({k}, {vs}.size())"))
+            } else {
+                (format!("{vs}.subList({k}, {vs}.size())"), format!("{vs}.subList(0, {k})"))
+            };
+            let taken = push_local(
+                cx,
+                line,
+                format!("Optional<List<{}>>", elem.boxed()),
+                Some(Expr::raw(format!("{k} <= {vs}.size() ? Optional.of({removed}) : Optional.empty()"))),
+                out,
+                "taken",
+            );
+            let mut shrink = Vec::new();
+            let assign = expr::place_assign(cx, _recv_ast, "=", Expr::raw(kept), &mut shrink);
+            out.extend(shrink);
+            push_raw(out, line, format!("if ({taken}.isPresent()) {};", render(&assign)));
+            Some(Expr::name(taken))
+        }
+        // `[i, j]` distinct and in range: the items (shared objects, so writes reach the list).
+        "get_disjoint_mut" => {
+            cx.needs_result = true;
+            let v = render(&simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out));
+            let idx = render(&simple(cx, b0, &Ty::Vec(Box::new(Ty::Int(Int::Usize))), line, out));
+            let i = cx.fresh_param("i");
+            cx.release_param(&i);
+            let ok_ty = match ret.strip_refs() {
+                Ty::Result(ok, _) => ok.boxed(),
+                _ => "Object".into(),
+            };
+            Some(Expr::raw(format!(
+                "({idx}.stream().allMatch({i} -> {i} < {v}.size()) && {idx}.stream().distinct().count() == {idx}.size() ? new Ok<{ok_ty}, String>({idx}.stream().map({v}::get).collect(Collectors.toCollection(ArrayList::new))) : new Err<{ok_ty}, String>(\"GetDisjointMutError\"))"
+            )))
+        }
+        // A writable view of `[[T; N]]` as `[T]`.
+        "as_flattened" | "as_flattened_mut" => {
+            cx.import("java.util.AbstractList");
+            super::super::fmt::file_helper(cx, SLICE_VIEW_HELPERS.into());
+            Some(Expr::static_call("flat_view", vec![recv]))
+        }
+        "strip_prefix" | "strip_suffix" | "strip_circumfix" | "trim_prefix" | "trim_suffix" => {
+            super::super::fmt::file_helper(cx, SLICE_EDIT_HELPERS.into());
+            let none = Expr::raw("List.of()");
+            let (pre, suf) = match name {
+                "strip_prefix" | "trim_prefix" => (b0.clone(), none),
+                "strip_suffix" | "trim_suffix" => (none, b0.clone()),
+                _ => (b0.clone(), b1.clone()),
+            };
+            if name.starts_with("trim_") {
+                let v = simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out);
+                let stripped = Expr::static_call("slice_strip", vec![v.clone(), pre, suf]);
+                return Some(Expr::call(stripped, "orElse", vec![v]));
+            }
+            Some(Expr::static_call("slice_strip", vec![recv, pre, suf]))
+        }
+        "is_sorted" | "is_sorted_by" | "is_sorted_by_key" => {
+            super::super::fmt::file_helper(cx, crate::lower::iter::IS_SORTED.into());
+            let (x, y) = (cx.fresh_param("x"), cx.fresh_param("y"));
+            cx.release_param(&x);
+            cx.release_param(&y);
+            let le = |cx: &mut Cx, t: &Ty| {
+                let b = t.boxed();
+                match t.strip_refs() {
+                    t if t.is_primitive() => format!("({b} {x}, {b} {y}) -> {x} <= {y}"),
+                    t => format!("({b} {x}, {b} {y}) -> {} <= 0", compare_call(cx, t, &x, &y)),
+                }
+            };
+            Some(match name {
+                "is_sorted" => Expr::static_call("is_sorted", vec![recv, Expr::raw(le(cx, elem))]),
+                "is_sorted_by" => Expr::static_call("is_sorted", vec![recv, b0]),
+                _ => {
+                    let key = arg_asts.first().and_then(|a| match strip_parens(a) {
+                        ast::Expr::ClosureExpr(c) => c.body().map(|b| cx.ty(&b)),
+                        _ => None,
+                    });
+                    let key = key.unwrap_or(Ty::Other("?".into()));
+                    let keys = Expr::call(
+                        Expr::call(Expr::call(recv, "stream", vec![]), &format!("<{}>map", key.boxed()), vec![b0]),
+                        "toList",
+                        vec![],
+                    );
+                    Expr::static_call("is_sorted", vec![keys, Expr::raw(le(cx, &key))])
+                }
+            })
+        }
+        "fill_with" | "swap_with_slice" => {
+            super::super::fmt::file_helper(cx, SLICE_EDIT_HELPERS.into());
+            Some(Expr::static_call(name, vec![recv, b0]))
+        }
+        "copy_within" => {
+            super::super::fmt::file_helper(cx, SLICE_EDIT_HELPERS.into());
+            let Some(ast::Expr::RangeExpr(r)) = arg_asts.first().map(strip_parens) else {
+                return Some(cx.unsupported(m.syntax(), "copy_within without a range literal"));
+            };
+            let v = simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out);
+            let (from, to) = range_ends(cx, &r, &v, out);
+            Some(Expr::static_call("copy_within", vec![v, from, to, b1.clone()]))
+        }
+        "repeat" => {
+            let copies = Expr::call(Expr::raw("Collections"), "nCopies", vec![b0, recv]);
+            Some(Expr::call(
+                Expr::call(Expr::call(copies, "stream", vec![]), "flatMap", vec![Expr::raw("List::stream")]),
+                "collect",
+                vec![Expr::raw("Collectors.toCollection(ArrayList::new)")],
+            ))
+        }
+        // `[[1], [2, 3]].connect(&0)`: the lists with a separator item (or items) between them.
+        "connect" | "join" if matches!(elem.strip_refs(), Ty::Vec(_)) => {
+            super::super::fmt::file_helper(cx, SLICE_EDIT_HELPERS.into());
+            Some(Expr::static_call("slice_join", vec![recv, b0]))
+        }
+        "connect" => lower_vec_method(cx, m, _recv_ast, recv, elem, args, arg_asts, "join", ret, line, out),
+        "into_vec" => Some(recv),
+        // `[u8]` as ASCII text.
+        "is_ascii" => {
+            let b = cx.fresh_param("b");
+            cx.release_param(&b);
+            Some(Expr::call(Expr::call(recv, "stream", vec![]), "allMatch", vec![Expr::raw(format!("{b} -> {b} < 128"))]))
+        }
+        "eq_ignore_ascii_case" | "to_ascii_uppercase" | "to_ascii_lowercase" | "make_ascii_uppercase" | "make_ascii_lowercase" => {
+            super::super::fmt::file_helper(cx, super::text::ASCII_CHAR_HELPERS.into());
+            let b = cx.fresh_param("b");
+            cx.release_param(&b);
+            let f = if name.ends_with("uppercase") { "ascii_upper" } else { "ascii_lower" };
+            Some(match name {
+                "eq_ignore_ascii_case" => {
+                    let lower = |e: Expr| {
+                        Expr::call(Expr::call(e, "stream", vec![]), "map", vec![Expr::raw(format!("{b} -> ascii_lower({b})"))])
+                    };
+                    Expr::call(Expr::call(lower(recv), "toList", vec![]), "equals", vec![Expr::call(lower(b0), "toList", vec![])])
+                }
+                n if n.starts_with("make_") => Expr::call(recv, "replaceAll", vec![Expr::raw(format!("{b} -> {f}({b})"))]),
+                _ => Expr::call(
+                    Expr::call(Expr::call(recv, "stream", vec![]), "map", vec![Expr::raw(format!("{b} -> {f}({b})"))]),
+                    "collect",
+                    vec![Expr::raw("Collectors.toCollection(ArrayList::new)")],
+                ),
+            })
+        }
+        "trim_ascii" | "trim_ascii_start" | "trim_ascii_end" => {
+            super::super::fmt::file_helper(cx, BYTES_HELPERS.into());
+            let (s, e) = match name {
+                "trim_ascii" => ("true", "true"),
+                "trim_ascii_start" => ("true", "false"),
+                _ => ("false", "true"),
+            };
+            Some(Expr::static_call("trim_ascii_bytes", vec![recv, Expr::raw(s), Expr::raw(e)]))
+        }
+        "split_first" | "split_last" | "split_first_mut" | "split_last_mut" => {
             let recv = simple(cx, recv, &Ty::Vec(Box::new(elem.clone())), line, out);
-            let last = name == "split_last";
+            let last = name.starts_with("split_last");
             let size = Expr::call(recv.clone(), "size", vec![]);
             let item = Expr::call(
                 recv.clone(),
@@ -1533,9 +1863,14 @@ pub(super) fn lower_vec_method(
                 size
             };
             let rest = Expr::call(recv.clone(), "subList", vec![start, end]);
+            let pair_ty = match ret.strip_refs() {
+                Ty::Option(t) => (**t).clone(),
+                t => t.clone(),
+            };
+            let pair = expr::tuple_expr(cx, &pair_ty, vec![item, rest]);
             Some(optional(
                 Expr::Unary("!", Box::new(Expr::call(recv, "isEmpty", vec![]))),
-                Expr::call(Expr::raw("Map"), "entry", vec![item, rest]),
+                pair,
                 ret,
             ))
         }
@@ -2335,6 +2670,10 @@ fn binary_search_loop(
         }
     };
     let cmp = match key {
+        // Simple mode has no comparator for ints: a primitive key compares statically.
+        Some((k, kty)) if crate::mode::simple() && kty.strip_refs().is_primitive() => {
+            Expr::call(Expr::raw(kty.strip_refs().boxed()), "compare", vec![applied, k])
+        }
         Some((k, kty)) => ord_compare(cx, &kty, applied, k),
         None => applied,
     };
